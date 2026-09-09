@@ -334,25 +334,40 @@ def adapter_borg(t, defaults, now):
 def adapter_kernel_errors(t, defaults, now):
     """Scan the recent kernel log for disk I/O / link-reset / HBA-storm errors. This is the ONLY
     durable evidence when ZFS self-heals a transient (0B resilver, counters cleared) - exactly the
-    2026-09-08 sdi/tank event. Needs journal read access (adm group on the host, or a mounted
-    /var/log/journal in a container)."""
+    2026-09-08 sdi/tank event. Source: `journalctl -k` if available (host agent), else a plain-text
+    kernel log (rsyslog /var/log/kern.log or /var/log/syslog) - mount it ro into a container."""
     win = int(t.get("window_h", 24))
+    lines, source = None, None
+    # 1) journalctl (host agent, or a container with journalctl + /var/log/journal mounted)
     rc, out, err = run(["journalctl", "-k", "--since", f"-{win}h", "--no-pager"], timeout=60)
-    if rc != 0 or (not out and err):
+    if rc == 0 and out:
+        lines, source = out.splitlines(), f"journalctl -k (last {win}h)"
+    else:
+        # 2) plain-text kernel log fallback (rsyslog) - mount it ro; container root reads it.
+        cands = ([t["log_file"]] if t.get("log_file") else []) + ["/var/log/kern.log", "/var/log/syslog"]
+        for f in cands:
+            if f and os.path.isfile(f):
+                try:
+                    lines = Path(f).read_text(errors="replace").splitlines()[-20000:]
+                    source = f"{f} (current file)"
+                    break
+                except OSError:
+                    continue
+    if lines is None:
         return [dict(severity="UNKNOWN",
-                     last_error="cannot read kernel journal (need adm group / mount /var/log/journal)")]
+                     last_error="no kernel log source: install journalctl + mount /var/log/journal, "
+                                "or mount a plain-text /var/log/kern.log (rsyslog)")]
     hard = re.compile(r"I/O error|hard resetting link|exception Emask|failed command|"
                       r"medium error|Unrecovered read error|ATA bus error|"
                       r"link is slow to respond|READ FPDMA|WRITE FPDMA|offline uncorrect", re.I)
     rescan = re.compile(r"scsi \d+:\d+:\d+:\d+: .*(atapi|Direct-Access)|rejecting I/O to offline device", re.I)
-    lines = out.splitlines()
     hits = [l for l in lines if hard.search(l)]
     rescans = sum(1 for l in lines if rescan.search(l))
     # which devices? pull /dev/sdX mentions from the error lines
     devs = sorted({m.group(0) for l in hits for m in re.finditer(r"sd[a-z]+", l)})
     st = dict(severity="OK",
-              detail_json=json.dumps(dict(window_h=win, errors=len(hits), rescans=rescans,
-                                          devices=devs, sample=hits[-3:])))
+              detail_json=json.dumps(dict(source=source, window_h=win, errors=len(hits),
+                                          rescans=rescans, devices=devs, sample=hits[-3:])))
     crit_n = int(t.get("crit_count", 10))
     if len(hits) >= crit_n:
         st["severity"] = "CRIT"; st["last_error"] = f"{len(hits)} disk/link errors in {win}h ({','.join(devs)})"

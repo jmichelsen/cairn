@@ -60,6 +60,10 @@ services:
       - /srv/borg-pre:/srv/borg-pre:ro
       - /var/log/backupninja.log:/var/log/backupninja.log:ro
       - /var/lib/backupninja/reports:/var/lib/backupninja/reports:ro
+      # kernel disk/link error watch (rsyslog plain-text log): mount it ro so the RO container
+      # can catch transient drops/resilver storms. Journald-only hosts: mount /var/log/journal:ro
+      # + /etc/machine-id:ro instead and add journalctl to the image, or use the host agent.
+      - /var/log/kern.log:/var/log/kern.log:ro
       # SMART (optional): cap_add: [SYS_RAWIO] + devices: [/dev/sda, ...]
     # To enable local actions in-container (instead of a host agent):
     # cap_add: [SYS_ADMIN]
