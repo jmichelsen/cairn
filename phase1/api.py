@@ -253,7 +253,8 @@ def timeline(days: int = 14):
 # The API never touches ZFS/borg/disks. Agents (local + remote) do all host work and talk HTTP.
 import subprocess
 NOTIFY_SH = os.environ.get("NOTIFY_SH", str(HERE.parent / "phase0" / "notify.sh"))
-ALLOWED_ACTIONS = {"snapshot", "sync", "scrub"}
+ALLOWED_ACTIONS = {"snapshot", "sync", "scrub",
+                   "recover-points", "recover-search", "recover-deleted", "restore"}
 STATUS_INGEST_COLS = ["snap_age_src_s","snap_age_dst_s","repl_lag_s","pool_health","pool_cap_pct",
     "last_scrub_ts","usedbysnapshots","compressratio","key_status","archive_count","dedup_ratio",
     "logical_size","physical_size","last_check_ts","last_check_result","lock_state","handler_type",
@@ -330,12 +331,12 @@ def poll_intents(agent: str):
         for r in rows:
             conn.execute("UPDATE intents SET state='claimed',claimed_ts=?,claimed_by=? WHERE id=?",
                          (now, agent, r["id"]))
-            opts = {}
             try:
                 opts = json.loads(r.pop("opts") or "{}")
             except (ValueError, TypeError):
-                r.pop("opts", None)
-            r["create_snapshot"] = opts.get("create_snapshot", True)
+                r.pop("opts", None); opts = {}
+            r["opts"] = opts
+            r["create_snapshot"] = opts.get("create_snapshot", True)  # convenience/back-compat
         conn.commit()
     return {"intents": rows}
 
@@ -363,14 +364,20 @@ async def intent_result(iid: int, request: Request):
 # ---------------- actions: the dashboard queues an intent (routed to the owning agent) ----------------
 # No files, no host executor. The intent waits in the DB until the target's agent polls for it.
 # Keep this POST surface PRIVATE (reverse proxy / VPN) - never on the public token path.
+RECOVER_ACTIONS = {"recover-points", "recover-search", "recover-deleted", "restore"}
+
 @app.post("/api/v1/backup/actions")
 async def create_action(request: Request):
     body = await _json(request)
     target = body.get("target"); action = body.get("action")
-    create_snapshot = bool(body.get("create_snapshot", True))
     requested_by = body.get("requested_by", "ui")
     if action not in ALLOWED_ACTIONS:
         raise HTTPException(400, f"action must be one of {sorted(ALLOWED_ACTIONS)}")
+    # options carried to the agent (it builds the command from its trusted config + these).
+    opts = {"create_snapshot": bool(body.get("create_snapshot", True))}
+    for k in ("path", "dest", "version"):
+        if body.get(k) is not None:
+            opts[k] = str(body[k])
     with db() as conn:
         r = conn.execute("SELECT id,type,source,dest,enabled,agent FROM targets WHERE name=?",
                          (target,)).fetchone()
@@ -380,18 +387,20 @@ async def create_action(request: Request):
             raise HTTPException(400, "sync only valid for zfs-repl targets")
         if action == "scrub" and r["type"] != "zfs-local":
             raise HTTPException(400, "scrub only valid for zfs-local targets")
-        if action == "snapshot" and not r["source"]:
-            raise HTTPException(400, "target has no source dataset")
+        if (action == "snapshot" or action in RECOVER_ACTIONS) and not r["source"]:
+            raise HTTPException(400, "action requires a dataset-backed target")
+        if action == "restore" and not opts.get("version"):
+            raise HTTPException(400, "restore requires a 'version' (snapshot file path from a search)")
         if not r["agent"]:
             raise HTTPException(409, f"no agent has reported target '{target}' yet - can't route it")
         cur = conn.execute(
             "INSERT INTO intents(target_id,action,opts,state,requested_by,created_ts) "
             "VALUES(?,?,?,'pending',?,strftime('%s','now'))",
-            (r["id"], action, json.dumps({"create_snapshot": create_snapshot}), requested_by))
+            (r["id"], action, json.dumps(opts), requested_by))
         iid = cur.lastrowid
         conn.commit()
     return {"id": iid, "state": "pending", "target": target, "action": action,
-            "agent": r["agent"], "create_snapshot": create_snapshot}
+            "agent": r["agent"], "opts": opts}
 
 @app.get("/api/v1/backup/actions")
 def list_actions(limit: int = 20):
@@ -512,17 +521,26 @@ button:hover{background:#eee} #actlog{margin-top:1rem;padding:.6rem;background:#
 
 # plain string (NOT an f-string) so JS ${...} and \n survive untouched
 PAGE_SCRIPT = """<script>
-async function act(target, action, createSnap){
-  const label = action==='sync' ? ('replicate '+target+' (new snapshot: '+createSnap+')') : (action+' '+target);
-  if(!confirm('Run '+label+'?')) return;
-  const el=document.getElementById('actlog'); el.textContent='submitting: '+label+' …';
+async function post(body){
+  const el=document.getElementById('actlog'); el.textContent='submitting: '+body.action+' '+body.target+' …';
   let r,j;
   try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({target:target,action:action,create_snapshot:createSnap,requested_by:'ui'})});
-       j=await r.json(); }
+        body:JSON.stringify(body)}); j=await r.json(); }
   catch(e){ el.textContent='network error: '+e; return; }
   if(!r.ok){ el.textContent='error: '+(j.detail||r.status); return; }
   poll(j.id);
+}
+async function act(target, action, createSnap){
+  const label = action+' '+target+(action==='sync'?(' (new snap: '+createSnap+')'):'');
+  if(!confirm('Run '+label+'?')) return;
+  const b={target:target, action:action, requested_by:'ui'};
+  if(action==='sync') b.create_snapshot=createSnap;
+  post(b);
+}
+async function actPrompt(target, action, field, msg){
+  const v=prompt(msg); if(v===null) return;
+  if(!confirm('Run '+action+' '+target+' ['+(v||'(all)')+'] ?')) return;
+  const b={target:target, action:action, requested_by:'ui'}; b[field]=v; post(b);
 }
 async function poll(id){
   const el=document.getElementById('actlog');
@@ -549,12 +567,18 @@ def index():
         if r.get("pool_cap_pct") is not None: extra.append(f"{r['pool_cap_pct']}%")
         if r.get("archive_count") is not None: extra.append(f"{r['archive_count']} arch")
         n = r["name"]
+        # recovery buttons for any dataset-backed target (httm/zfs recovery-point catalog)
+        rec = ""
+        if r["type"] in ("zfs-repl", "zfs-local") and r.get("source"):
+            rec = (f"<button onclick=\"act('{n}','recover-points')\">Points</button>"
+                   f"<button onclick=\"actPrompt('{n}','recover-deleted','path','deleted files under (blank = whole dataset):')\">Deleted</button>"
+                   f"<button onclick=\"actPrompt('{n}','recover-search','path','list versions of (path relative to dataset root):')\">Versions</button>")
         if r["type"] == "zfs-repl":
             acts = (f"<button onclick=\"act('{n}','snapshot',true)\">Snapshot</button>"
                     f"<button onclick=\"act('{n}','sync',true)\">Replicate&nbsp;+snap</button>"
-                    f"<button onclick=\"act('{n}','sync',false)\">Replicate&nbsp;existing</button>")
+                    f"<button onclick=\"act('{n}','sync',false)\">Replicate&nbsp;existing</button>" + rec)
         elif r["type"] == "zfs-local":
-            acts = f"<button onclick=\"act('{n}','scrub',true)\">Scrub</button>"
+            acts = f"<button onclick=\"act('{n}','scrub',true)\">Scrub</button>" + rec
         else:
             acts = ""
         c = BADGE.get(r["severity"], "#555")

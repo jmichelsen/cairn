@@ -101,6 +101,28 @@ picks it up on its next poll, runs it, and the outcome flows back (email on done
 fail). Latency to *start* = one poll interval; latency to *know the outcome* = the run itself
 (the agent posts the result immediately).
 
+## Recovery (Phase 4 - httm)
+
+Recovery is exposed as agent actions (same intent/allowlist path, so it inherits auth + routing).
+Buttons per dataset target: **Points / Deleted / Versions**, plus `restore` via the API.
+
+| Action | Command the agent runs | Notes |
+| --- | --- | --- |
+| `recover-points` | `zfs list -t snapshot` | **fast** - no snapshot automount; the quick "when can I recover from" browse |
+| `recover-search {path}` | `httm --json --recursive <mp>/<path>` | versions of a file/dir across snapshots |
+| `recover-deleted {path?}` | `httm --deleted=only --recursive --json …` | files gone from live but present in snapshots |
+| `restore {version, dest?}` | `cp -a --no-clobber` snapshot→staging | **copy-only**, never overwrites live; defaults to `<mp>/.bm-restores/` |
+
+Guardrails: user-supplied paths are joined onto the target's dataset mountpoint and **rejected if
+they escape it** (`../`, absolute paths outside the dataset); restore is copy-only to staging.
+
+**Perf caveat:** `httm` (search/deleted) browses `.zfs/snapshot`, which **auto-mounts every
+snapshot** - slow on datasets with many sanoid snapshots (tens of seconds to minutes the first
+time). That's why recovery runs as async agent actions (never blocking the API) with a long
+timeout; use **Points** (instant) for the common browse and reserve search/deleted for when you
+actually need file-level history. The vault contributes recovery-point *timestamps* only
+(ciphertext at rest; file-level recovery from it means pulling a snapshot home).
+
 ## Testing safely - the photos example
 
 photos is in sync with backup but stopped being snapshotted 2025-12-05 (not in sanoid.conf), so its

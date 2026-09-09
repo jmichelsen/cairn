@@ -91,7 +91,7 @@ def do_execute(cfg):
     intents = res.get("intents", [])
     for it in intents:
         iid, target, action = it["id"], it.get("target"), it.get("action")
-        opts = {"create_snapshot": it.get("create_snapshot", True)}
+        opts = it.get("opts") or {"create_snapshot": it.get("create_snapshot", True)}
         t = tmap.get(target)
         if not t:
             api_call("POST", f"/api/v1/backup/intents/{iid}/result",

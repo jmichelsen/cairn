@@ -476,7 +476,62 @@ def build_command(action, t, opts=None):
             return None, f"'scrub' not allowed for type '{typ}'"
         pool = (src or "").split("/")[0]
         return (["zpool", "scrub", pool], None) if pool else (None, "no pool for scrub")
+
+    # ---- Phase 4: recovery-point catalog (httm) + guarded restore ----
+    # All read-only or copy-only; paths validated to stay within the target's dataset.
+    if action in ("recover-points", "recover-search", "recover-deleted", "restore"):
+        if not src:
+            return None, "recovery requires a dataset-backed target"
+        if action == "recover-points":
+            # FAST: list recovery points (snapshots) - no snapshot automount.
+            return ["zfs", "list", "-Hp", "-t", "snapshot", "-o", "name,creation", "-s", "creation",
+                    "-d", "1", src], None
+        mp, err = _mountpoint(src)
+        if err:
+            return None, err
+        rel = (opts.get("path") or "").lstrip("/")
+        target_path, err = _safe_join(mp, rel)
+        if err:
+            return None, err
+        if action == "recover-search":   # versions of a file/dir across snapshots (SLOW: automount)
+            return ["httm", "--json", "--recursive", target_path], None
+        if action == "recover-deleted":  # files gone from live but present in snapshots
+            return ["httm", "--deleted=only", "--recursive", "--json", target_path], None
+        if action == "restore":
+            # copy a chosen snapshot version to a staging dir; NEVER overwrite a live file.
+            version = opts.get("version") or ""     # absolute path inside .zfs/snapshot/...
+            rp, err = _validate_under(version, mp)
+            if err:
+                return None, f"bad version path: {err}"
+            staging = opts.get("dest") or os.path.join(mp, ".bm-restores")
+            sp, err = _validate_under(staging, mp) if not opts.get("dest") else (staging, None)
+            dest = os.path.join(sp if not err else staging, os.path.basename(rp) + f".restored-{time.strftime('%Y%m%dT%H%M%S')}")
+            return ["cp", "-a", "--no-clobber", "--", rp, dest], None
     return None, f"unknown action '{action}'"
+
+def _mountpoint(ds):
+    rc, out, _ = run(["zfs", "get", "-H", "-o", "value", "mountpoint", ds])
+    mp = out.strip()
+    if rc != 0 or not mp or mp in ("none", "legacy", "-"):
+        return None, f"dataset {ds} has no usable mountpoint ({mp or 'unknown'})"
+    return mp, None
+
+def _safe_join(mp, rel):
+    """Join a user-supplied RELATIVE path onto a mountpoint, refusing any escape."""
+    full = os.path.realpath(os.path.join(mp, rel))
+    root = os.path.realpath(mp)
+    if full != root and not full.startswith(root + os.sep):
+        return None, f"path escapes dataset root {root}"
+    return full, None
+
+def _validate_under(path, mp):
+    if not path:
+        return None, "empty path"
+    full = os.path.realpath(path)
+    root = os.path.realpath(mp)
+    if full != root and not full.startswith(root + os.sep):
+        return None, f"path {full} not under {root}"
+    return full, None
 
 # ---------- main ----------
 def main():

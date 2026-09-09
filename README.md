@@ -55,7 +55,8 @@ API are unprivileged.
 | 2 | Homepage widget + fuller dashboard | pending |
 | 3 | **Actions** (snapshot / replicate / scrub) - buttons → intent → owning agent executes | **built + dry-run tested** (`AGENT.md`) |
 | ✔ | **Control-plane + uniform agent** - one HTTP agent, local or remote vault; API touches no host | **built + end-to-end tested** |
-| 4 | Recovery-point catalog via `httm` | pending |
+| ✔ | **Zero-trust auth** - every endpoint; hash-at-rest; two-tier enroll+access with rotation/revoke | **built + tested** |
+| 4 | **Recovery-point catalog via `httm`** - points / deleted-file / version search + guarded restore, as agent actions | **built + tested** |
 
 ## Layout
 
