@@ -20,6 +20,7 @@ DAY = 86400
 app = FastAPI(title="backup-monitor", version="1.0")
 
 SEV_ORDER = {"CRIT": 0, "WARN": 1, "UNKNOWN": 2, "OK": 3}
+SEVCLS = {"CRIT": "crit", "WARN": "warn", "UNKNOWN": "unk", "OK": "ok"}  # severity -> css class
 
 # ---------------- zero-trust auth: every request needs a token; HASH-AT-REST ----------------
 # Only sha256(token) is ever stored (auth_tokens table). Two roles: admin (dashboard/views/
@@ -518,14 +519,181 @@ def revoke_token(label: str):
     return {"ok": True, "revoked": label}
 
 # ---------------- HTML dashboard + on-demand action buttons ----------------
-BADGE = {"CRIT": "#c0392b", "WARN": "#e67e22", "UNKNOWN": "#7f8c8d", "OK": "#27ae60"}
+# The dashboard is the "Panel" design direction: a 14-day fleet heatmap, a capacity gauge +
+# coverage gaps in the rail, targets as grouped cards, and a metric legend. Theme-aware (the
+# viewer's light/dark preference drives the token set); server-rendered from live status.
+GROUPS = {"zfs-local": (0, "Pools"),
+          "zfs-repl": (2, "Replication (ZFS)"),
+          "borg-repo": (3, "Archive repos (borg)"),
+          "backupninja-handler": (4, "Scheduled jobs"),
+          "smart": (5, "Disk health (SMART)"),
+          "kernel-errors": (6, "Hardware watch")}
 
-PAGE_STYLE = """<style>body{font:14px/1.5 system-ui,sans-serif;margin:2rem;max-width:1150px}
-h1{font-size:1.3rem} .badge{display:inline-block;padding:.3rem .8rem;border-radius:6px;color:#fff;font-weight:700}
-table{border-collapse:collapse;width:100%;margin-top:1rem} td,th{padding:.35rem .6rem;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}
-.w{color:#555;font-size:.9em} .counts span{margin-right:1rem}
-button{font-size:.78em;margin:1px;cursor:pointer;border:1px solid #bbb;border-radius:4px;background:#fafafa;padding:2px 6px}
-button:hover{background:#eee} #actlog{margin-top:1rem;padding:.6rem;background:#f4f4f4;border-radius:6px;font:12px/1.45 monospace;white-space:pre-wrap;min-height:1.3em}</style>"""
+def _group(r):
+    if r["type"] == "zfs-repl" and r.get("location") == "offsite":
+        return (1, "Off-site replication")
+    return GROUPS.get(r["type"], (9, r["type"] or "other"))
+
+def _esc(s):
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")) if s else ""
+
+# The metric legend the dashboard footer renders - plain-language key for every column/badge.
+LEGEND = [
+    ("OK / WARN / CRIT", "Worst-of rollup for a target. Green = healthy, amber = needs attention, "
+                         "red = act now. UNKNOWN = the agent couldn't read it (permissions/offline)."),
+    ("lag", "Replication lag - hours between the newest source snapshot and the one the destination "
+            "has actually received. WARN ~28h (a nightly run missed), CRIT ~50h (two missed)."),
+    ("capacity", "Pool capacity used. WARN at ≥ 85%, CRIT at ≥ 92% - ZFS slows sharply when nearly full."),
+    ("archives", "borg archive count - how many restore points the repository currently holds."),
+    ("dedup", "borg deduplication + compression ratio (original size ÷ stored size)."),
+    ("resilver", "ZFS is rebuilding a replaced or errored disk back onto its mirror/raidz. Recent "
+                 "resilver = a disk dropped or went flaky, even once the pool reports healthy."),
+    ("CRC / CKSUM", "Checksum or link errors from the kernel - usually a bad cable, HBA lane, or a "
+                    "failing disk. Caught even when ZFS silently self-heals them."),
+    ("off-site", "The target has ≥ 1 copy on the remote vault - the '1' in the 3-2-1 rule."),
+    ("enc", "Dataset is encrypted; an off-site copy is held raw and cannot be read there."),
+]
+
+FONTS = ('<link rel="preconnect" href="https://fonts.googleapis.com">'
+         '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+         '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
+         'family=Red+Hat+Display:wght@500;700;900&family=Red+Hat+Text:wght@400;500;600&'
+         'family=Roboto+Mono:wght@400;500&display=swap">')
+
+PAGE_STYLE = """<style>
+:root{
+  --bg:#eef2f6; --surf:#ffffff; --ink:#1a2733; --mut:#5f7085; --line:#e0e6ec;
+  --acc:#1c5fa8; --acc2:#0f3f74; --accsoft:#e7f0f9; --rail:#f5f8fb; --heatbg:#e4e9ee;
+  --ok:#1c8a63; --warn:#c07d21; --crit:#c1443a; --unk:#8090a0;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --bg:#0d1621; --surf:#111e2c; --ink:#dbe6f2; --mut:#8496a8; --line:#213347;
+  --acc:#4d9fff; --acc2:#9cc6f5; --accsoft:#16304b; --rail:#0e1a27; --heatbg:#1a2b3c;
+  --ok:#34c98a; --warn:#e0a53a; --crit:#ff5b51; --unk:#7d90a4;
+}}
+:root[data-theme=dark]{
+  --bg:#0d1621; --surf:#111e2c; --ink:#dbe6f2; --mut:#8496a8; --line:#213347;
+  --acc:#4d9fff; --acc2:#9cc6f5; --accsoft:#16304b; --rail:#0e1a27; --heatbg:#1a2b3c;
+  --ok:#34c98a; --warn:#e0a53a; --crit:#ff5b51; --unk:#7d90a4;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.5 "Red Hat Text",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+.panel{max-width:1200px;margin:0 auto}
+.panel h2,.panel h3{font-family:"Red Hat Display",sans-serif;margin:0}
+.mono{font-family:"Roboto Mono",monospace;font-variant-numeric:tabular-nums}
+button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+/* hero + heatmap */
+.hero{padding:22px 26px 18px;background:linear-gradient(180deg,var(--rail),var(--surf));border-bottom:1px solid var(--line)}
+.hero-top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.hero-top h2{font-weight:900;font-size:20px;letter-spacing:-.01em}
+.verd{font-weight:700;font-size:12.5px;padding:4px 12px;border-radius:20px;border:1px solid currentColor;letter-spacing:.02em}
+.verd.ok{color:var(--ok)} .verd.warn{color:var(--warn)} .verd.crit{color:var(--crit)} .verd.unk{color:var(--unk)}
+.tag{font-size:12.5px;color:var(--mut);margin-left:auto;text-align:right}
+.tag a{color:var(--acc);text-decoration:none}
+.heat{margin-top:14px;overflow-x:auto}
+.heatspan{font-size:11.5px;color:var(--mut);font-family:"Roboto Mono";margin-bottom:8px}
+.heat table{border-collapse:collapse;min-width:520px}
+.heat td{padding:2px}
+.heat .hname{font-size:11.5px;color:var(--mut);text-align:right;padding-right:10px;white-space:nowrap;font-family:"Roboto Mono"}
+.heat .c{width:16px;height:16px;border-radius:3px;background:var(--heatbg)}
+.heat .c.ok{background:var(--ok)} .heat .c.warn{background:var(--warn)}
+.heat .c.crit{background:var(--crit)} .heat .c.unk{background:var(--unk);opacity:.55}
+/* split */
+.split{display:grid;grid-template-columns:270px 1fr;gap:0}
+.rail{padding:22px;border-right:1px solid var(--line);background:var(--rail);display:flex;flex-direction:column;gap:22px}
+.gauge-wrap{text-align:center}
+.gauge-wrap canvas{width:150px;height:150px}
+.gauge-cap{font-family:"Red Hat Display";font-weight:700;font-size:13px;margin-top:2px}
+.gauge-cap span{display:block;color:var(--mut);font-weight:400;font-size:11.5px;margin-top:2px}
+.railsec h3{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);font-weight:700;margin:0 0 11px}
+.gap{display:flex;gap:10px;align-items:flex-start;margin-bottom:12px}
+.gap .d{width:8px;height:8px;border-radius:50%;margin-top:5px;flex:none}
+.gap b{font-size:13px;font-weight:600}
+.gap small{display:block;color:var(--mut);font-size:11.5px;line-height:1.4}
+/* cards */
+.main{padding:20px 24px 26px}
+.gtitle{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);font-weight:700;margin:6px 0 12px}
+.gtitle:not(:first-child){margin-top:22px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(236px,1fr));gap:14px}
+.card{background:var(--surf);border:1px solid var(--line);border-radius:13px;padding:15px 16px;
+  border-top:3px solid var(--unk);box-shadow:0 1px 2px rgba(20,40,60,.05)}
+.card.ok{border-top-color:var(--ok)} .card.warn{border-top-color:var(--warn)} .card.crit{border-top-color:var(--crit)}
+.card .ch{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.card .cn{font-family:"Red Hat Display";font-weight:700;font-size:15px;word-break:break-word}
+.card .cs{font-size:10.5px;font-weight:700;letter-spacing:.05em;flex:none}
+.card.ok .cs{color:var(--ok)} .card.warn .cs{color:var(--warn)} .card.crit .cs{color:var(--crit)} .card.unk .cs{color:var(--unk)}
+.card .src{font-family:"Roboto Mono";font-size:11.5px;color:var(--mut);margin-top:3px;word-break:break-all}
+.card .row{display:flex;gap:16px;margin-top:12px;flex-wrap:wrap}
+.card .mv{font-family:"Roboto Mono";font-weight:500;font-size:16px}
+.card .ml{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}
+.card .why{color:var(--mut);font-size:12px;margin-top:11px;line-height:1.4}
+.cact{display:flex;gap:6px;margin-top:13px;flex-wrap:wrap}
+.cact button{appearance:none;font:600 11.5px/1 "Red Hat Text";border:1px solid var(--line);
+  background:var(--surf);color:var(--acc2);border-radius:7px;padding:7px 10px;cursor:pointer}
+.cact button.pri{background:var(--acc);color:#fff;border-color:var(--acc)}
+.cact button:hover{filter:brightness(1.05)}
+.cact .ro{color:var(--unk);font-size:11.5px;font-style:italic;align-self:center}
+.crec{display:flex;gap:10px;margin-top:9px}
+.crec button{appearance:none;font:500 11px/1 "Red Hat Text";border:0;background:transparent;
+  color:var(--acc);cursor:pointer;padding:2px 0;border-bottom:1px dotted var(--acc)}
+#actlog{margin-top:20px;padding:.7rem .9rem;background:var(--rail);border:1px solid var(--line);
+  border-radius:9px;font:12.5px/1.5 "Roboto Mono",monospace;color:var(--mut);white-space:pre-wrap;min-height:1.4em}
+/* legend */
+.legend{grid-column:1/-1;background:var(--rail);border-top:1px solid var(--line);padding:20px 24px 26px}
+.legend h3{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);font-weight:700;margin:0 0 14px}
+.lg{display:grid;grid-template-columns:repeat(3,1fr);gap:13px 28px}
+.lg dt{font-family:"Roboto Mono";font-weight:500;font-size:13px;color:var(--acc2);display:flex;gap:8px;align-items:center}
+.lg dd{margin:3px 0 0;color:var(--mut);font-size:12px;line-height:1.45}
+.lg .sw{width:11px;height:11px;border-radius:3px;flex:none}
+/* top bar + hero toggle */
+.topbar2{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:14px 26px 2px}
+.applogo{font-family:"Red Hat Display";font-weight:900;font-size:19px;letter-spacing:-.01em}
+.seg{display:inline-flex;background:var(--surf);border:1px solid var(--line);border-radius:10px;padding:3px;gap:2px}
+.topbar2 .seg{margin-left:auto}
+.seg button{appearance:none;border:0;background:transparent;color:var(--mut);
+  font:600 12.5px/1 "Red Hat Text",sans-serif;padding:8px 14px;border-radius:7px;cursor:pointer}
+.seg button:hover{color:var(--ink)}
+.signout{color:var(--acc);text-decoration:none;font-size:12.5px;white-space:nowrap}
+.panel[data-hero=steel] .seg [data-h=steel],
+.panel[data-hero=heat] .seg [data-h=heat],
+.panel:not([data-hero]) .seg [data-h=steel]{background:var(--acc);color:#fff}
+.herox{display:none}
+.panel[data-hero=steel] #hero-steel,
+.panel:not([data-hero]) #hero-steel,
+.panel[data-hero=heat] #hero-heat{display:block}
+/* steel-style summary hero */
+.sumband{display:flex;flex-wrap:wrap;align-items:center;gap:18px 30px;padding:20px 26px;
+  background:linear-gradient(180deg,var(--rail),var(--surf));border-bottom:1px solid var(--line)}
+.sumverd{display:flex;align-items:center;gap:15px}
+.sumverd svg{width:44px;height:50px;flex:none}
+.sumverd .vt{font-family:"Red Hat Display";font-weight:900;font-size:25px;letter-spacing:-.02em;line-height:1;color:currentColor}
+.sumverd .vs{color:var(--mut);font-size:12.5px;margin-top:6px}
+.sumverd.ok{color:var(--ok)} .sumverd.warn{color:var(--warn)} .sumverd.crit{color:var(--crit)} .sumverd.unk{color:var(--unk)}
+.sumchips{display:flex;gap:9px;flex-wrap:wrap}
+.sumchip{display:flex;align-items:center;gap:7px;background:var(--surf);border:1px solid var(--line);
+  border-radius:9px;padding:7px 12px;font-size:12px;color:var(--mut)}
+.sumchip b{font-family:"Roboto Mono";font-size:15px;color:var(--ink)}
+.sumchip i{width:9px;height:9px;border-radius:2px;flex:none}
+.sumasof{margin-left:auto;color:var(--mut);font-size:12px;text-align:right;line-height:1.7}
+.sumasof b{color:var(--ink);font-family:"Roboto Mono";font-weight:500}
+.sumtiles{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:20px 26px 4px}
+.stile{background:var(--surf);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.stile .lbl{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);font-weight:700}
+.stile .big{font-family:"Red Hat Display";font-weight:900;font-size:26px;margin-top:8px;letter-spacing:-.02em}
+.stile .sub{color:var(--mut);font-size:12.5px;margin-top:4px}
+.smeter{height:8px;border-radius:5px;background:var(--heatbg);margin-top:12px;overflow:hidden}
+.smeter i{display:block;height:100%;border-radius:5px}
+.pill321{display:inline-flex;gap:4px;margin-top:11px;flex-wrap:wrap}
+.pill321 s{width:24px;height:6px;border-radius:3px;background:var(--ok)}
+.pill321 s.off{background:var(--crit)} .pill321 s.warn{background:var(--warn)}
+@media (max-width:760px){
+  .split{grid-template-columns:1fr} .rail{border-right:0;border-bottom:1px solid var(--line)}
+  .lg{grid-template-columns:1fr} .tag{margin-left:0;text-align:left}
+  .sumtiles{grid-template-columns:1fr} .sumasof{margin-left:0;text-align:left}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>"""
 
 # plain string (NOT an f-string) so JS ${...} and \n survive untouched
 PAGE_SCRIPT = """<script>
@@ -559,7 +727,151 @@ async function poll(id){
     await new Promise(s=>setTimeout(s,2000));
   }
 }
+function drawGauge(){
+  var c=document.getElementById('gauge'); if(!c||!window.GP) return;
+  var cs=getComputedStyle(document.querySelector('.panel'));
+  function v(k,f){var x=cs.getPropertyValue(k).trim();return x||f;}
+  var track=v('--heatbg','#e4e9ee'), acc=v('--acc','#1c5fa8'),
+      warn=v('--warn','#c07d21'), ink=v('--ink','#1a2733'), mut=v('--mut','#5f7085');
+  var x=c.getContext('2d'), cx=150, cy=150, r=112, lw=26,
+      start=Math.PI*0.75, end=Math.PI*2.25, pct=Math.max(0,Math.min(100,GP.pct))/100;
+  x.clearRect(0,0,300,300); x.lineCap='round';
+  x.beginPath(); x.arc(cx,cy,r,start,end); x.strokeStyle=track; x.lineWidth=lw; x.stroke();
+  var g=x.createLinearGradient(0,0,300,300); g.addColorStop(0,acc); g.addColorStop(1, GP.pct>=85?warn:acc);
+  x.beginPath(); x.arc(cx,cy,r,start,start+(end-start)*pct); x.strokeStyle=g; x.lineWidth=lw; x.stroke();
+  x.fillStyle=ink; x.textAlign='center'; x.textBaseline='middle';
+  x.font='700 46px "Red Hat Display",sans-serif'; x.fillText(GP.pct+'%',cx,cy-6);
+  x.fillStyle=mut; x.font='500 13px "Roboto Mono",monospace'; x.fillText('used',cx,cy+26);
+}
+window.addEventListener('load',drawGauge);
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(drawGauge);
+if(window.matchMedia) matchMedia('(prefers-color-scheme:dark)').addEventListener('change',drawGauge);
+function setHero(h){var p=document.querySelector('.panel'); if(!p) return;
+  p.dataset.hero=h; try{localStorage.setItem('bm_hero',h)}catch(e){}}
+(function(){try{var s=localStorage.getItem('bm_hero');
+  if(s) document.querySelector('.panel').dataset.hero=s;}catch(e){}})();
 </script>"""
+
+def _acts(r, can_act):
+    """Card action buttons - only when an EXECUTE-capable agent owns the target (else the intent
+    would hang pending). Recovery (Points/Deleted/Versions) sits on a compact sub-row."""
+    n = r["name"]; t = r["type"]
+    if not can_act:
+        return ('<div class="cact"><span class="ro">report-only</span></div>'
+                if t in ("zfs-repl", "zfs-local") else "")
+    rec = ""
+    if t in ("zfs-repl", "zfs-local") and r.get("source"):
+        rec = (f'<div class="crec">'
+               f"<button onclick=\"act('{n}','recover-points')\">Points</button>"
+               f"<button onclick=\"actPrompt('{n}','recover-deleted','path','deleted files under (blank = whole dataset):')\">Deleted</button>"
+               f"<button onclick=\"actPrompt('{n}','recover-search','path','list versions of (path relative to dataset root):')\">Versions</button>"
+               f"</div>")
+    if t == "zfs-repl":
+        main = (f"<button class=pri onclick=\"act('{n}','sync',true)\">Replicate</button>"
+                f"<button onclick=\"act('{n}','snapshot',true)\">Snapshot</button>"
+                f"<button onclick=\"act('{n}','sync',false)\">no-snap</button>")
+    elif t == "zfs-local":
+        main = f"<button class=pri onclick=\"act('{n}','scrub',true)\">Scrub</button>"
+    else:
+        return ""
+    return f'<div class="cact">{main}</div>{rec}'
+
+def _card(r, can_act):
+    n = _esc(r["name"]); sev = SEVCLS.get(r["severity"], "unk")
+    src = r.get("source") or ""
+    src_line = f"{src} → {r['dest']}" if r.get("dest") else src
+    meta = []
+    if r.get("tier"): meta.append(f"tier {r['tier']}")
+    if r.get("encrypted"): meta.append("enc")
+    if r.get("location") == "offsite": meta.append("off-site")
+    if meta: src_line = (src_line + " · " if src_line else "") + " · ".join(meta)
+    mr = ""
+    if r.get("pool_cap_pct") is not None:
+        mr += f'<div><div class="mv">{r["pool_cap_pct"]}%</div><div class="ml">capacity</div></div>'
+    if r.get("repl_lag_s") is not None:
+        mr += f'<div><div class="mv">{r["repl_lag_s"]//3600}h</div><div class="ml">repl lag</div></div>'
+    if r.get("archive_count") is not None:
+        mr += f'<div><div class="mv">{r["archive_count"]}</div><div class="ml">archives</div></div>'
+    if r.get("dedup_ratio") is not None:
+        mr += f'<div><div class="mv">{r["dedup_ratio"]}×</div><div class="ml">dedup</div></div>'
+    d = json.loads(r.get("detail_json") or "{}")
+    why = _esc(", ".join(d.get("reasons", [])) or (r.get("last_error") or ""))
+    src_html = f'<div class="src">{_esc(src_line)}</div>' if src_line else ""
+    mr_html = f'<div class="row">{mr}</div>' if mr else ""
+    why_html = f'<div class="why">{why}</div>' if why else ""
+    return (f'<div class="card {sev}"><div class="ch"><span class="cn">{n}</span>'
+            f'<span class="cs">{r["severity"]}</span></div>{src_html}{mr_html}{why_html}'
+            f'{_acts(r, can_act)}</div>')
+
+def _heatmap(order_names):
+    """14-day worst-severity-per-day grid, aligned to the card order."""
+    grid = timeline(14)["grid"]
+    days = [time.strftime("%Y-%m-%d", time.localtime(time.time() - i * DAY)) for i in range(13, -1, -1)]
+    out = ""
+    for name in order_names:
+        g = grid.get(name, {})
+        cells = ""
+        for dstr in days:
+            sev = g.get(dstr)
+            cls = SEVCLS.get(sev, "") if sev else ""
+            cells += f'<td><div class="c {cls}" title="{dstr}: {sev or "no data"}"></div></td>'
+        out += f'<tr><td class="hname">{_esc(name)}</td>{cells}</tr>'
+    return out, f"{days[0]} → {days[-1]}"
+
+def _hero_steel(rows, h, gpct, glabel):
+    """Steel-style summary header: verdict + 3-2-1 badge / capacity / restore-points tiles.
+    An alternative to the 14-day heatmap hero (toggled client-side)."""
+    sc = scorecard(); cards = sc["cards"]
+    npass = sum(1 for c in cards if c["pass_321"]); ntot = len(cards)
+    if ntot:
+        pills = "".join(("<s></s>" if c["pass_321"] else "<s class=off></s>") for c in cards)
+        s_big, s_cls = f"{npass} / {ntot}", ("ok" if npass == ntot else "crit" if npass == 0 else "warn")
+        s_sub = "Tier-A datasets with ≥3 copies · 2 media · 1 off-site"
+    else:
+        pills, s_big, s_cls, s_sub = "", "-", "unk", "no Tier-A datasets defined"
+    arch = [r for r in rows if r["type"] == "borg-repo" and r.get("archive_count") is not None]
+    tot_arch = sum(r["archive_count"] for r in arch)
+    rp_sub = f"{tot_arch} borg archives across {len(arch)} repos" if arch else "no borg repos"
+    cap_cls = "crit" if gpct >= 92 else "warn" if gpct >= 85 else "ok"
+    c = h["counts"]
+    chips = "".join(f'<div class=sumchip><i style="background:var(--{SEVCLS[k]})"></i>'
+                    f'<b>{c.get(k,0)}</b> {k}</div>' for k in ("OK", "WARN", "CRIT", "UNKNOWN"))
+    vcls = SEVCLS.get(h["severity"], "unk")
+    verdict = {"OK": "All healthy", "WARN": "Attention", "CRIT": "Critical",
+               "UNKNOWN": "Unknown"}.get(h["severity"], h["severity"])
+    vsub = f'{c.get("WARN",0)} warning(s) · {c.get("CRIT",0)} critical · {h["targets"]} targets'
+    ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(h["ts"]))
+    glyph = ('<path d="M18 29l6 6 12-13" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>'
+             if h["severity"] == "OK" else
+             '<path d="M26 16v18" stroke="currentColor" stroke-width="3.6" stroke-linecap="round"/>'
+             '<circle cx="26" cy="43" r="2.3" fill="currentColor"/>')
+    shield = ('<svg viewBox="0 0 52 58" fill="none"><path d="M26 2 48 10v20c0 15-10 24-22 26'
+              'C14 54 4 45 4 30V10L26 2Z" fill="none" stroke="currentColor" stroke-width="2" '
+              'opacity=".85"/>' + glyph + '</svg>')
+    meter = (f'<div class=smeter><i style="width:{min(gpct,100)}%;'
+             f'background:linear-gradient(90deg,var(--acc),var(--warn))"></i></div>')
+    return f"""
+    <div class=sumband>
+      <div class="sumverd {vcls}">{shield}<div><div class=vt>{verdict}</div><div class=vs>{vsub}</div></div></div>
+      <div class=sumchips>{chips}</div>
+      <div class=sumasof>as of<br><b>{ts}</b></div>
+    </div>
+    <div class=sumtiles>
+      <div class=stile><div class=lbl>3-2-1 coverage</div>
+        <div class=big style="color:var(--{s_cls})">{s_big}</div><div class=sub>{s_sub}</div>
+        <div class=pill321>{pills}</div></div>
+      <div class=stile><div class=lbl>Capacity · busiest pool</div>
+        <div class=big style="color:var(--{cap_cls})">{gpct}%</div><div class=sub>{_esc(glabel)}</div>{meter}</div>
+      <div class=stile><div class=lbl>Restore points</div>
+        <div class=big>{tot_arch}</div><div class=sub>{rp_sub}</div></div>
+    </div>"""
+
+def _shell(inner):
+    return (f"<!doctype html><html lang=en><head><meta charset=utf-8>"
+            f"<meta name=viewport content=\"width=device-width,initial-scale=1\">"
+            f"<title>backup-monitor</title>{FONTS}{PAGE_STYLE}</head><body>"
+            f"<div class=panel>{inner}"
+            f"<form id=lo method=post action=/logout hidden></form></div>{PAGE_SCRIPT}</body></html>")
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -567,47 +879,78 @@ def index():
         rows = latest_status(conn)
         capable = {x["name"] for x in conn.execute(
             "SELECT name FROM agents WHERE can_execute=1").fetchall()}
-        h = health()
-    trows = ""
-    for r in sorted(rows, key=lambda r: SEV_ORDER.get(r["severity"], 9)):
-        can_act = r.get("agent") in capable   # hide action buttons for report-only agents
-        d = json.loads(r.get("detail_json") or "{}")
-        why = ", ".join(d.get("reasons", [])) or (r.get("last_error") or "")
-        extra = []
-        if r.get("repl_lag_s") is not None: extra.append(f"lag {r['repl_lag_s']//3600}h")
-        if r.get("pool_cap_pct") is not None: extra.append(f"{r['pool_cap_pct']}%")
-        if r.get("archive_count") is not None: extra.append(f"{r['archive_count']} arch")
-        n = r["name"]
-        # action buttons only when an EXECUTE-capable agent owns the target (else they'd hang pending)
-        if not can_act:
-            acts = "<span class=w>report-only</span>" if r["type"] in ("zfs-repl", "zfs-local") else ""
-        else:
-            rec = ""
-            if r["type"] in ("zfs-repl", "zfs-local") and r.get("source"):
-                rec = (f"<button onclick=\"act('{n}','recover-points')\">Points</button>"
-                       f"<button onclick=\"actPrompt('{n}','recover-deleted','path','deleted files under (blank = whole dataset):')\">Deleted</button>"
-                       f"<button onclick=\"actPrompt('{n}','recover-search','path','list versions of (path relative to dataset root):')\">Versions</button>")
-            if r["type"] == "zfs-repl":
-                acts = (f"<button onclick=\"act('{n}','snapshot',true)\">Snapshot</button>"
-                        f"<button onclick=\"act('{n}','sync',true)\">Replicate&nbsp;+snap</button>"
-                        f"<button onclick=\"act('{n}','sync',false)\">Replicate&nbsp;existing</button>" + rec)
-            elif r["type"] == "zfs-local":
-                acts = f"<button onclick=\"act('{n}','scrub',true)\">Scrub</button>" + rec
-            else:
-                acts = ""
-        c = BADGE.get(r["severity"], "#555")
-        trows += (f"<tr><td><b style='color:{c}'>{r['severity']}</b></td><td>{n}</td>"
-                  f"<td>{r['type']}</td><td>{' · '.join(extra)}</td><td>{acts}</td>"
-                  f"<td class=w>{why}</td></tr>")
-    bc = BADGE.get(h["severity"], "#555")
-    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(h["ts"]))
-    counts = " ".join(f"<span>{k}: {v}</span>" for k, v in h["counts"].items())
-    return (f"""<!doctype html><meta charset=utf-8><title>backup-monitor</title>
-{PAGE_STYLE}
-<h1>backup-monitor <span class=badge style='background:{bc}'>{h['severity']}</span></h1>
-<div class=counts>{counts} &nbsp;·&nbsp; {h['targets']} targets &nbsp;·&nbsp; as of {ts}</div>
-<table><tr><th>sev</th><th>target</th><th>type</th><th>metric</th><th>actions</th><th>why</th></tr>{trows}</table>
-<div id=actlog>idle - click an action; status streams here.</div>
-<p class=w>Read-only aggregate + on-demand actions (snapshot / replicate / scrub).
-Views: /api/v1/backup/(health, status, scorecard, coverage-gap, timeline, actions)</p>"""
-            + PAGE_SCRIPT)
+    h = health()
+    if not rows:
+        return _shell(
+            '<div class=hero><div class=hero-top><h2>backup-monitor</h2>'
+            '<span class="verd unk">No data yet</span></div>'
+            '<p class=why style="margin-top:14px;max-width:60ch">No agent has reported yet. Start an '
+            'agent (see AGENT.md) - it enrolls, reads this host\'s ZFS / borg / backupninja, and '
+            'populates the dashboard within one poll interval.</p></div>')
+
+    rows.sort(key=lambda r: (_group(r)[0], r["name"]))
+    order_names = [r["name"] for r in rows]
+
+    pools = [r for r in rows if r["type"] == "zfs-local" and r.get("pool_cap_pct") is not None]
+    if pools:
+        bp = max(pools, key=lambda r: r["pool_cap_pct"])
+        gpct, glabel = int(bp["pool_cap_pct"]), _esc(bp["name"])
+    else:
+        gpct, glabel = 0, "-"
+
+    gaps = coverage_gap()["gaps"][:6]
+    if gaps:
+        gaps_html = "".join(
+            f'<div class=gap><span class=d style="background:var(--{SEVCLS.get(x["severity"],"unk")})"></span>'
+            f'<div><b>{_esc(x["name"])}</b><small>{_esc(x["gap"])}</small></div></div>' for x in gaps)
+    else:
+        gaps_html = ('<div class=gap><span class=d style="background:var(--ok)"></span>'
+                     '<div><b>No gaps</b><small>everything snapshotted &amp; replicating</small></div></div>')
+
+    heat_rows, heat_span = _heatmap(order_names)
+
+    cards, cur = "", None
+    for r in rows:
+        g = _group(r)[1]
+        if g != cur:
+            if cur is not None:
+                cards += "</div>"
+            cards += f'<div class=gtitle>{_esc(g)}</div><div class=cards>'
+            cur = g
+        cards += _card(r, r.get("agent") in capable)
+    if cur is not None:
+        cards += "</div>"
+
+    leg = ""
+    for term, desc in LEGEND:
+        sw = ('<span class=sw style="background:linear-gradient(90deg,var(--ok),var(--warn),var(--crit))"></span>'
+              if term.startswith("OK") else "")
+        leg += f"<div><dt>{sw}{term}</dt><dd>{desc}</dd></div>"
+
+    c = h["counts"]; ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(h["ts"]))
+    verdict = {"OK": "All healthy", "WARN": "Attention", "CRIT": "Critical",
+               "UNKNOWN": "Unknown"}.get(h["severity"], h["severity"])
+    vcls = SEVCLS.get(h["severity"], "unk")
+    steel_hero = _hero_steel(rows, h, gpct, glabel)
+    return _shell(f"""
+  <div class=topbar2><h2 class=applogo>backup-monitor</h2>
+    <div class=seg role=tablist>
+      <button data-h=steel onclick="setHero('steel')">Summary</button>
+      <button data-h=heat onclick="setHero('heat')">14-day fleet</button></div>
+    <a class=signout href=# onclick="lo.submit();return false">sign out</a></div>
+  <div id=hero-steel class=herox>{steel_hero}</div>
+  <div id=hero-heat class=herox><div class=hero>
+    <div class=hero-top><span class="verd {vcls}">{verdict}</span>
+      <span class=tag>{h['targets']} targets · {c.get('OK',0)} ok · {c.get('WARN',0)} warn · {c.get('CRIT',0)} crit · as of {ts}</span></div>
+    <div class=heat><div class=heatspan>Last 14 days &nbsp;·&nbsp; {heat_span}</div>
+      <table>{heat_rows}</table></div></div></div>
+  <div class=split>
+    <div class=rail>
+      <div class=gauge-wrap><canvas id=gauge width=300 height=300></canvas>
+        <div class=gauge-cap>Busiest pool<span>{glabel} · {gpct}% used</span></div></div>
+      <div class=railsec><h3>Coverage gaps</h3>{gaps_html}</div>
+    </div>
+    <div class=main>{cards}<div id=actlog>idle - actions stream here.</div></div>
+    <div class=legend><h3>Metric key</h3><dl class=lg>{leg}</dl></div>
+  </div>
+  <script>var GP={{pct:{gpct},label:"{glabel}"}};</script>""")
