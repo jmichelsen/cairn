@@ -19,26 +19,32 @@ cp config/targets.example.yaml       config/targets.yaml         # list YOUR poo
 # edit the collector mounts in docker-compose.yml to your borg/backupninja paths, then:
 docker compose up -d --build
 ```
-Open `http://<host>:8929/`. The `api` service serves the dashboard; the `collector` service
-polls every `BM_INTERVAL` seconds. **Monitoring needs no root** - the collector reads ZFS via a
-mounted `/dev/zfs` and reads borg/backupninja paths read-only.
+Open `http://<host>:8929/`. The **`api`** service is a pure control plane (stores state, serves
+the dashboard, dispatches alerts - it never touches ZFS). The **`agent`** service reads *this*
+host's ZFS (via mounted `/dev/zfs`, unprivileged) + borg/backupninja and reports to the API every
+`BM_INTERVAL` seconds. **Monitoring needs no root.**
 
-**On-demand actions** (the Replicate/Snapshot/Scrub buttons) run a tiny **host-side** root
-runner - the one privileged piece - so the network-facing container never has pool-destroying
-rights. Add it only if you want actions: see `phase3/DEPLOY.md`.
+**One agent, any distance.** The same `agent.py` runs on a remote **off-site vault** pointed at
+the API's public URL + a token - outbound HTTPS only, no separate design. See `AGENT.md`.
+
+**On-demand actions** (Replicate/Snapshot/Scrub buttons) are executed by an agent running with
+`BM_CAN_EXECUTE=1` (needs ZFS write privilege - run it on the host as root, or grant the container
+`SYS_ADMIN`). Commands are built from the agent's trusted local config, never from the wire.
 
 ## What runs where
 
-| Piece | Where | Privilege |
+| Piece | Component | Privilege |
 | --- | --- | --- |
-| API + dashboard, collector, SQLite, notifications, borg + backupninja reads | **container** | unprivileged |
-| ZFS reads (`zpool`/`zfs list`) | **container** | needs `/dev/zfs` mounted; matching ZFS major version (or mount host binaries) |
-| SMART | **container** | needs disk device passthrough + `SYS_RAWIO` (optional) |
-| On-demand actions (`syncoid`/`zfs snapshot`/`zpool scrub`) | **host** | one small root systemd runner - the only privileged component |
+| API + dashboard, SQLite, alert dispatch (**no host access**) | **api** (container) | unprivileged; holds the SMTP/Gotify creds |
+| ZFS/borg/backupninja **reads** → report to API | **agent** (container or host) | `/dev/zfs` mounted; matching ZFS major (or mount host binaries) |
+| SMART | **agent** | disk device passthrough + `SYS_RAWIO` (optional) |
+| On-demand **actions** (`syncoid`/`zfs snapshot`/`zpool scrub`) | **agent** with `BM_CAN_EXECUTE=1` | ZFS write → host root or container `SYS_ADMIN` |
+| Off-site **vault** reporting + pulls | **same agent**, remote | outbound HTTPS + token; no inbound, no creds |
 
-A ZFS *action* tool can't fully avoid host root; the design shrinks that to one auditable
-~200-line runner and keeps everything else in an unprivileged container. Monitoring-only users
-never install it.
+**One uniform agent** does all host work - locally and remotely - talking only HTTP to the API.
+The API never touches ZFS. A ZFS *action* tool can't avoid *some* write privilege where actions
+run, but it lives only in an agent you opt into (`BM_CAN_EXECUTE`); monitoring-only agents and the
+API are unprivileged.
 
 ## Status
 
@@ -47,24 +53,23 @@ never install it.
 | 0 | Alerting now, no app: sanoid/pool/scrub checks → email + Gotify, hourly timer | **built + tested** (deploy: `phase0/INSTALL.md`) |
 | 1 | Collector → SQLite → JSON API + derived views (badge, 3-2-1, coverage-gap, timeline) | **built + tested vs live data** (deploy: `phase1/DEPLOY.md`) |
 | 2 | Homepage widget + fuller dashboard | pending |
-| 3 | **Local actions** (snapshot / replicate / scrub) - UI buttons → intent → root path-unit runner | **built + dry-run tested** (`phase3/DEPLOY.md`) |
-| 3b | Vault poll agent + guarded restore | endpoints stubbed |
+| 3 | **Actions** (snapshot / replicate / scrub) - buttons → intent → owning agent executes | **built + dry-run tested** (`AGENT.md`) |
+| ✔ | **Control-plane + uniform agent** - one HTTP agent, local or remote vault; API touches no host | **built + end-to-end tested** |
 | 4 | Recovery-point catalog via `httm` | pending |
 
 ## Layout
 
 ```
-backup-monitor.env.example   shared config (email, Gotify, paths, thresholds)
-targets.yaml                 monitored backups + thresholds (source of truth for phase1)
-phase0/  notify.sh           shared notifier: email always, Gotify on CRIT, per-key cooldown
-         check_backups.sh    coarse all-pool check (snapshots, health, capacity, scrub)
-         backup-check.{service,timer}   systemd units
-         INSTALL.md
-phase1/  schema.sql          SQLite schema (targets, status, intents, vault_reports)
-         collector.py        4 adapters (zfs-local, zfs-repl, borg, backupninja) → SQLite
-         api.py              read-only views + minimal HTML dashboard + vault/intent stubs
-         requirements.txt    PyYAML, FastAPI, uvicorn
-         DEPLOY.md
+Dockerfile  docker-compose.yml  entrypoint.sh   container build (api + agent)
+agent.py                        the ONE uniform agent (report + execute over HTTP)
+AGENT.md                        how to run it: local, vault, execute mode
+config/  *.example              generic env + targets templates (copy to real, edit)
+targets.yaml                    the maintainer's live target list (yourhost reference)
+phase0/  notify.sh              notifier: email (SMTP) + Gotify on CRIT, per-key cooldown
+         check_backups.sh + units    standalone host alerting (Phase 0, optional)
+phase1/  schema.sql             SQLite schema (targets, status, intents)
+         collector.py           adapter library (zfs/borg/backupninja/smart) + collect_all()
+         api.py                 control plane: report ingest, intent routing, views, dashboard
 ```
 
 ## Example findings

@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS targets (
   location      TEXT,                   -- onsite | onsite-secondary | offsite
   cadence       TEXT,
   encrypted     INTEGER DEFAULT 0,
+  agent         TEXT,                   -- which agent reported/owns this target (routes intents)
   meta_json     TEXT,                   -- full target dict (thresholds, notes)
   enabled       INTEGER DEFAULT 1
 );
@@ -52,7 +53,8 @@ CREATE INDEX IF NOT EXISTS idx_status_target_ts ON status(target_id, ts);
 CREATE TABLE IF NOT EXISTS intents (
   id            INTEGER PRIMARY KEY,
   target_id     INTEGER REFERENCES targets(id),
-  action        TEXT NOT NULL,          -- sync | scrub | status | restore
+  action        TEXT NOT NULL,          -- snapshot | sync | scrub | restore
+  opts          TEXT,                   -- JSON action options, e.g. {"create_snapshot": true}
   state         TEXT NOT NULL DEFAULT 'pending', -- pending|claimed|running|done|failed|stalled
   requested_by  TEXT,
   created_ts    INTEGER NOT NULL,

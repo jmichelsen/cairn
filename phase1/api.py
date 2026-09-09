@@ -35,6 +35,12 @@ def _init_db():
     if schema.is_file():
         with sqlite3.connect(DB) as c:
             c.executescript(schema.read_text())
+            # idempotent migrations for DBs created before these columns existed
+            for tbl, col, typ in [("targets", "agent", "TEXT"), ("intents", "opts", "TEXT")]:
+                try:
+                    c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
+                except sqlite3.OperationalError:
+                    pass  # already exists
 _init_db()
 
 def latest_status(conn):
@@ -137,50 +143,115 @@ def timeline(days: int = 14):
                 grid[r["name"]][day] = r["severity"]  # worst wins per day
     return {"days": days, "grid": grid}
 
-# ---------------- vault call-home (token-authed) ----------------
+# ---------------- control plane: agents report status + poll intents (token-authed) ----------------
+# The API never touches ZFS/borg/disks. Agents (local + remote) do all host work and talk HTTP.
+import subprocess
+NOTIFY_SH = os.environ.get("NOTIFY_SH", str(HERE.parent / "phase0" / "notify.sh"))
+ALLOWED_ACTIONS = {"snapshot", "sync", "scrub"}
+STATUS_INGEST_COLS = ["snap_age_src_s","snap_age_dst_s","repl_lag_s","pool_health","pool_cap_pct",
+    "last_scrub_ts","usedbysnapshots","compressratio","key_status","archive_count","dedup_ratio",
+    "logical_size","physical_size","last_check_ts","last_check_result","lock_state","handler_type",
+    "handler_result","last_run_ts","detail_json","last_error"]
+
+def dispatch_alert(sev, title, body, key, info_email=False):
+    """Central alerting - the API is the only place email/Gotify go out (agents carry no creds)."""
+    if not os.path.exists(NOTIFY_SH):
+        return
+    if sev == "INFO" and not info_email:
+        return
+    env = dict(os.environ)
+    if info_email:
+        env["NOTIFY_INFO_EMAIL"] = "1"
+    try:
+        subprocess.run(["bash", NOTIFY_SH, sev, title, body or sev, key], env=env, timeout=30)
+    except Exception:
+        pass
+
 @app.post("/api/v1/backup/report")
-async def vault_report(request: Request, x_backup_token: str = Header(default="")):
+async def report(request: Request, x_backup_token: str = Header(default="")):
+    """An agent reports its host's status. Upserts targets (ownership = reporting agent) +
+    inserts status rows, then dispatches WARN/CRIT alerts centrally."""
     require_token(x_backup_token)
     payload = await request.json()
-    agent = payload.get("agent", "vault")
+    agent = payload.get("agent", "unknown")
+    now = int(payload.get("ts") or time.time())
+    statuses = payload.get("statuses", [])
+    alerts = []
     with db() as conn:
-        conn.execute("INSERT INTO vault_reports(ts,agent,payload_json) VALUES(?,?,?)",
-                     (int(time.time()), agent, json.dumps(payload)))
+        for s in statuses:
+            name = s.get("name")
+            if not name:
+                continue
+            tid = conn.execute("""INSERT INTO targets(name,type,source,dest,tier,location,encrypted,agent,enabled)
+                VALUES(?,?,?,?,?,?,?,?,1)
+                ON CONFLICT(name) DO UPDATE SET type=excluded.type,source=excluded.source,dest=excluded.dest,
+                  tier=excluded.tier,location=excluded.location,encrypted=excluded.encrypted,agent=excluded.agent
+                RETURNING id""",
+                (name, s.get("type"), s.get("source"), s.get("dest"), s.get("tier"),
+                 s.get("location"), 1 if s.get("encrypted") else 0, agent)).fetchone()[0]
+            cols = ["ts", "target_id", "severity"] + STATUS_INGEST_COLS
+            vals = [now, tid, s.get("severity", "UNKNOWN")] + [s.get(c) for c in STATUS_INGEST_COLS]
+            conn.execute(f"INSERT INTO status({','.join(cols)}) VALUES({','.join('?'*len(cols))})", vals)
+            if s.get("severity") in ("WARN", "CRIT"):
+                d = {}
+                try:
+                    d = json.loads(s.get("detail_json") or "{}")
+                except (ValueError, TypeError):
+                    pass
+                why = ", ".join(d.get("reasons", [])) or (s.get("last_error") or "")
+                alerts.append((s["severity"], f"{name}: {s['severity']}", f"[{agent}] {why}".strip(), f"bm-{name}"))
+        conn.execute("DELETE FROM status WHERE ts < ?", (now - 90 * DAY,))
         conn.commit()
-    return {"ok": True}
+    for a in alerts:
+        dispatch_alert(*a)
+    return {"ok": True, "ingested": len(statuses)}
 
 @app.get("/api/v1/backup/intents")
-def poll_intents(agent: str = "vault", x_backup_token: str = Header(default="")):
+def poll_intents(agent: str, x_backup_token: str = Header(default="")):
+    """An agent claims the pending intents for the targets IT owns (routed by targets.agent)."""
     require_token(x_backup_token)
     now = int(time.time())
     with db() as conn:
-        rows = [dict(r) for r in conn.execute(
-            "SELECT * FROM intents WHERE state='pending' ORDER BY created_ts").fetchall()]
-        for r in rows:  # claim
+        rows = [dict(r) for r in conn.execute("""
+            SELECT i.id, i.action, i.opts, t.name AS target
+            FROM intents i JOIN targets t ON t.id=i.target_id
+            WHERE i.state='pending' AND t.agent=? ORDER BY i.created_ts""", (agent,)).fetchall()]
+        for r in rows:
             conn.execute("UPDATE intents SET state='claimed',claimed_ts=?,claimed_by=? WHERE id=?",
                          (now, agent, r["id"]))
+            opts = {}
+            try:
+                opts = json.loads(r.pop("opts") or "{}")
+            except (ValueError, TypeError):
+                r.pop("opts", None)
+            r["create_snapshot"] = opts.get("create_snapshot", True)
         conn.commit()
     return {"intents": rows}
 
 @app.post("/api/v1/backup/intents/{iid}/result")
 async def intent_result(iid: int, request: Request, x_backup_token: str = Header(default="")):
+    """An agent reports an action's outcome. The API fires the action-outcome notification."""
     require_token(x_backup_token)
     body = await request.json()
-    state = "done" if body.get("ok") else "failed"
+    ok = bool(body.get("ok"))
+    state = "done" if ok else "failed"
     with db() as conn:
+        r = conn.execute("SELECT i.action, t.name AS target FROM intents i "
+                         "LEFT JOIN targets t ON t.id=i.target_id WHERE i.id=?", (iid,)).fetchone()
         conn.execute("UPDATE intents SET state=?,result=?,result_ts=? WHERE id=?",
-                     (state, json.dumps(body), int(time.time()), iid))
+                     (state, json.dumps(body)[:4000], int(time.time()), iid))
         conn.commit()
-    # NOTE: Phase 3 fires the action-outcome notification here (email; failed->+Gotify).
+    tgt = r["target"] if r else "?"; act = r["action"] if r else "?"
+    out = (body.get("output") or "")[:1500]
+    if ok:
+        dispatch_alert("INFO", f"action done: {tgt} {act}", out, f"act-{iid}", info_email=True)
+    else:
+        dispatch_alert("CRIT", f"action FAILED: {tgt} {act}", out, f"act-{iid}")
     return {"ok": True, "state": state}
 
-# ---------------- actions (Phase 3): create/list local intents ----------------
-# The API only QUEUES intents (unprivileged): it inserts a row + drops a run-file in
-# INTENT_DIR. The root backup-action.path unit picks it up and executes via the runner.
-# Keep this surface PRIVATE (behind a reverse proxy / VPN) - never on the public token path.
-INTENT_DIR = Path(os.environ.get("INTENT_DIR", "/run/backup-intents"))
-ALLOWED_ACTIONS = {"snapshot", "sync", "scrub"}
-
+# ---------------- actions: the dashboard queues an intent (routed to the owning agent) ----------------
+# No files, no host executor. The intent waits in the DB until the target's agent polls for it.
+# Keep this POST surface PRIVATE (reverse proxy / VPN) - never on the public token path.
 @app.post("/api/v1/backup/actions")
 async def create_action(request: Request):
     body = await request.json()
@@ -190,7 +261,7 @@ async def create_action(request: Request):
     if action not in ALLOWED_ACTIONS:
         raise HTTPException(400, f"action must be one of {sorted(ALLOWED_ACTIONS)}")
     with db() as conn:
-        r = conn.execute("SELECT id,type,source,dest,enabled FROM targets WHERE name=?",
+        r = conn.execute("SELECT id,type,source,dest,enabled,agent FROM targets WHERE name=?",
                          (target,)).fetchone()
         if not r or not r["enabled"]:
             raise HTTPException(404, f"unknown/disabled target '{target}'")
@@ -200,25 +271,16 @@ async def create_action(request: Request):
             raise HTTPException(400, "scrub only valid for zfs-local targets")
         if action == "snapshot" and not r["source"]:
             raise HTTPException(400, "target has no source dataset")
+        if not r["agent"]:
+            raise HTTPException(409, f"no agent has reported target '{target}' yet - can't route it")
         cur = conn.execute(
-            "INSERT INTO intents(target_id,action,state,requested_by,created_ts) "
-            "VALUES(?,?,'pending',?,strftime('%s','now'))", (r["id"], action, requested_by))
+            "INSERT INTO intents(target_id,action,opts,state,requested_by,created_ts) "
+            "VALUES(?,?,?,'pending',?,strftime('%s','now'))",
+            (r["id"], action, json.dumps({"create_snapshot": create_snapshot}), requested_by))
         iid = cur.lastrowid
         conn.commit()
-    try:
-        INTENT_DIR.mkdir(parents=True, exist_ok=True)
-        payload = dict(id=iid, target=target, action=action,
-                       create_snapshot=create_snapshot, requested_by=requested_by)
-        tmp = INTENT_DIR / f".{iid}.tmp"
-        tmp.write_text(json.dumps(payload))
-        tmp.rename(INTENT_DIR / f"{iid}.intent")   # atomic: runner never sees a partial file
-    except OSError as e:
-        with db() as conn:
-            conn.execute("UPDATE intents SET state='failed',result=? WHERE id=?",
-                         (f"could not queue run-file: {e}", iid)); conn.commit()
-        raise HTTPException(500, f"queued in DB but run-file write failed: {e}")
     return {"id": iid, "state": "pending", "target": target, "action": action,
-            "create_snapshot": create_snapshot}
+            "agent": r["agent"], "create_snapshot": create_snapshot}
 
 @app.get("/api/v1/backup/actions")
 def list_actions(limit: int = 20):

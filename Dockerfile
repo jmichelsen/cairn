@@ -27,9 +27,9 @@ RUN pip install --no-cache-dir pyyaml "fastapi>=0.110" "uvicorn[standard]>=0.29"
 WORKDIR /app
 COPY phase0 /app/phase0
 COPY phase1 /app/phase1
-COPY phase3 /app/phase3
+COPY agent.py /app/agent.py
 COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh /app/phase0/*.sh /app/phase3/*.sh /app/phase3/*.py 2>/dev/null || true
+RUN chmod +x /app/entrypoint.sh /app/agent.py /app/phase0/*.sh 2>/dev/null || true
 
 ENV BM_DB=/data/backup-monitor.db \
     BM_TARGETS=/config/targets.yaml \

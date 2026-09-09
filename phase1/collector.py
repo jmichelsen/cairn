@@ -421,25 +421,15 @@ def alert(st, tname):
     body = f"target={tname} severity={st['severity']} {reasons} {st.get('last_error') or ''}".strip()
     run(["bash", str(NOTIFY), st["severity"], f"{tname}: {st['severity']}", body, f"bm1-{tname}"], timeout=30)
 
-# ---------- main ----------
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--once", action="store_true")
-    ap.add_argument("--db", default=None)
-    ap.add_argument("--targets", default=None)
-    ap.add_argument("--alert", action="store_true", help="send notify.sh alerts for WARN/CRIT")
-    ap.add_argument("--print", dest="pr", action="store_true", help="print a summary table")
-    a = ap.parse_args()
-    load_env()
-    db = a.db or os.environ.get("BM_DB", "/var/lib/backup-monitor/backup-monitor.db")
-    tf = a.targets or os.environ.get("BM_TARGETS", str(HERE.parent / "targets.yaml"))
-    cfg = yaml.safe_load(Path(tf).read_text())
+# ---------- shared collection + action-command building (used by main() and the agent) ----------
+def collect_all(cfg, now=None):
+    """Run every target's adapter. Returns [(target_dict_with_name, status_dict), ...].
+    Sub-status targets (borg/backupninja/smart yield several) get 'name:suffix' names."""
+    if now is None:
+        now = int(time.time())
     defaults = cfg["defaults"]; scrub_cad = cfg.get("scrub_cadence", {})
-    now = int(time.time()); pools = zpool_list()
-
-    Path(db).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db); ensure_schema(conn)
-    rows = []
+    pools = zpool_list()
+    out = []
     for t in cfg["targets"]:
         typ = t["type"]
         try:
@@ -455,17 +445,64 @@ def main():
                 sts = adapter_backupninja(t, defaults, now)
             else:
                 sts = [dict(severity="UNKNOWN", last_error=f"unknown type {typ}")]
-        except Exception as e:  # never let one target kill the run
+        except Exception as e:
             sts = [dict(severity="UNKNOWN", last_error=f"adapter error: {e}")]
-        # backupninja/borg may yield multiple sub-statuses -> synthesize sub-target names
         for i, st in enumerate(sts):
             name = t["name"] if len(sts) == 1 else f"{t['name']}:{st.get('name_suffix', i)}"
-            sub = dict(t, name=name)
-            tid = upsert_target(conn, sub)
-            write_status(conn, tid, st, now)
-            if a.alert:
-                alert(st, name)
-            rows.append((name, st.get("severity", "UNKNOWN"), st))
+            out.append((dict(t, name=name), st))
+    return out
+
+def build_command(action, t, opts=None):
+    """Map (action, target) -> argv from the TRUSTED local target config. Never from the wire.
+    Returns (argv|None, error|None). The action allowlist for the agent's executor."""
+    opts = opts or {}
+    typ = t.get("type"); src = t.get("source")
+    if action == "snapshot":
+        if not src:
+            return None, "target has no source dataset"
+        return ["zfs", "snapshot", f"{src}@bm-manual-{time.strftime('%Y%m%dT%H%M%S')}"], None
+    if action == "sync":
+        if typ != "zfs-repl":
+            return None, f"'sync' not allowed for type '{typ}'"
+        dst = t.get("dest")
+        if not src or not dst:
+            return None, "target missing source/dest"
+        cmd = ["syncoid", "--no-privilege-elevation", "--no-stream"]
+        if not opts.get("create_snapshot", True):
+            cmd.append("--no-sync-snap")
+        return cmd + [src, dst], None
+    if action == "scrub":
+        if typ != "zfs-local":
+            return None, f"'scrub' not allowed for type '{typ}'"
+        pool = (src or "").split("/")[0]
+        return (["zpool", "scrub", pool], None) if pool else (None, "no pool for scrub")
+    return None, f"unknown action '{action}'"
+
+# ---------- main ----------
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--db", default=None)
+    ap.add_argument("--targets", default=None)
+    ap.add_argument("--alert", action="store_true", help="send notify.sh alerts for WARN/CRIT")
+    ap.add_argument("--print", dest="pr", action="store_true", help="print a summary table")
+    a = ap.parse_args()
+    load_env()
+    db = a.db or os.environ.get("BM_DB", "/var/lib/backup-monitor/backup-monitor.db")
+    tf = a.targets or os.environ.get("BM_TARGETS", str(HERE.parent / "targets.yaml"))
+    cfg = yaml.safe_load(Path(tf).read_text())
+    defaults = cfg["defaults"]; scrub_cad = cfg.get("scrub_cadence", {})
+    now = int(time.time())
+
+    Path(db).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db); ensure_schema(conn)
+    rows = []
+    for sub, st in collect_all(cfg, now):
+        tid = upsert_target(conn, sub)
+        write_status(conn, tid, st, now)
+        if a.alert:
+            alert(st, sub["name"])
+        rows.append((sub["name"], st.get("severity", "UNKNOWN"), st))
     conn.commit()
     # prune status older than 90 days
     conn.execute("DELETE FROM status WHERE ts < ?", (now - 90 * DAY,))
