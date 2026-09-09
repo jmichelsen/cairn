@@ -74,3 +74,14 @@ CREATE TABLE IF NOT EXISTS vault_reports (
   payload_json  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_vault_reports_ts ON vault_reports(agent, ts);
+
+-- Auth tokens, HASH-AT-REST: only sha256(token) is stored, never the token. One row per
+-- credential (per-agent tokens are individually revocable). role: admin | agent.
+CREATE TABLE IF NOT EXISTS auth_tokens (
+  hash        TEXT PRIMARY KEY,       -- sha256 hex of the token
+  role        TEXT NOT NULL,          -- admin | agent
+  label       TEXT UNIQUE,            -- human name, e.g. 'vault', 'local', 'bootstrap-admin'
+  created_ts  INTEGER,
+  last_used_ts INTEGER,
+  active      INTEGER DEFAULT 1
+);

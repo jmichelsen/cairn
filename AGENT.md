@@ -21,9 +21,22 @@ Every API request needs a token - no request is trusted for being local. Two rol
   queue actions.
 - **admin token** (`BM_ADMIN_TOKEN` on the API) - dashboard login + read views + queueing actions.
 
-The agent presents its token via the `X-Backup-Token` header on every call. Set the API's
-`BM_AGENT_TOKENS` (comma-separated) to the agent tokens you issue. Generate tokens with
-`openssl rand -hex 32`.
+The agent presents its token via the `X-Backup-Token` header on every call.
+
+**Per-agent tokens, hash-at-rest.** Each agent gets its OWN token (one row, individually
+revocable) and the API stores only `sha256(token)` - never the token. Mint one per box:
+
+```
+# via the admin API (from anywhere, with the admin token):
+curl -X POST -H "X-Backup-Token: $ADMIN" -H 'Content-Type: application/json' \
+     -d '{"role":"agent","label":"vault"}' https://backups.example.com/api/v1/backup/tokens
+# or offline on the API host (direct DB):
+BM_DB=/data/backup-monitor.db phase1/bmtoken.py mint --role agent --label vault
+```
+The token is shown **once**; put it in the agent's `BM_API_TOKEN`. Revoke a single box without
+touching the others: `DELETE /api/v1/backup/tokens/vault` (or `bmtoken.py revoke --label vault`).
+`GET /api/v1/backup/tokens` lists labels/roles/last-used (never the secret). The bootstrap admin
+comes from `BM_ADMIN_TOKEN` (hashed at startup); mint more admins the same way.
 
 ## Config (env)
 

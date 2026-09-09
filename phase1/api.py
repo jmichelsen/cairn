@@ -21,16 +21,33 @@ app = FastAPI(title="backup-monitor", version="1.0")
 
 SEV_ORDER = {"CRIT": 0, "WARN": 1, "UNKNOWN": 2, "OK": 3}
 
-# ---------------- zero-trust auth: every request needs a token, no exceptions ----------------
-# Two roles. ADMIN_TOKEN = full access (dashboard, read views, queue actions). AGENT_TOKENS =
-# report/poll/result ONLY (a compromised agent can't read everything or trigger actions). The
-# admin token also satisfies the agent role. Set BM_ADMIN_TOKEN + BM_AGENT_TOKENS (comma-sep) to
-# separate them; if only BM_API_TOKEN/BM_ADMIN_TOKEN is set, one token serves both roles.
-ADMIN_TOKEN = os.environ.get("BM_ADMIN_TOKEN") or os.environ.get("BM_API_TOKEN", "")
-AGENT_TOKENS = set(t.strip() for t in os.environ.get("BM_AGENT_TOKENS", "").split(",") if t.strip())
-if not AGENT_TOKENS and ADMIN_TOKEN:
-    AGENT_TOKENS = {ADMIN_TOKEN}
+# ---------------- zero-trust auth: every request needs a token; HASH-AT-REST ----------------
+# Only sha256(token) is ever stored (auth_tokens table). Two roles: admin (dashboard/views/
+# actions) and agent (report/poll/result only). Per-agent tokens are individual rows, so one can
+# be revoked without touching the others. Bootstrap: BM_ADMIN_TOKEN (plaintext env) is hashed
+# into the store at startup; mint per-agent tokens via POST /tokens or the bmtoken CLI.
+import hashlib as _hashlib, secrets as _secrets
 AGENT_PATHS = ("/api/v1/backup/report", "/api/v1/backup/intents")  # + /intents/{id}/result
+
+def _hash(token):
+    return _hashlib.sha256(token.encode()).hexdigest()
+
+def _seed_tokens():
+    """Seed the store from env (hash-at-rest). Idempotent. Plaintext env is only a bootstrap
+    secret - it is hashed, never stored raw."""
+    now = int(time.time())
+    seeds = []
+    adm = os.environ.get("BM_ADMIN_TOKEN") or os.environ.get("BM_API_TOKEN")
+    if adm:
+        seeds.append((_hash(adm), "admin", "bootstrap-admin"))
+    for i, t in enumerate(x.strip() for x in os.environ.get("BM_AGENT_TOKENS", "").split(",") if x.strip()):
+        seeds.append((_hash(t), "agent", f"env-agent-{i}"))
+    with db() as c:
+        for h, role, label in seeds:
+            c.execute("INSERT OR IGNORE INTO auth_tokens(hash,role,label,created_ts,active) "
+                      "VALUES(?,?,?,?,1)", (h, role, label, now))
+        c.commit()
+        return c.execute("SELECT COUNT(*) FROM auth_tokens WHERE role='admin' AND active=1").fetchone()[0]
 
 def _extract_token(request):
     t = request.headers.get("x-backup-token")
@@ -41,27 +58,35 @@ def _extract_token(request):
         return auth[7:]
     return request.cookies.get("bm_token", "")
 
-def _valid(token, role):
-    if not ADMIN_TOKEN:
-        return False  # nothing configured -> deny all (fail closed)
-    if role == "admin":
-        return hmac.compare_digest(token, ADMIN_TOKEN)
-    # agent role: admin token also works
-    if hmac.compare_digest(token, ADMIN_TOKEN):
-        return True
-    return any(hmac.compare_digest(token, t) for t in AGENT_TOKENS)
+def _lookup_role(token):
+    """Return the role for a presented token, or None. Hash lookup = no plaintext at rest."""
+    if not token:
+        return None
+    h = _hash(token)
+    with db() as c:
+        r = c.execute("SELECT role FROM auth_tokens WHERE hash=? AND active=1", (h,)).fetchone()
+        if r:
+            c.execute("UPDATE auth_tokens SET last_used_ts=? WHERE hash=?", (int(time.time()), h))
+            c.commit()
+    return r["role"] if r else None
+
+def _valid(token, need):
+    role = _lookup_role(token)
+    if role is None:
+        return False
+    return role == "admin" if need == "admin" else role in ("admin", "agent")
 
 @app.middleware("http")
 async def auth_gate(request: Request, call_next):
     p = request.url.path
     if p == "/login" or p == "/favicon.ico":
         return await call_next(request)
-    if not ADMIN_TOKEN:
-        return JSONResponse({"detail": "server has no BM_ADMIN_TOKEN configured"}, status_code=503)
+    if not HAS_ADMIN:
+        return JSONResponse({"detail": "no admin token configured - set BM_ADMIN_TOKEN and restart"},
+                            status_code=503)
     role = "agent" if p.startswith(AGENT_PATHS) else "admin"
     if _valid(_extract_token(request), role):
         return await call_next(request)
-    # browser GET of an admin page -> send to login; everything else -> 401
     wants_html = "text/html" in request.headers.get("accept", "")
     if role == "admin" and wants_html and request.method == "GET":
         return RedirectResponse("/login", status_code=302)
@@ -83,7 +108,7 @@ async def login_submit(request: Request):
     from urllib.parse import parse_qs
     raw = (await request.body()).decode("utf-8", "replace")
     token = parse_qs(raw).get("token", [""])[0].strip()
-    if ADMIN_TOKEN and hmac.compare_digest(token, ADMIN_TOKEN):
+    if _valid(token, "admin"):
         r = RedirectResponse("/", status_code=302)
         r.set_cookie("bm_token", token, httponly=True, samesite="strict",
                      secure=request.url.scheme == "https", max_age=30 * DAY)
@@ -116,6 +141,7 @@ def _init_db():
                 except sqlite3.OperationalError:
                     pass  # already exists
 _init_db()
+HAS_ADMIN = _seed_tokens() > 0   # false => middleware returns 503 until BM_ADMIN_TOKEN is set
 
 def latest_status(conn):
     """Latest status row per target, joined to target meta."""
@@ -372,6 +398,50 @@ def get_action(iid: int):
     if not r:
         raise HTTPException(404, "no such action")
     return dict(r)
+
+# ---------------- token management (admin role; hash-at-rest) ----------------
+@app.post("/api/v1/backup/tokens")
+async def mint_token(request: Request):
+    body = await _json(request)
+    role = body.get("role"); label = body.get("label")
+    if role not in ("admin", "agent"):
+        raise HTTPException(400, "role must be 'admin' or 'agent'")
+    if not label:
+        raise HTTPException(400, "label required (e.g. the agent/host name)")
+    token = _secrets.token_hex(32)
+    try:
+        with db() as c:
+            c.execute("INSERT INTO auth_tokens(hash,role,label,created_ts,active) VALUES(?,?,?,?,1)",
+                      (_hash(token), role, label, int(time.time())))
+            c.commit()
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, f"label '{label}' already exists")
+    global HAS_ADMIN
+    if role == "admin":
+        HAS_ADMIN = True
+    return {"token": token, "label": label, "role": role,
+            "note": "SAVE THIS NOW - only its hash is stored; it can never be shown again"}
+
+@app.get("/api/v1/backup/tokens")
+def list_tokens():
+    with db() as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT label,role,created_ts,last_used_ts,active FROM auth_tokens ORDER BY role,label")]
+    return {"tokens": rows}   # never returns the token or its hash
+
+@app.delete("/api/v1/backup/tokens/{label}")
+def revoke_token(label: str):
+    with db() as c:
+        row = c.execute("SELECT role,active FROM auth_tokens WHERE label=?", (label,)).fetchone()
+        if not row:
+            raise HTTPException(404, f"no token labelled '{label}'")
+        if row["role"] == "admin" and row["active"]:
+            n = c.execute("SELECT COUNT(*) FROM auth_tokens WHERE role='admin' AND active=1").fetchone()[0]
+            if n <= 1:
+                raise HTTPException(409, "refusing to revoke the last active admin token (lockout guard)")
+        c.execute("UPDATE auth_tokens SET active=0 WHERE label=?", (label,))
+        c.commit()
+    return {"ok": True, "revoked": label}
 
 # ---------------- HTML dashboard + on-demand action buttons ----------------
 BADGE = {"CRIT": "#c0392b", "WARN": "#e67e22", "UNKNOWN": "#7f8c8d", "OK": "#27ae60"}
