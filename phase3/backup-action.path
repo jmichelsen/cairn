@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch for queued backup-monitor intents and run the action runner
+
+[Path]
+# Fires backup-action.service whenever a *.intent file is present in the queue dir.
+# The runner processes all pending intents and removes them, so the unit re-arms.
+PathExistsGlob=/run/backup-intents/*.intent
+Unit=backup-action.service
+
+[Install]
+WantedBy=paths.target

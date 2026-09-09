@@ -1,0 +1,42 @@
+# backup-monitor targets - copy to config/targets.yaml and edit for YOUR system.
+# One entry per backup you want tracked. Thresholds are hours unless noted; capacity is percent.
+
+defaults:
+  repl_warn_h: 28        # replication lag: WARN (one nightly run missed + grace)
+  repl_crit_h: 50        #                  CRIT (two missed)
+  cap_warn_pct: 85       # pool capacity
+  cap_crit_pct: 92
+  scrub_warn_d: 40       # scrub age (days) - overridden per pool below
+  scrub_crit_d: 70
+  fresh_warn_h: 28       # borg/backupninja/snapshot freshness (daily cadence)
+  fresh_crit_h: 50
+
+# Per-pool scrub cadence -> scrub-age thresholds (days).
+scrub_cadence:
+  tank:  { warn_d: 40, crit_d: 70 }   # monthly scrub
+  fast:  { warn_d: 10, crit_d: 24 }   # weekly scrub
+
+targets:
+  # --- Replicated ZFS datasets: monitors replication LAG (newest snapshot common to src+dst)
+  #     and (for encrypted off-site copies) that the destination key stays unavailable. ---
+  - { name: photos, type: zfs-repl, source: tank/photos, dest: backup/photos, tier: A }
+  - { name: docs,   type: zfs-repl, source: tank/docs,   dest: backup/docs,   tier: A }
+  # Encrypted, zero-knowledge off-site copy: flags CRIT if the dest key ever loads.
+  - { name: private, type: zfs-repl, source: tank/private, dest: offsite/private, tier: A,
+      encrypted: true, vault_keystatus_expected: unavailable, location: offsite }
+
+  # --- Local pools: health, capacity, scrub age, snapshot freshness ---
+  - { name: tank,   type: zfs-local, source: tank }
+  - { name: backup, type: zfs-local, source: backup }
+
+  # --- borg repos (mount them read-only into the container). Encrypted repos need the
+  #     passphrase: set an env var and reference it with passphrase_env. ---
+  - { name: borg-home, type: borg-repo, source: /repos/home }
+  # - { name: borg-sys, type: borg-repo, source: /repos/system, passphrase_env: BORG_PASSPHRASE_SYS }
+
+  # --- SMART health of physical disks (needs device access - see docker-compose.yml) ---
+  - { name: smart, type: smart }
+
+  # --- backupninja: one status per handler, parsed from the log + reports (mount them ro) ---
+  - { name: backupninja, type: backupninja-handler, source: /etc/backup.d,
+      log: /var/log/backupninja.log, reports: /var/lib/backupninja/reports }

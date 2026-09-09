@@ -1,0 +1,17 @@
+[Unit]
+Description=backup-monitor Phase 1 collector (least-privilege, runs as jmichelsen)
+After=zfs.target network-online.target
+Wants=zfs.target
+
+[Service]
+Type=oneshot
+User=jmichelsen
+Group=jmichelsen
+# Needs 'backup' (borg repos) + 'adm' (backupninja log/reports). smartctl via scoped sudoers.
+SupplementaryGroups=backup adm
+Environment=BACKUP_MONITOR_ENV=/etc/backup-monitor/backup-monitor.env
+# Add --alert here ONLY if you disable phase0 backup-check.timer (avoid double-alerting).
+ExecStart=/usr/bin/python3 /opt/backup-monitor/phase1/collector.py
+Nice=10
+IOSchedulingClass=idle
+SuccessExitStatus=0 1

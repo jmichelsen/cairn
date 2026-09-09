@@ -1,0 +1,14 @@
+[Unit]
+Description=backup-monitor action runner (executes queued intents as root)
+After=zfs.target
+
+[Service]
+Type=oneshot
+# Runs as ROOT: syncoid/zfs snapshot/zpool scrub need it. The runner only executes the fixed
+# action allowlist built from the root-owned targets.yaml - never arbitrary intent strings.
+User=root
+Environment=BACKUP_MONITOR_ENV=/etc/backup-monitor/backup-monitor.env
+ExecStart=/usr/bin/python3 /opt/backup-monitor/phase3/backup-action-runner.py --once
+# Set BM_DRYRUN=1 here to test the full chain without executing (logs the command instead):
+# Environment=BM_DRYRUN=1
+TimeoutStartSec=7800

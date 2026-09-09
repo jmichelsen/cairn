@@ -1,0 +1,66 @@
+# backup-monitor - docker compose.
+#
+# Two services share one image: `api` (dashboard) and `collector` (populates the DB).
+# The unprivileged web tier never touches ZFS admin. On-demand ACTIONS (replicate/scrub) are
+# executed by a small HOST-side runner (see phase3/DEPLOY.md), NOT this container - so nothing
+# here needs pool-destroying privileges. The API only queues intents into a bind-mounted dir.
+#
+# Copy config/backup-monitor.env.example -> config/backup-monitor.env and
+#      config/targets.example.yaml     -> config/targets.yaml, then edit both.
+
+name: backup-monitor
+
+x-common: &common
+  build: .
+  image: backup-monitor:latest
+  env_file: [./config/backup-monitor.env]
+  environment:
+    BM_DB: /data/backup-monitor.db
+    BM_TARGETS: /config/targets.yaml
+    BACKUP_MONITOR_ENV: /config/backup-monitor.env
+  volumes:
+    - bmdata:/data
+    - ./config:/config:ro
+  restart: unless-stopped
+
+services:
+  api:
+    <<: *common
+    command: ["api"]
+    ports:
+      - "8929:8929"
+    # The API queues action intents here; the HOST runner (phase3) executes them.
+    # Omit this mount if you don't use on-demand actions.
+    volumes:
+      - bmdata:/data
+      - ./config:/config:ro
+      - /run/backup-intents:/run/backup-intents
+
+  collector:
+    <<: *common
+    command: ["collect"]
+    environment:
+      BM_INTERVAL: "900"      # seconds between collection passes
+      BM_ALERT: "1"           # 1 = send WARN/CRIT alerts from the collector
+    # --- host access the collector needs (adjust paths to YOUR system) ---
+    devices:
+      - /dev/zfs:/dev/zfs                       # ZFS ioctl device (required for zpool/zfs reads)
+    volumes:
+      - bmdata:/data
+      - ./config:/config:ro
+      # borg repos + backupninja log/reports, READ-ONLY (edit to your paths; omit if unused):
+      - /mnt/backups:/mnt/backups:ro
+      - /srv/borg-pre:/srv/borg-pre:ro
+      - /var/log/backupninja.log:/var/log/backupninja.log:ro
+      - /var/lib/backupninja/reports:/var/lib/backupninja/reports:ro
+      # SMART: pass the disks + raw-io cap (optional). Add one --device per disk or use privileged.
+      # cap_add: [SYS_RAWIO]
+      # devices: [/dev/sda, /dev/sdb, ...]
+    # If your host ZFS userland version differs from the image's, mount the host binaries+libs
+    # over the container's instead of relying on the image's zfsutils-linux, e.g.:
+    #   - /usr/sbin/zfs:/usr/sbin/zfs:ro
+    #   - /usr/sbin/zpool:/usr/sbin/zpool:ro
+    #   - /lib/x86_64-linux-gnu:/host-libs:ro   (+ set LD_LIBRARY_PATH)
+
+volumes:
+  bmdata:

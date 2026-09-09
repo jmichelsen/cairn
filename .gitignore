@@ -1,0 +1,10 @@
+# secrets & runtime state - never commit
+*.env
+.backup-monitor.env
+backup-monitor.env
+!backup-monitor.env.example
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc

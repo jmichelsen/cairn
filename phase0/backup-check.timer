@@ -1,0 +1,11 @@
+[Unit]
+Description=Run backup-monitor Phase 0 check hourly
+
+[Timer]
+# Hourly, with a jitter so it doesn't collide with sanoid/syncoid on the hour.
+OnCalendar=hourly
+RandomizedDelaySec=180
+Persistent=true
+
+[Install]
+WantedBy=timers.target
