@@ -75,6 +75,53 @@ The default `docker-compose.yml` runs it (`agent` service, report-only, ZFS read
 
 Read-only monitoring needs neither - the container agent reports fine unprivileged.
 
+## Upgrading past read-only (RO container → host agent)
+
+The default stack runs the agent as an unprivileged **container** - great for monitoring, but its
+action buttons are hidden, SMART is `UNKNOWN`, and kernel-watch needs a log mount. To unlock
+actions / SMART / native journald, replace it with the agent running **on the host**.
+
+**Two things the RO→host switch turns on that aren't obvious:**
+
+1. **Stop the container agent first.** Both report under the same `BM_AGENT_NAME` (`local`). If you
+   run *both*, each report flips the target's `can_execute` and ownership on every poll - buttons
+   flicker and intents route unpredictably. The host agent must *replace* the container one, not
+   run alongside it. (The `api` container keeps running - only `agent` stops.)
+2. **`zpool scrub` needs real root; everything else doesn't.** `zfs allow` can delegate
+   snapshot / send / receive / mount, but pool operations (`zpool scrub`) are not delegatable. So a
+   **non-root host agent running as your normal user** already unlocks snapshot, replicate,
+   recovery, and (via the `smart-probe.sh` sudoers wrapper) SMART + kernel-watch - the *only* thing
+   that still needs root is the Scrub button. Prefer the user agent; reach for root only if you want
+   Scrub under the app (or add a single `NOPASSWD: /usr/sbin/zpool scrub *` sudoers line and have
+   `build_command` prefix `sudo`).
+
+**Least-privilege check (do this once):** confirm your user holds the delegations the actions need -
+`zfs allow <srcpool>` should list `send,snapshot,mount`; `zfs allow <dstpool>` should list
+`receive,create,mount`. Missing pieces are granted with `zfs allow -u <you> <perms> <pool>` (needs
+root once).
+
+**The switch (user agent - recommended):**
+
+```
+cd ~/backup-monitor
+docker compose stop agent               # 1. drop the RO container agent (api stays up)
+./run-local-agent.sh report             # 2. report once, report-only - proves clean takeover
+./run-local-agent.sh dry                # 3. execute+DRYRUN: buttons appear; a click only LOGS the command
+                                        #    (click one in the UI, verify the [DRYRUN] line, Ctrl-C)
+install -Dm644 backup-monitor-agent.service ~/.config/systemd/user/backup-monitor-agent.service
+systemctl --user daemon-reload          # 4. install the persistent unit (shipped: backup-monitor-agent.service)
+systemctl --user enable --now backup-monitor-agent.service
+loginctl enable-linger "$USER"          #    keep it running across logout/reboot (may need root once)
+```
+
+Then click a **safe real action** (e.g. Snapshot on one dataset) and watch it reach `done`. The
+unit reads the token from `config/backup-monitor.env`; flip `BM_DRYRUN=1` in it (then
+`systemctl --user restart`) any time you want a rehearsal. `systemctl --user status
+backup-monitor-agent` / `journalctl --user -u backup-monitor-agent -f` for logs.
+
+**Rolling back** is symmetric: `systemctl --user disable --now backup-monitor-agent.service` then
+`docker compose start agent` returns you to the RO container.
+
 ## Remote agent (the off-site vault)
 
 Same `agent.py`, on the vault box, pointed at the API's public URL:
