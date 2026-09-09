@@ -78,6 +78,45 @@ def zpool_scrub_ts(pool):
     except ValueError:
         return line.strip(), None
 
+def zpool_status_detail(pool):
+    """Parse `zpool status <pool>` for the health signals a resilver/flaky-link event produces:
+    resilver state, non-ONLINE vdevs, and per-vdev READ/WRITE/CKSUM error counts. ZFS often
+    self-heals a transient (0B resilver, counters cleared), so a *recent resilver* is itself a flag."""
+    d = {"resilver": None, "resilver_ts": None, "bad_vdevs": [], "err_vdevs": []}
+    rc, out, _ = run(["zpool", "status", pool])
+    if rc != 0:
+        return d
+    in_table = False
+    STATES = ("ONLINE", "DEGRADED", "FAULTED", "OFFLINE", "UNAVAIL", "REMOVED", "SPARE", "REPLACING")
+    for ln in out.splitlines():
+        s = ln.strip()
+        if s.startswith("scan:"):
+            if "resilver in progress" in s:
+                d["resilver"] = "in_progress"
+            elif "resilvered" in s:
+                d["resilver"] = "done"
+                m = re.search(r" on (.+)$", s)
+                if m:
+                    rc2, ep, _ = run(["date", "-d", m.group(1), "+%s"])
+                    if rc2 == 0:
+                        try:
+                            d["resilver_ts"] = int(ep.strip())
+                        except ValueError:
+                            pass
+        if s.startswith("NAME") and "STATE" in s:
+            in_table = True; continue
+        if in_table:
+            if not s or s.startswith("errors:"):
+                in_table = False; continue
+            p = s.split()
+            if len(p) >= 5 and p[1] in STATES:
+                name, state, r, w, ck = p[0], p[1], p[2], p[3], p[4]
+                if state != "ONLINE" and name != pool:
+                    d["bad_vdevs"].append((name, state))
+                if any(x not in ("0",) for x in (r, w, ck)):
+                    d["err_vdevs"].append((name, r, w, ck))
+    return d
+
 def zfs_snapshots(ds):
     """[(name, guid, creation_epoch)] oldest->newest for a dataset (non-recursive)."""
     rc, out, _ = run(["zfs", "list", "-Hp", "-t", "snapshot", "-o", "name,guid,creation",
@@ -126,6 +165,23 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
             st["severity"] = worst(st["severity"], "CRIT"); reasons.append(f"cap {p['cap']}%>={cc}")
         elif p["cap"] >= cw:
             st["severity"] = worst(st["severity"], "WARN"); reasons.append(f"cap {p['cap']}%>={cw}")
+        # resilver + per-vdev errors (catches the flaky-link/transient-drop class that ZFS self-heals)
+        det = zpool_status_detail(pool)
+        st["last_resilver_ts"] = det.get("resilver_ts")
+        if det["resilver"] == "in_progress":
+            st["severity"] = worst(st["severity"], "CRIT"); reasons.append("resilver IN PROGRESS")
+        elif det["resilver_ts"]:
+            rwh = th(t, defaults, "resilver_warn_h") * 3600
+            age = now - det["resilver_ts"]
+            if age < rwh:
+                st["severity"] = worst(st["severity"], "WARN")
+                reasons.append(f"resilvered {age // 3600}h ago (investigate a dropped/flaky disk)")
+        if det["bad_vdevs"]:
+            st["severity"] = worst(st["severity"], "CRIT")
+            reasons.append("vdev not ONLINE: " + ", ".join(f"{n}={s}" for n, s in det["bad_vdevs"]))
+        if det["err_vdevs"]:
+            st["severity"] = worst(st["severity"], "CRIT")
+            reasons.append("vdev I/O errors: " + ", ".join(f"{n}(r{r}/w{w}/c{c})" for n, r, w, c in det["err_vdevs"]))
         # scrub age
         cad = scrub_cad.get(pool, {"warn_d": defaults["scrub_warn_d"], "crit_d": defaults["scrub_crit_d"]})
         line, sepoch = zpool_scrub_ts(pool)
@@ -275,6 +331,37 @@ def adapter_borg(t, defaults, now):
     st["detail_json"] = json.dumps(dict(reasons=reasons, encryption=enc if 'enc' in dir() else None))
     return [st]
 
+def adapter_kernel_errors(t, defaults, now):
+    """Scan the recent kernel log for disk I/O / link-reset / HBA-storm errors. This is the ONLY
+    durable evidence when ZFS self-heals a transient (0B resilver, counters cleared) - exactly the
+    2026-09-08 sdi/tank event. Needs journal read access (adm group on the host, or a mounted
+    /var/log/journal in a container)."""
+    win = int(t.get("window_h", 24))
+    rc, out, err = run(["journalctl", "-k", "--since", f"-{win}h", "--no-pager"], timeout=60)
+    if rc != 0 or (not out and err):
+        return [dict(severity="UNKNOWN",
+                     last_error="cannot read kernel journal (need adm group / mount /var/log/journal)")]
+    hard = re.compile(r"I/O error|hard resetting link|exception Emask|failed command|"
+                      r"medium error|Unrecovered read error|ATA bus error|"
+                      r"link is slow to respond|READ FPDMA|WRITE FPDMA|offline uncorrect", re.I)
+    rescan = re.compile(r"scsi \d+:\d+:\d+:\d+: .*(atapi|Direct-Access)|rejecting I/O to offline device", re.I)
+    lines = out.splitlines()
+    hits = [l for l in lines if hard.search(l)]
+    rescans = sum(1 for l in lines if rescan.search(l))
+    # which devices? pull /dev/sdX mentions from the error lines
+    devs = sorted({m.group(0) for l in hits for m in re.finditer(r"sd[a-z]+", l)})
+    st = dict(severity="OK",
+              detail_json=json.dumps(dict(window_h=win, errors=len(hits), rescans=rescans,
+                                          devices=devs, sample=hits[-3:])))
+    crit_n = int(t.get("crit_count", 10))
+    if len(hits) >= crit_n:
+        st["severity"] = "CRIT"; st["last_error"] = f"{len(hits)} disk/link errors in {win}h ({','.join(devs)})"
+    elif hits:
+        st["severity"] = "WARN"; st["last_error"] = f"{len(hits)} disk/link error(s) in {win}h ({','.join(devs)})"
+    elif rescans >= int(t.get("rescan_storm", 20)):
+        st["severity"] = "WARN"; st["last_error"] = f"HBA rescan storm: {rescans} target rescans in {win}h"
+    return [st]
+
 def adapter_backupninja(t, defaults, now):
     """One status per handler, parsed from the log + reports dir (both adm-readable) so this
     works in user mode WITHOUT reading /etc/backup.d (root 0750, may hold DB passwords)."""
@@ -365,22 +452,31 @@ def adapter_smart(t, defaults, now):
             st["last_error"] = ((err or o).strip().splitlines()[-1] if (err or o) else "no json")[:100]
             results.append(st); continue
         passed = d.get("smart_status", {}).get("passed")
-        realloc = pending = None
+        realloc = pending = offline_unc = crc = None
         for a in d.get("ata_smart_attributes", {}).get("table", []):
-            if a.get("id") == 5:   realloc = a.get("raw", {}).get("value")
-            if a.get("id") == 197: pending = a.get("raw", {}).get("value")
+            aid = a.get("id"); raw = a.get("raw", {}).get("value")
+            if aid == 5:   realloc = raw
+            if aid == 197: pending = raw
+            if aid == 198: offline_unc = raw
+            if aid == 199: crc = raw          # UDMA CRC errors = cable/link/backplane, not disk surface
         temp = d.get("temperature", {}).get("current")
         st["detail_json"] = json.dumps(dict(passed=passed, realloc=realloc, pending=pending,
-                                            temp=temp, model=d.get("model_name")))
+                                            offline_unc=offline_unc, crc=crc, temp=temp,
+                                            model=d.get("model_name")))
         if passed is True:
             st["severity"] = "OK"
         elif passed is False:
             st["severity"] = "CRIT"; st["last_error"] = "SMART health FAILED"
         else:
             st["last_error"] = "no smart_status (needs root/sudo - grant smartctl sudoers)"
-        if realloc or pending:
+        # disk-surface degradation -> WARN (watch), any nonzero is worth knowing
+        if realloc or pending or offline_unc:
             st["severity"] = worst(st["severity"], "WARN")
-            st["last_error"] = f"reallocated={realloc} pending={pending}"
+            st["last_error"] = f"reallocated={realloc} pending={pending} offline_uncorrectable={offline_unc}"
+        # link/cable errors -> WARN, flagged distinctly (this is what a flaky-connection event shows)
+        if crc:
+            st["severity"] = worst(st["severity"], "WARN")
+            st["last_error"] = f"UDMA CRC errors={crc} (cable/backplane/HBA link - not disk surface)"
         results.append(st)
     return results
 
@@ -441,6 +537,8 @@ def collect_all(cfg, now=None):
                 sts = adapter_borg(t, defaults, now)
             elif typ == "smart":
                 sts = adapter_smart(t, defaults, now)
+            elif typ == "kernel-errors":
+                sts = adapter_kernel_errors(t, defaults, now)
             elif typ == "backupninja-handler":
                 sts = adapter_backupninja(t, defaults, now)
             else:

@@ -8,6 +8,7 @@ defaults:
   cap_crit_pct: 92
   scrub_warn_d: 40       # scrub age (days) - overridden per pool below
   scrub_crit_d: 70
+  resilver_warn_h: 48    # a resilver within N hours = WARN (a disk dropped/flaky, even if healed)
   fresh_warn_h: 28       # borg/backupninja/snapshot freshness (daily cadence)
   fresh_crit_h: 50
 
@@ -36,6 +37,10 @@ targets:
 
   # --- SMART health of physical disks (needs device access - see docker-compose.yml) ---
   - { name: smart, type: smart }
+
+  # --- recent kernel disk/link errors: catches transient drops/resilver storms that ZFS
+  #     self-heals (0B resilver, cleared counters). Needs journal read access. ---
+  - { name: kernel-disk-errors, type: kernel-errors, window_h: 24, crit_count: 10, rescan_storm: 20 }
 
   # --- backupninja: one status per handler, parsed from the log + reports (mount them ro) ---
   - { name: backupninja, type: backupninja-handler, source: /etc/backup.d,
