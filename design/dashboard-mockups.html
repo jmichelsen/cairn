@@ -1,0 +1,529 @@
+<title>backup-monitor Mockups</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@400;600;700;800&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Red+Hat+Display:wght@500;700;900&family=Red+Hat+Text:wght@400;500;600&family=Roboto+Mono:wght@400;500&display=swap">
+
+<style>
+/* ============ theme-aware page frame ============ */
+:root{
+  --f-ground:#e9edf2; --f-surface:#ffffff; --f-ink:#18222e; --f-muted:#5b6a7a;
+  --f-line:#d3dae2; --f-accent:#23608f; --f-accent-ink:#ffffff;
+}
+:root:not([data-theme="light"]){ }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --f-ground:#0a0f16; --f-surface:#121c27; --f-ink:#dbe6f2; --f-muted:#8496a8;
+    --f-line:#243444; --f-accent:#4d9fff; --f-accent-ink:#04121f;
+  }
+}
+:root[data-theme="dark"]{
+  --f-ground:#0a0f16; --f-surface:#121c27; --f-ink:#dbe6f2; --f-muted:#8496a8;
+  --f-line:#243444; --f-accent:#4d9fff; --f-accent-ink:#04121f;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--f-ground);color:var(--f-ink);
+  font:16px/1.5 "Public Sans",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+.frame{max-width:1180px;margin:0 auto;padding:28px 22px 64px}
+.frame-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px 16px;margin-bottom:4px}
+.frame-head h1{font-family:"Libre Franklin",sans-serif;font-weight:800;font-size:22px;
+  letter-spacing:-.02em;margin:0}
+.frame-head .dot{width:9px;height:9px;border-radius:50%;background:var(--f-accent);
+  display:inline-block;margin-right:8px;vertical-align:middle}
+.frame-head p{margin:0;color:var(--f-muted);font-size:14px}
+.frame-note{color:var(--f-muted);font-size:13.5px;max-width:66ch;margin:2px 0 22px}
+.frame-note b{color:var(--f-ink);font-weight:600}
+/* segmented control */
+.tabs{display:inline-flex;background:var(--f-surface);border:1px solid var(--f-line);
+  border-radius:11px;padding:4px;gap:2px;margin-bottom:26px}
+.tabs button{appearance:none;border:0;background:transparent;color:var(--f-muted);
+  font:600 14px/1 "Public Sans",sans-serif;padding:9px 16px;border-radius:8px;cursor:pointer;
+  display:flex;flex-direction:column;gap:3px;align-items:flex-start;min-width:112px}
+.tabs button span{font-weight:400;font-size:11.5px;opacity:.8}
+.tabs button:hover{color:var(--f-ink)}
+.tabs button:focus-visible{outline:2px solid var(--f-accent);outline-offset:2px}
+body[data-view=steel]   .tabs [data-t=steel],
+body[data-view=console] .tabs [data-t=console],
+body[data-view=panel]   .tabs [data-t=panel]{background:var(--f-accent);color:var(--f-accent-ink)}
+body[data-view=steel]   .tabs [data-t=steel] span,
+body[data-view=console] .tabs [data-t=console] span,
+body[data-view=panel]   .tabs [data-t=panel] span{opacity:.85}
+.mock{display:none;border-radius:16px;overflow:hidden;
+  box-shadow:0 1px 2px rgba(16,32,48,.06),0 24px 60px -30px rgba(16,32,48,.5)}
+body[data-view=steel]   #steel,
+body[data-view=console] #console,
+body[data-view=panel]   #panel{display:block}
+.mock-cap{color:var(--f-muted);font-size:13px;margin:14px 2px 0;display:flex;gap:8px;flex-wrap:wrap}
+.mock-cap b{color:var(--f-ink);font-weight:600}
+
+/* ===================================================================
+   MOCKUP 1 - STEEL  (light, committed)
+   =================================================================== */
+.steel{
+  --bg:#eef1f5; --surf:#ffffff; --raise:#f6f8fb; --ink:#16212e; --mut:#5c6b7a;
+  --line:#dde3ea; --line2:#eaeef3; --acc:#23608f; --acc2:#143a5a; --accsoft:#e6eef6;
+  --ok:#1f8a63; --warn:#bd7a1e; --crit:#b83a31; --unk:#7b8896;
+  --oks:#e6f2ec; --warns:#fbf0dd; --crits:#f8e6e3;
+  background:var(--bg);color:var(--ink);
+  font:15px/1.55 "Public Sans",system-ui,sans-serif;padding:0}
+.steel .pad{padding:26px 30px}
+.steel *{box-sizing:border-box}
+.steel h2,.steel h3{font-family:"Libre Franklin",sans-serif;margin:0}
+.steel .num{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
+/* verdict band */
+.steel .band{background:linear-gradient(180deg,#fbfcfe,var(--surf));
+  border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;align-items:center;
+  gap:22px 30px;padding:24px 30px}
+.steel .verdict{display:flex;align-items:center;gap:16px}
+.steel .shield{width:52px;height:58px;flex:none}
+.steel .verdict .vt{font-family:"Libre Franklin";font-weight:800;font-size:30px;
+  letter-spacing:-.02em;line-height:1;color:var(--warn)}
+.steel .verdict .vs{color:var(--mut);font-size:13px;margin-top:5px}
+.steel .chips{display:flex;gap:9px;flex-wrap:wrap}
+.steel .chip{display:flex;align-items:center;gap:7px;background:var(--raise);
+  border:1px solid var(--line);border-radius:9px;padding:7px 12px;font-size:13px}
+.steel .chip b{font-family:"IBM Plex Mono";font-size:15px}
+.steel .chip i{width:9px;height:9px;border-radius:2px;font-style:normal}
+.steel .asof{margin-left:auto;color:var(--mut);font-size:12.5px;text-align:right;line-height:1.7}
+.steel .asof b{color:var(--ink);font-family:"IBM Plex Mono";font-weight:500}
+/* tiles */
+.steel .tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:22px 30px 4px}
+.steel .tile{background:var(--surf);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.steel .tile .lbl{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--mut);font-weight:600}
+.steel .tile .big{font-family:"Libre Franklin";font-weight:800;font-size:26px;margin-top:8px;letter-spacing:-.02em}
+.steel .tile .sub{color:var(--mut);font-size:12.5px;margin-top:3px}
+.steel .tile.good .big{color:var(--ok)} .steel .tile.warnt .big{color:var(--warn)}
+.steel .meter{height:8px;border-radius:5px;background:var(--line2);margin-top:12px;overflow:hidden}
+.steel .meter i{display:block;height:100%;border-radius:5px}
+.steel .pill321{display:inline-flex;gap:4px;margin-top:10px}
+.steel .pill321 s{width:26px;height:6px;border-radius:3px;background:var(--ok);text-decoration:none}
+.steel .pill321 s.off{background:var(--crit)}
+/* table */
+.steel .tbl-wrap{padding:20px 30px 6px}
+.steel h3.sec{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);
+  margin:20px 0 8px;font-weight:700}
+.steel h3.sec:first-child{margin-top:6px}
+.steel table{width:100%;border-collapse:collapse}
+.steel thead th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);
+  text-align:left;font-weight:600;padding:0 12px 8px}
+.steel tbody tr{background:var(--surf)}
+.steel tbody td{padding:11px 12px;border-top:1px solid var(--line2);vertical-align:middle}
+.steel tbody tr td:first-child{border-left:3px solid transparent;border-radius:8px 0 0 8px}
+.steel tbody tr td:last-child{border-radius:0 8px 8px 0}
+.steel tr.ok  td:first-child{border-left-color:var(--ok)}
+.steel tr.warn td:first-child{border-left-color:var(--warn)}
+.steel tr.crit td:first-child{border-left-color:var(--crit)}
+.steel tr.unk td:first-child{border-left-color:var(--unk)}
+.steel .st{display:inline-flex;align-items:center;gap:7px;font-weight:600;font-size:12.5px}
+.steel .st .d{width:8px;height:8px;border-radius:50%}
+.steel .ok .d{background:var(--ok)} .steel .warn .d{background:var(--warn)}
+.steel .crit .d{background:var(--crit)} .steel .unk .d{background:var(--unk)}
+.steel .ok .st{color:var(--ok)} .steel .warn .st{color:var(--warn)}
+.steel .crit .st{color:var(--crit)} .steel .unk .st{color:var(--unk)}
+.steel .tname{font-weight:600}
+.steel .tsrc{color:var(--mut);font-size:12px;font-family:"IBM Plex Mono"}
+.steel .kind{display:inline-block;font-size:11px;font-weight:600;color:var(--acc2);
+  background:var(--accsoft);border-radius:5px;padding:2px 7px;letter-spacing:.02em}
+.steel .metric{font-family:"IBM Plex Mono";font-size:13px;color:var(--ink);white-space:nowrap}
+.steel .metric .u{color:var(--mut)}
+.steel .why{color:var(--mut);font-size:12.5px}
+.steel .act{display:flex;gap:5px;flex-wrap:wrap}
+.steel .act button{appearance:none;font:600 11.5px/1 "Public Sans";border:1px solid var(--line);
+  background:var(--raise);color:var(--acc2);border-radius:6px;padding:6px 9px;cursor:pointer}
+.steel .act button.pri{background:var(--acc);color:#fff;border-color:var(--acc)}
+.steel .act button:hover{filter:brightness(.97)}
+.steel .act .ro{color:var(--unk);font-size:11.5px;font-style:italic}
+/* legend */
+.steel .legend{background:var(--raise);border-top:1px solid var(--line);padding:22px 30px 28px}
+.steel .legend h3{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);font-weight:700;margin-bottom:14px}
+.steel .lg{display:grid;grid-template-columns:repeat(3,1fr);gap:14px 30px}
+.steel .lg dt{font-family:"IBM Plex Mono";font-weight:600;font-size:13px;color:var(--acc2);display:flex;align-items:center;gap:8px}
+.steel .lg dd{margin:3px 0 0;color:var(--mut);font-size:12.5px;line-height:1.45}
+.steel .lg .sw{width:10px;height:10px;border-radius:3px;flex:none}
+
+/* ===================================================================
+   MOCKUP 2 - CONSOLE  (dark, committed)
+   =================================================================== */
+.console{
+  --bg:#0b131e; --panel:#0f1a27; --raise:#152436; --ink:#d3e2f2;
+  --mut:#748ba3; --line:#1e3145; --acc:#3f86e0; --accd:#0f2a4a;
+  --ok:#34c98a; --warn:#e6b23c; --crit:#ff5b51; --unk:#6b8093;
+  background:var(--bg);color:var(--ink);
+  font:14px/1.5 "IBM Plex Sans",system-ui,sans-serif}
+.console *{box-sizing:border-box}
+.console .mono{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
+.console .micro{font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--mut);font-weight:600}
+/* top bar */
+.console .topbar{display:flex;align-items:center;gap:20px;padding:16px 22px;
+  background:linear-gradient(90deg,#0d1826,#0f1a27);border-bottom:1px solid var(--line)}
+.console .brand{font-family:"IBM Plex Mono";font-weight:600;font-size:14px;letter-spacing:.02em;color:var(--ink)}
+.console .brand .b{color:var(--acc)}
+.console .led{display:flex;align-items:center;gap:11px;padding:8px 15px;border-radius:9px;
+  background:rgba(230,178,60,.09);border:1px solid rgba(230,178,60,.32)}
+.console .led .ring{width:14px;height:14px;border-radius:50%;background:var(--warn);
+  box-shadow:0 0 0 3px rgba(230,178,60,.18),0 0 14px 1px rgba(230,178,60,.55)}
+.console .led .lt{font-family:"IBM Plex Mono";font-weight:600;font-size:15px;color:var(--warn);letter-spacing:.03em}
+.console .clock{margin-left:auto;text-align:right;color:var(--mut);font-size:11.5px;line-height:1.6}
+.console .clock b{color:var(--ink);font-family:"IBM Plex Mono";font-weight:500}
+/* body split */
+.console .split{display:grid;grid-template-columns:220px 1fr;min-height:520px}
+.console .rail{background:#0c1622;border-right:1px solid var(--line);padding:20px 18px;display:flex;flex-direction:column;gap:20px}
+.console .stat .micro{margin-bottom:6px}
+.console .stat .v{font-family:"IBM Plex Mono";font-size:23px;font-weight:600;line-height:1}
+.console .stat .v.ok{color:var(--ok)} .console .stat .v.warn{color:var(--warn)} .console .stat .v.crit{color:var(--crit)}
+.console .stat .vs{color:var(--mut);font-size:11px;margin-top:4px}
+.console .cbar{display:flex;height:7px;border-radius:4px;overflow:hidden;margin-top:9px;background:#0a1420}
+.console .cbar i{display:block;height:100%}
+.console .railgap{border-top:1px solid var(--line);padding-top:16px}
+.console .gaprow{display:flex;gap:8px;align-items:flex-start;font-size:12px;margin-bottom:9px;color:var(--ink)}
+.console .gaprow .d{width:7px;height:7px;border-radius:50%;margin-top:5px;flex:none}
+.console .gaprow small{display:block;color:var(--mut);font-size:11px}
+/* main table */
+.console .main{padding:16px 20px 22px;overflow-x:auto}
+.console table{width:100%;border-collapse:collapse;min-width:640px}
+.console thead th{text-align:left;padding:0 10px 10px;font-size:10.5px;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--mut);font-weight:600;border-bottom:1px solid var(--line)}
+.console tbody td{padding:10px;border-bottom:1px solid #14222f;vertical-align:middle}
+.console tbody tr:hover td{background:var(--raise)}
+.console .sd{display:inline-flex;align-items:center;gap:9px}
+.console .sd .d{width:9px;height:9px;border-radius:50%;flex:none}
+.console .ok .d{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.console .warn .d{background:var(--warn);box-shadow:0 0 8px var(--warn)}
+.console .crit .d{background:var(--crit);box-shadow:0 0 9px var(--crit)}
+.console .unk .d{background:var(--unk)}
+.console .tn{font-family:"IBM Plex Mono";font-weight:500;color:var(--ink)}
+.console .tk{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--acc)}
+.console .met{font-family:"IBM Plex Mono";font-size:13px}
+.console .met .u{color:var(--mut)}
+.console .met .hot{color:var(--warn)}
+.console .strip{display:flex;gap:2px}
+.console .strip i{width:6px;height:16px;border-radius:1px;background:#1a2b3c}
+.console .strip i.ok{background:var(--ok)} .console .strip i.warn{background:var(--warn)}
+.console .strip i.crit{background:var(--crit)} .console .strip i.unk{background:#33455a}
+.console .why{color:var(--mut);font-size:11.5px}
+/* legend rail */
+.console .legend{background:#0c1622;border-top:1px solid var(--line);padding:18px 22px}
+.console .legend .micro{margin-bottom:12px}
+.console .lg{display:grid;grid-template-columns:repeat(4,1fr);gap:12px 26px}
+.console .lg dt{font-family:"IBM Plex Mono";font-size:12.5px;color:var(--acc);font-weight:600;display:flex;gap:7px;align-items:center}
+.console .lg dd{margin:3px 0 0;color:var(--mut);font-size:11.5px;line-height:1.4}
+.console .lg .sw{width:9px;height:9px;border-radius:2px;flex:none}
+
+/* ===================================================================
+   MOCKUP 3 - PANEL  (light, instrument)
+   =================================================================== */
+.panel{
+  --bg:#eef2f6; --surf:#ffffff; --ink:#1a2733; --mut:#5f7085; --line:#e0e6ec;
+  --acc:#1c5fa8; --acc2:#0f3f74; --accsoft:#e7f0f9;
+  --ok:#1c8a63; --warn:#c07d21; --crit:#c1443a; --unk:#8090a0;
+  background:var(--bg);color:var(--ink);font:15px/1.5 "Red Hat Text",system-ui,sans-serif}
+.panel *{box-sizing:border-box}
+.panel h2,.panel h3,.panel .disp{font-family:"Red Hat Display",sans-serif}
+.panel .mono{font-family:"Roboto Mono",monospace;font-variant-numeric:tabular-nums}
+/* heatmap header */
+.panel .hero{padding:22px 26px 18px;background:linear-gradient(180deg,#f7fafd,var(--surf));border-bottom:1px solid var(--line)}
+.panel .hero-top{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.panel .hero-top h2{font-weight:900;font-size:19px;letter-spacing:-.01em;margin:0}
+.panel .hero-top .tag{font-size:12px;color:var(--mut);margin-left:auto}
+.panel .heat{margin-top:16px;overflow-x:auto}
+.panel .heat table{border-collapse:collapse;min-width:560px;width:100%}
+.panel .heat td,.panel .heat th{padding:2px}
+.panel .heat .hname{font-size:11.5px;color:var(--mut);text-align:right;padding-right:10px;white-space:nowrap;font-family:"Roboto Mono"}
+.panel .heat .c{width:16px;height:16px;border-radius:3px;background:#e4e9ee}
+.panel .heat .c.ok{background:#a9dcc6} .panel .heat .c.ok.hi{background:#1c8a63}
+.panel .heat .c.warn{background:var(--warn)} .panel .heat .c.crit{background:var(--crit)} .panel .heat .c.unk{background:#c9d2db}
+.panel .heat .dayh{font-size:9.5px;color:var(--mut);text-align:center;font-family:"Roboto Mono"}
+/* split */
+.panel .split{display:grid;grid-template-columns:270px 1fr;gap:0}
+.panel .rail{padding:22px 22px;border-right:1px solid var(--line);background:#f5f8fb;display:flex;flex-direction:column;gap:22px}
+.panel .gauge-wrap{text-align:center}
+.panel .gauge-wrap canvas{width:150px;height:150px}
+.panel .gauge-cap{font-family:"Red Hat Display";font-weight:700;font-size:13px;margin-top:2px}
+.panel .gauge-cap span{display:block;color:var(--mut);font-weight:400;font-size:11.5px;margin-top:2px}
+.panel .railsec h3{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);font-weight:700;margin:0 0 11px}
+.panel .gap{display:flex;gap:10px;align-items:flex-start;margin-bottom:12px}
+.panel .gap .d{width:8px;height:8px;border-radius:50%;margin-top:5px;flex:none}
+.panel .gap b{font-size:13px;font-weight:600}
+.panel .gap small{display:block;color:var(--mut);font-size:11.5px;line-height:1.4}
+/* card grid */
+.panel .main{padding:20px 24px 26px}
+.panel .gtitle{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);font-weight:700;margin:6px 0 12px}
+.panel .gtitle:not(:first-child){margin-top:22px}
+.panel .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:14px}
+.panel .card{background:var(--surf);border:1px solid var(--line);border-radius:13px;padding:15px 16px;
+  border-top:3px solid var(--unk);box-shadow:0 1px 2px rgba(20,40,60,.04)}
+.panel .card.ok{border-top-color:var(--ok)} .panel .card.warn{border-top-color:var(--warn)}
+.panel .card.crit{border-top-color:var(--crit)}
+.panel .card .ch{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.panel .card .cn{font-family:"Red Hat Display";font-weight:700;font-size:15px}
+.panel .card .cs{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase}
+.panel .card.ok .cs{color:var(--ok)} .panel .card.warn .cs{color:var(--warn)}
+.panel .card.crit .cs{color:var(--crit)} .panel .card.unk .cs{color:var(--unk)}
+.panel .card .src{font-family:"Roboto Mono";font-size:11.5px;color:var(--mut);margin-top:3px}
+.panel .card .row{display:flex;gap:14px;margin-top:12px;flex-wrap:wrap}
+.panel .card .row .m{}
+.panel .card .row .mv{font-family:"Roboto Mono";font-weight:500;font-size:15px}
+.panel .card .row .ml{font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--mut)}
+.panel .card .why{color:var(--mut);font-size:12px;margin-top:11px;line-height:1.4}
+.panel .card .cact{display:flex;gap:6px;margin-top:13px;flex-wrap:wrap}
+.panel .card .cact button{appearance:none;font:600 11.5px/1 "Red Hat Text";border:1px solid var(--line);
+  background:#fff;color:var(--acc2);border-radius:7px;padding:7px 10px;cursor:pointer}
+.panel .card .cact button.pri{background:var(--acc);color:#fff;border-color:var(--acc)}
+.panel .card .cact .ro{color:var(--unk);font-size:11.5px;font-style:italic;align-self:center}
+/* legend */
+.panel .legend{grid-column:1/-1;background:#f5f8fb;border-top:1px solid var(--line);padding:20px 24px 26px}
+.panel .legend h3{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);font-weight:700;margin:0 0 14px}
+.panel .lg{display:grid;grid-template-columns:repeat(3,1fr);gap:13px 28px}
+.panel .lg dt{font-family:"Roboto Mono";font-weight:500;font-size:13px;color:var(--acc2);display:flex;gap:8px;align-items:center}
+.panel .lg dd{margin:3px 0 0;color:var(--mut);font-size:12px;line-height:1.45}
+.panel .lg .sw{width:10px;height:10px;border-radius:3px;flex:none}
+
+@media (max-width:720px){
+  .steel .tiles{grid-template-columns:1fr} .steel .lg,.console .lg,.panel .lg{grid-template-columns:1fr}
+  .console .split,.panel .split{grid-template-columns:1fr}
+  .console .rail,.panel .rail{border-right:0;border-bottom:1px solid var(--line)}
+  .steel .band,.steel .pad,.steel .tiles,.steel .tbl-wrap{padding-left:18px;padding-right:18px}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<div class="frame">
+  <div class="frame-head">
+    <h1><span class="dot"></span>backup-monitor - design directions</h1>
+    <p>seed 4070831425505989125 · sample data, three treatments</p>
+  </div>
+  <p class="frame-note">All three render a sample fleet - the <b>example resilver</b>,
+    the borg repos, and the off-site vault - so you're comparing look, not content. Every direction
+    carries the <b>metric legend</b> at the bottom. Semantic status color (OK / WARN / CRIT) is kept
+    separate from the steel-blue accent so trouble reads at a glance.</p>
+
+  <div class="tabs" role="tablist">
+    <button data-t="steel"   onclick="view('steel')">Steel<span>light · recommended</span></button>
+    <button data-t="console" onclick="view('console')">Console<span>dark · NOC</span></button>
+    <button data-t="panel"   onclick="view('panel')">Panel<span>light · instrument</span></button>
+  </div>
+
+  <div class="mock" id="steel"></div>
+  <div class="mock" id="console"></div>
+  <div class="mock" id="panel"></div>
+
+  <div class="mock-cap" id="cap"></div>
+</div>
+
+<script>
+/* ---------- shared sample data (fictional fleet for the mockup) ---------- */
+// hist = last 14 days worst-severity per day: 0 ok / 1 warn / 2 crit / 3 unknown
+const H_OK=Array(14).fill(0);
+const T = [
+  {g:"Primary pools",n:"tank",k:"pool",src:"mirror · 4×disk",sev:"warn",m:{cap:78},why:"resilvered 16h ago after sdi replaced · 0 data errors",hist:[0,0,0,0,0,0,0,0,0,0,0,3,2,1]},
+  {g:"Primary pools",n:"media",k:"pool",src:"raidz1 · 3 disk",sev:"ok",m:{cap:61},why:"scrub clean · 0 errors · 3d ago",hist:H_OK},
+  {g:"Primary pools",n:"crypt",k:"pool",src:"encrypted",sev:"ok",m:{cap:44},why:"scrub clean · key loaded",hist:H_OK,enc:1},
+  {g:"Primary pools",n:"backup",k:"pool",src:"on-site secondary",sev:"ok",m:{cap:82},why:"replication destination · scrub clean",hist:H_OK},
+
+  {g:"Replication (ZFS)",n:"tank/Pics",k:"repl",src:"→ backup/Pics",sev:"ok",m:{lag:6},why:"snapshots current · 6h behind source",hist:H_OK,tier:"A"},
+  {g:"Replication (ZFS)",n:"tank/docs",k:"repl",src:"→ backup/docs",sev:"ok",m:{lag:6},why:"client archive · in sync",hist:H_OK,tier:"A"},
+  {g:"Replication (ZFS)",n:"tank/photos",k:"repl",src:"→ backup/photos",sev:"warn",m:{lag:41},why:"no snapshot in 41h · not yet on off-site vault",hist:[0,0,0,0,0,0,0,0,0,1,1,1,1,1],tier:"A"},
+  {g:"Replication (ZFS)",n:"laptop",k:"repl",src:"→ vault (offsite)",sev:"ok",m:{lag:11},why:"raw-send encrypted · vault can't decrypt",hist:H_OK,tier:"A",enc:1,off:1},
+
+  {g:"Off-site vault",n:"vault",k:"pool",src:"remote host · Tailscale",sev:"ok",m:{cap:39},why:"pull replica · last contact 11m ago",hist:H_OK,enc:1,off:1},
+
+  {g:"Archive repos (borg)",n:"backups",k:"borg",src:"/mnt/backups",sev:"ok",m:{arch:31,ratio:2.1},why:"nightly · newest archive 4h ago",hist:H_OK},
+  {g:"Archive repos (borg)",n:"crypt/borg-pre",k:"borg",src:"/srv/borg-pre",sev:"ok",m:{arch:216,ratio:1.8},why:"pre-prune safety net · verified",hist:H_OK},
+
+  {g:"Scheduled jobs (backupninja)",n:"mariadb dump",k:"ninja",src:"mysql handler",sev:"ok",m:{},why:"dump ok 02:14 · 1.2 GB",hist:H_OK},
+  {g:"Scheduled jobs (backupninja)",n:"/etc + /var",k:"ninja",src:"rsync handler",sev:"ok",m:{},why:"completed 02:31",hist:H_OK},
+
+  {g:"Hardware watch",n:"disk sdi",k:"kernel",src:"disk · tank",sev:"warn",m:{},why:"2 link/CRC errors since 09-08 · check HBA lane / cable",hist:[0,0,0,0,0,0,0,0,0,0,0,0,1,1]},
+];
+const COUNTS={ok:0,warn:0,crit:0,unk:0};
+T.forEach(t=>COUNTS[t.sev]++);
+const WORST = COUNTS.crit?"crit":COUNTS.warn?"warn":COUNTS.unk?"unk":"ok";
+const SEVNAME={ok:"OK",warn:"WARN",crit:"CRIT",unk:"UNKNOWN"};
+const KINDLABEL={pool:"pool",repl:"repl",borg:"borg",ninja:"job",kernel:"disk"};
+const NOW="2026-09-09 14:32";
+
+/* metric legend definitions (shared) */
+const LEG=[
+  {t:"OK / WARN / CRIT",sw:0,d:"Worst-of rollup for a target. Green = healthy, amber = attention, red = action now."},
+  {t:"lag",d:"Replication lag - hours between the newest source snapshot and the one the destination has received."},
+  {t:"cap",d:"Pool capacity used. WARN at ≥ 80%, CRIT at ≥ 90% - ZFS slows badly when nearly full."},
+  {t:"arch",d:"borg archive count - how many restore points the repository holds."},
+  {t:"ratio",d:"borg dedup + compression ratio (stored size ÷ on-disk size)."},
+  {t:"resilver",d:"ZFS rebuilding a replaced or errored disk back onto its mirror/raidz."},
+  {t:"CRC / CKSUM",d:"Checksum or link errors - usually a bad cable, HBA lane, or a failing disk."},
+  {t:"off-site",d:"Whether the target has ≥ 1 copy on the remote vault - the '1' in 3-2-1."},
+  {t:"enc",d:"Dataset is encrypted; the vault holds it raw and cannot read it."},
+];
+const SEVSW={ok:"var(--ok)",warn:"var(--warn)",crit:"var(--crit)"};
+
+function metricStr(t){
+  const p=[];
+  if(t.m.lag!=null)p.push(`lag ${t.m.lag}<span class="u">h</span>`);
+  if(t.m.cap!=null){const hot=t.m.cap>=80?' class="hot"':'';p.push(`<span${hot}>${t.m.cap}<span class="u">%</span></span>`);}
+  if(t.m.arch!=null)p.push(`${t.m.arch}<span class="u"> arch</span>`);
+  if(t.m.ratio!=null)p.push(`${t.m.ratio}<span class="u">×</span>`);
+  return p.join(' &nbsp; ')||'<span class="u">-</span>';
+}
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')}
+
+/* ============ MOCKUP 1: STEEL ============ */
+function renderSteel(){
+  const shield=`<svg class="shield" viewBox="0 0 52 58" fill="none"><path d="M26 2 48 10v20c0 15-10 24-22 26C14 54 4 45 4 30V10L26 2Z" fill="#fbf0dd" stroke="#bd7a1e" stroke-width="2"/><path d="M18 29l6 6 12-13" stroke="#bd7a1e" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const chips=['ok','warn','crit','unk'].map(s=>`<div class="chip"><i style="background:${s==='unk'?'var(--unk)':SEVSW[s]}"></i><b>${COUNTS[s]}</b> ${SEVNAME[s]}</div>`).join('');
+  // tiles
+  const cap=`<div class="tile warnt"><div class="lbl">Capacity - busiest pool</div><div class="big num">82%</div><div class="sub">backup · tank 78% · headroom tightening</div><div class="meter"><i style="width:82%;background:linear-gradient(90deg,#23608f,#bd7a1e)"></i></div></div>`;
+  const rp=`<div class="tile good"><div class="lbl">Restore points</div><div class="big num">247</div><div class="sub">31 borg + 216 borg-pre archives · newest 4h ago</div></div>`;
+  const s321=`<div class="tile"><div class="lbl">3-2-1 coverage</div><div class="big" style="color:var(--warn)">3 / 4</div><div class="sub">Tier-A datasets fully protected</div><div class="pill321"><s></s><s></s><s></s><s class="off" title="tank/photos not yet off-site"></s></div></div>`;
+  // grouped rows
+  let groups={},order=[];
+  T.forEach(t=>{if(!groups[t.g]){groups[t.g]=[];order.push(t.g)}groups[t.g].push(t)});
+  let body='';
+  order.forEach(g=>{
+    body+=`<h3 class="sec">${g}</h3><table><thead><tr><th style="width:26%">target</th><th>kind</th><th>metric</th><th style="width:24%">detail</th><th style="width:22%">actions</th></tr></thead><tbody>`;
+    groups[g].forEach(t=>{
+      let act='<span class="ro">report-only</span>';
+      if(t.k==='repl')act=`<div class="act"><button class="pri">Replicate</button><button>Snapshot</button><button>Restore…</button></div>`;
+      else if(t.k==='pool'&&t.n!=='vault')act=`<div class="act"><button>Scrub</button><button>Restore…</button></div>`;
+      const enc=t.enc?' <span class="kind">enc</span>':'';const off=t.off?' <span class="kind">off-site</span>':'';
+      body+=`<tr class="${t.sev}"><td><div class="tname">${t.n}${t.tier?' <span class="kind">tier '+t.tier+'</span>':''}${enc}${off}</div><div class="tsrc">${t.src}</div></td>
+        <td><span class="st ${t.sev}"><span class="d"></span>${SEVNAME[t.sev]}</span></td>
+        <td class="metric">${metricStr(t)}</td><td class="why">${esc(t.why)}</td><td>${act}</td></tr>`;
+    });
+    body+='</tbody></table>';
+  });
+  const leg=LEG.map(l=>`<div><dt>${l.sw===0?'<span class="sw" style="background:linear-gradient(90deg,var(--ok),var(--warn),var(--crit))"></span>':''}${l.t}</dt><dd>${l.d}</dd></div>`).join('');
+  document.getElementById('steel').innerHTML=`
+    <div class="steel">
+      <div class="band">
+        <div class="verdict">${shield}<div><div class="vt">Attention</div><div class="vs">2 warnings · 0 critical · fleet is protected</div></div></div>
+        <div class="chips">${chips}</div>
+        <div class="asof">21 targets<br><b>${NOW}</b><br>agents reporting · 900s</div>
+      </div>
+      <div class="tiles">${s321}${cap}${rp}</div>
+      <div class="tbl-wrap">${body}</div>
+      <div class="legend"><h3>Metric key</h3><dl class="lg">${leg}</dl></div>
+    </div>`;
+}
+
+/* ============ MOCKUP 2: CONSOLE ============ */
+function renderConsole(){
+  const railStats=`
+    <div class="stat"><div class="micro">Fleet status</div><div class="v warn">ATTENTION</div><div class="vs">2 warn · 0 crit</div></div>
+    <div class="stat"><div class="micro">Targets</div><div class="v">21</div>
+      <div class="cbar"><i style="width:81%;background:var(--ok)"></i><i style="width:19%;background:var(--warn)"></i></div>
+      <div class="vs">19 ok · 2 warn</div></div>
+    <div class="stat"><div class="micro">Restore points</div><div class="v ok">247</div><div class="vs">borg + zfs snapshots</div></div>
+    <div class="stat"><div class="micro">Off-site (3-2-1)</div><div class="v warn">3/4</div><div class="vs">tank/photos pending</div></div>
+    <div class="railgap"><div class="micro">Coverage gaps</div>
+      <div class="gaprow"><span class="d" style="background:var(--warn)"></span><div>tank/photos<small>no off-site copy yet</small></div></div>
+      <div class="gaprow"><span class="d" style="background:var(--warn)"></span><div>disk sdi<small>link/CRC errors 09-08</small></div></div>
+    </div>`;
+  let rows='';
+  T.forEach(t=>{
+    const strip=t.hist.map(h=>`<i class="${['ok','warn','crit','unk'][h]}"></i>`).join('');
+    let met=metricStr(t);
+    rows+=`<tr class="${t.sev}"><td><span class="sd ${t.sev}"><span class="d"></span></span></td>
+      <td><span class="tn">${t.n}</span>${t.enc?' <span class="tk">enc</span>':''}</td>
+      <td><span class="tk">${KINDLABEL[t.k]}</span></td>
+      <td class="met">${met}</td>
+      <td><div class="strip" title="last 14 days">${strip}</div></td>
+      <td class="why">${esc(t.why)}</td></tr>`;
+  });
+  const leg=LEG.map(l=>`<div><dt>${l.sw===0?'<span class="sw" style="background:linear-gradient(90deg,var(--ok),var(--warn),var(--crit))"></span>':''}${l.t}</dt><dd>${l.d}</dd></div>`).join('');
+  document.getElementById('console').innerHTML=`
+    <div class="console">
+      <div class="topbar">
+        <div class="brand"><span class="b">▚</span> backup-monitor</div>
+        <div class="led"><span class="ring"></span><span class="lt">ATTENTION</span></div>
+        <div class="clock">yourhost · 21 targets<br><b>${NOW}</b></div>
+      </div>
+      <div class="split">
+        <div class="rail">${railStats}</div>
+        <div class="main">
+          <table><thead><tr><th></th><th>target</th><th>kind</th><th>metric</th><th>14-day</th><th>detail</th></tr></thead>
+          <tbody>${rows}</tbody></table>
+        </div>
+      </div>
+      <div class="legend"><div class="micro">Metric key</div><dl class="lg">${leg}</dl></div>
+    </div>`;
+}
+
+/* ============ MOCKUP 3: PANEL ============ */
+function renderPanel(){
+  // heatmap: pick a handful of representative targets
+  const hm=[T[0],T[6],T[13],T[4],T[9]];
+  const days=['','','','','','','','','','','','','',''];
+  let heat='<div class="heat"><table><tr><td></td>'+days.map((d,i)=>`<td class="dayh">${i%2?'':'·'}</td>`).join('')+'</tr>';
+  hm.forEach(t=>{
+    heat+=`<tr><td class="hname">${t.n}</td>`+t.hist.map(h=>{
+      const cls=['ok hi','warn','crit','unk'][h];return `<td><div class="c ${cls}"></div></td>`;
+    }).join('')+'</tr>';
+  });
+  heat+='</table></div>';
+  // cards grouped
+  let groups={},order=[];
+  T.forEach(t=>{if(!groups[t.g]){groups[t.g]=[];order.push(t.g)}groups[t.g].push(t)});
+  let cards='';
+  order.forEach(g=>{
+    cards+=`<div class="gtitle">${g}</div><div class="cards">`;
+    groups[g].forEach(t=>{
+      let mrow='';
+      if(t.m.cap!=null)mrow+=`<div class="m"><div class="mv">${t.m.cap}%</div><div class="ml">capacity</div></div>`;
+      if(t.m.lag!=null)mrow+=`<div class="m"><div class="mv">${t.m.lag}h</div><div class="ml">repl lag</div></div>`;
+      if(t.m.arch!=null)mrow+=`<div class="m"><div class="mv">${t.m.arch}</div><div class="ml">archives</div></div>`;
+      if(t.m.ratio!=null)mrow+=`<div class="m"><div class="mv">${t.m.ratio}×</div><div class="ml">dedup</div></div>`;
+      let act='<div class="cact"><span class="ro">report-only</span></div>';
+      if(t.k==='repl')act=`<div class="cact"><button class="pri">Replicate</button><button>Snapshot</button></div>`;
+      else if(t.k==='pool'&&t.n!=='vault')act=`<div class="cact"><button>Scrub</button><button>Restore…</button></div>`;
+      cards+=`<div class="card ${t.sev}"><div class="ch"><span class="cn">${t.n}</span><span class="cs">${SEVNAME[t.sev]}</span></div>
+        <div class="src">${t.src}${t.tier?' · tier '+t.tier:''}${t.enc?' · enc':''}${t.off?' · off-site':''}</div>
+        ${mrow?`<div class="row">${mrow}</div>`:''}
+        <div class="why">${esc(t.why)}</div>${act}</div>`;
+    });
+    cards+='</div>';
+  });
+  const leg=LEG.map(l=>`<div><dt>${l.sw===0?'<span class="sw" style="background:linear-gradient(90deg,var(--ok),var(--warn),var(--crit))"></span>':''}${l.t}</dt><dd>${l.d}</dd></div>`).join('');
+  document.getElementById('panel').innerHTML=`
+    <div class="panel">
+      <div class="hero">
+        <div class="hero-top"><h2>Fleet - last 14 days</h2><span class="tag">yourhost · ${NOW} · 21 targets</span></div>
+        ${heat}
+      </div>
+      <div class="split">
+        <div class="rail">
+          <div class="gauge-wrap"><canvas id="gauge" width="300" height="300"></canvas>
+            <div class="gauge-cap">Busiest pool<span>backup · 82% used</span></div></div>
+          <div class="railsec"><h3>Coverage gaps</h3>
+            <div class="gap"><span class="d" style="background:var(--warn)"></span><div><b>tank/photos</b><small>Tier-A, but no off-site copy yet</small></div></div>
+            <div class="gap"><span class="d" style="background:var(--warn)"></span><div><b>disk sdi</b><small>2 link/CRC errors since 09-08</small></div></div>
+            <div class="gap"><span class="d" style="background:var(--ok)"></span><div><b>everything else</b><small>snapshotted &amp; replicating</small></div></div>
+          </div>
+        </div>
+        <div class="main">${cards}</div>
+        <div class="legend"><h3>Metric key</h3><dl class="lg">${leg}</dl></div>
+      </div>
+    </div>`;
+  drawGauge();
+}
+function drawGauge(){
+  const c=document.getElementById('gauge');if(!c)return;const x=c.getContext('2d');
+  const cx=150,cy=150,r=112,lw=26;x.clearRect(0,0,300,300);
+  const start=Math.PI*0.75,end=Math.PI*2.25,pct=0.82;
+  x.lineCap='round';
+  x.beginPath();x.arc(cx,cy,r,start,end);x.strokeStyle='#e0e6ec';x.lineWidth=lw;x.stroke();
+  const g=x.createLinearGradient(0,0,300,300);g.addColorStop(0,'#1c5fa8');g.addColorStop(1,'#c07d21');
+  x.beginPath();x.arc(cx,cy,r,start,start+(end-start)*pct);x.strokeStyle=g;x.lineWidth=lw;x.stroke();
+  x.fillStyle='#1a2733';x.font='700 46px "Red Hat Display",sans-serif';x.textAlign='center';x.textBaseline='middle';
+  x.fillText('82%',cx,cy-6);
+  x.fillStyle='#5f7085';x.font='500 13px "Roboto Mono",monospace';x.fillText('capacity',cx,cy+26);
+}
+
+/* ---------- tab wiring ---------- */
+const CAPS={
+  steel:'<b>Steel</b> - the calm institutional default. Verdict band + 3-tile summary (3-2-1, capacity, restore points), grouped table with severity left-stripes, actions inline. Reads like a utility company status page.',
+  console:'<b>Console</b> - dark NOC view. Glowing status LED, left stats rail with coverage gaps, dense monospace table with a per-target 14-day strip. Built for scanning at a glance from across the room.',
+  panel:'<b>Panel</b> - instrument dashboard. Timeline heatmap up top, a capacity gauge + gaps in the rail, targets as grouped cards. The most visual; good if you want the fleet’s shape, not just a list.'
+};
+function view(v){document.body.dataset.view=v;document.getElementById('cap').innerHTML=CAPS[v];if(v==='panel')drawGauge();}
+renderSteel();renderConsole();renderPanel();
+view('steel');
+</script>
