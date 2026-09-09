@@ -157,7 +157,7 @@ HAS_ADMIN = _seed_tokens() > 0   # false => middleware returns 503 until BM_ADMI
 def latest_status(conn):
     """Latest status row per target, joined to target meta."""
     q = """
-    SELECT t.name,t.type,t.tier,t.source,t.dest,t.location,t.encrypted,s.*
+    SELECT t.name,t.type,t.tier,t.source,t.dest,t.location,t.encrypted,t.agent,s.*
     FROM targets t
     JOIN status s ON s.target_id=t.id
     JOIN (SELECT target_id, MAX(ts) mx FROM status GROUP BY target_id) l
@@ -287,9 +287,13 @@ async def report(request: Request):
     payload = await _json(request)
     agent = payload.get("agent", "unknown")
     now = int(payload.get("ts") or time.time())
+    can_exec = 1 if payload.get("can_execute") else 0
     statuses = payload.get("statuses", [])
     alerts = []
     with db() as conn:
+        conn.execute("""INSERT INTO agents(name,can_execute,last_report_ts) VALUES(?,?,?)
+            ON CONFLICT(name) DO UPDATE SET can_execute=excluded.can_execute,
+            last_report_ts=excluded.last_report_ts""", (agent, can_exec, now))
         for s in statuses:
             name = s.get("name")
             if not name:
@@ -393,6 +397,10 @@ async def create_action(request: Request):
             raise HTTPException(400, "restore requires a 'version' (snapshot file path from a search)")
         if not r["agent"]:
             raise HTTPException(409, f"no agent has reported target '{target}' yet - can't route it")
+        cap = conn.execute("SELECT can_execute FROM agents WHERE name=?", (r["agent"],)).fetchone()
+        if not cap or not cap["can_execute"]:
+            raise HTTPException(409, f"target '{target}' is owned by report-only agent "
+                                     f"'{r['agent']}' (BM_CAN_EXECUTE=0) - no executor to run this")
         cur = conn.execute(
             "INSERT INTO intents(target_id,action,opts,state,requested_by,created_ts) "
             "VALUES(?,?,?,'pending',?,strftime('%s','now'))",
@@ -557,9 +565,12 @@ async function poll(id){
 def index():
     with db() as conn:
         rows = latest_status(conn)
+        capable = {x["name"] for x in conn.execute(
+            "SELECT name FROM agents WHERE can_execute=1").fetchall()}
         h = health()
     trows = ""
     for r in sorted(rows, key=lambda r: SEV_ORDER.get(r["severity"], 9)):
+        can_act = r.get("agent") in capable   # hide action buttons for report-only agents
         d = json.loads(r.get("detail_json") or "{}")
         why = ", ".join(d.get("reasons", [])) or (r.get("last_error") or "")
         extra = []
@@ -567,20 +578,23 @@ def index():
         if r.get("pool_cap_pct") is not None: extra.append(f"{r['pool_cap_pct']}%")
         if r.get("archive_count") is not None: extra.append(f"{r['archive_count']} arch")
         n = r["name"]
-        # recovery buttons for any dataset-backed target (httm/zfs recovery-point catalog)
-        rec = ""
-        if r["type"] in ("zfs-repl", "zfs-local") and r.get("source"):
-            rec = (f"<button onclick=\"act('{n}','recover-points')\">Points</button>"
-                   f"<button onclick=\"actPrompt('{n}','recover-deleted','path','deleted files under (blank = whole dataset):')\">Deleted</button>"
-                   f"<button onclick=\"actPrompt('{n}','recover-search','path','list versions of (path relative to dataset root):')\">Versions</button>")
-        if r["type"] == "zfs-repl":
-            acts = (f"<button onclick=\"act('{n}','snapshot',true)\">Snapshot</button>"
-                    f"<button onclick=\"act('{n}','sync',true)\">Replicate&nbsp;+snap</button>"
-                    f"<button onclick=\"act('{n}','sync',false)\">Replicate&nbsp;existing</button>" + rec)
-        elif r["type"] == "zfs-local":
-            acts = f"<button onclick=\"act('{n}','scrub',true)\">Scrub</button>" + rec
+        # action buttons only when an EXECUTE-capable agent owns the target (else they'd hang pending)
+        if not can_act:
+            acts = "<span class=w>report-only</span>" if r["type"] in ("zfs-repl", "zfs-local") else ""
         else:
-            acts = ""
+            rec = ""
+            if r["type"] in ("zfs-repl", "zfs-local") and r.get("source"):
+                rec = (f"<button onclick=\"act('{n}','recover-points')\">Points</button>"
+                       f"<button onclick=\"actPrompt('{n}','recover-deleted','path','deleted files under (blank = whole dataset):')\">Deleted</button>"
+                       f"<button onclick=\"actPrompt('{n}','recover-search','path','list versions of (path relative to dataset root):')\">Versions</button>")
+            if r["type"] == "zfs-repl":
+                acts = (f"<button onclick=\"act('{n}','snapshot',true)\">Snapshot</button>"
+                        f"<button onclick=\"act('{n}','sync',true)\">Replicate&nbsp;+snap</button>"
+                        f"<button onclick=\"act('{n}','sync',false)\">Replicate&nbsp;existing</button>" + rec)
+            elif r["type"] == "zfs-local":
+                acts = f"<button onclick=\"act('{n}','scrub',true)\">Scrub</button>" + rec
+            else:
+                acts = ""
         c = BADGE.get(r["severity"], "#555")
         trows += (f"<tr><td><b style='color:{c}'>{r['severity']}</b></td><td>{n}</td>"
                   f"<td>{r['type']}</td><td>{' · '.join(extra)}</td><td>{acts}</td>"

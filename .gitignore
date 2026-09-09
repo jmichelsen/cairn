@@ -6,5 +6,8 @@ backup-monitor.env
 *.db
 *.db-wal
 *.db-shm
+# a deployer's real config (copies of the examples) - never commit
+config/targets.yaml
+config/*.env
 __pycache__/
 *.pyc

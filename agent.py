@@ -82,7 +82,7 @@ def do_report(cfg):
                 item[k] = st[k]
         items.append(item)
     api_call("POST", "/api/v1/backup/report",
-             {"agent": NAME, "ts": int(time.time()), "statuses": items})
+             {"agent": NAME, "ts": int(time.time()), "can_execute": CAN_EXEC, "statuses": items})
     return len(items)
 
 def do_execute(cfg):

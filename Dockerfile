@@ -31,7 +31,8 @@ COPY agent.py /app/agent.py
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh /app/agent.py /app/phase0/*.sh 2>/dev/null || true
 
-ENV BM_DB=/data/backup-monitor.db \
+ENV PYTHONUNBUFFERED=1 \
+    BM_DB=/data/backup-monitor.db \
     BM_TARGETS=/config/targets.yaml \
     BACKUP_MONITOR_ENV=/config/backup-monitor.env \
     NOTIFY_SH=/app/phase0/notify.sh \

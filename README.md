@@ -14,12 +14,25 @@ respects zero-knowledge encrypted replicas (flags a destination whose key unexpe
 
 ```bash
 git clone https://github.com/jmichelsen/backup-monitor && cd backup-monitor
-cp config/backup-monitor.env.example config/backup-monitor.env   # set SMTP + (optional) Gotify
-cp config/targets.example.yaml       config/targets.yaml         # list YOUR pools/datasets/repos
-# edit the collector mounts in docker-compose.yml to your borg/backupninja paths, then:
+cp config/backup-monitor.env.example config/backup-monitor.env
+#   REQUIRED in that file: the 3 auth tokens (generate: openssl rand -hex 32) + SMTP/Gotify.
+cp config/targets.example.yaml config/targets.yaml   # list YOUR pools / datasets / repos
+#   edit the agent's borg/backupninja mounts in docker-compose.yml to your paths, then:
 docker compose up -d --build
 ```
-Open `http://<host>:8929/`. The **`api`** service is a pure control plane (stores state, serves
+Open `http://<host>:8929/` and log in with your `BM_ADMIN_TOKEN`.
+
+**Read-only first (recommended).** The default compose runs an **unprivileged, report-only**
+container agent - great for kicking the tires. What you get vs. what needs the host agent:
+
+| Works in the default RO container | Needs the host/execute agent |
+| --- | --- |
+| ZFS pool health, capacity, scrub age, **replication lag**, **resilver / vdev-error detection** | **action buttons** (replicate/scrub/snapshot/restore) - `BM_CAN_EXECUTE=1` + ZFS write |
+| borg repos, backupninja handlers, 3-2-1 scorecard, coverage-gap, timeline | **SMART** (needs disk passthrough) and **kernel-error watch** (needs journald access) |
+
+Targets owned by a report-only agent show **"report-only"** instead of action buttons, and the
+API refuses to queue actions for them - so nothing hangs. When you're ready for actions/SMART/
+kernel-watch, run the agent on the host (see `AGENT.md`). The **`api`** service is a pure control plane (stores state, serves
 the dashboard, dispatches alerts - it never touches ZFS). The **`agent`** service reads *this*
 host's ZFS (via mounted `/dev/zfs`, unprivileged) + borg/backupninja and reports to the API every
 `BM_INTERVAL` seconds. **Monitoring needs no root.**

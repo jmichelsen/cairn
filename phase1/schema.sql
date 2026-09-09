@@ -75,6 +75,14 @@ CREATE TABLE IF NOT EXISTS vault_reports (
 );
 CREATE INDEX IF NOT EXISTS idx_vault_reports_ts ON vault_reports(agent, ts);
 
+-- Agents that have reported, and whether they can execute actions (report-only agents can't).
+-- Lets the dashboard hide action buttons and the API reject actions for report-only agents.
+CREATE TABLE IF NOT EXISTS agents (
+  name         TEXT PRIMARY KEY,
+  can_execute  INTEGER DEFAULT 0,
+  last_report_ts INTEGER
+);
+
 -- Auth credentials, HASH-AT-REST: only sha256(secret) is stored, never the secret.
 -- Two-tier: an 'enroll' secret (long-lived, proves a box's identity) mints short-lived 'access'
 -- tokens; 'admin' is a human dashboard credential. role = what it may do (admin|agent);

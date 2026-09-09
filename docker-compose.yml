@@ -5,8 +5,11 @@
 # AGENTS that talk to it over HTTP. This compose runs the API + the LOCAL agent. A remote vault
 # runs the SAME agent (agent.py) pointed at this API's public URL + a token - no separate design.
 #
-# Copy config/backup-monitor.env.example -> config/backup-monitor.env  and
-#      config/targets.example.yaml       -> config/targets.yaml, then edit both.
+# Setup (all config lives in ONE file - no hidden .env):
+#   cp config/backup-monitor.env.example config/backup-monitor.env   # set the 3 tokens + SMTP/Gotify
+#   cp config/targets.example.yaml       config/targets.yaml         # list YOUR pools/datasets/repos
+#   # edit the agent's borg/backupninja mounts below to your paths, then:
+#   docker compose up -d --build
 
 name: backup-monitor
 
@@ -16,13 +19,10 @@ services:
     build: .
     image: backup-monitor:latest
     command: ["api"]
-    env_file: [./config/backup-monitor.env]     # SMTP + Gotify creds live ONLY here (the API alerts)
+    env_file: [./config/backup-monitor.env]     # tokens + SMTP + Gotify all come from this one file
     environment:
       BM_DB: /data/backup-monitor.db
       STATE_DIR: /data/state
-      # zero-trust: EVERY request needs a token. admin = dashboard/views/actions; agents = report/poll.
-      BM_ADMIN_TOKEN: ${BM_ADMIN_TOKEN:?set BM_ADMIN_TOKEN (dashboard login + admin API)}
-      BM_AGENT_TOKENS: ${BM_AGENT_TOKEN:?set BM_AGENT_TOKEN (shared by report-only agents)}
     volumes:
       - bmdata:/data
       - ./config:/config:ro
@@ -35,9 +35,9 @@ services:
     build: .
     image: backup-monitor:latest
     command: ["agent"]
+    env_file: [./config/backup-monitor.env]     # provides BM_API_TOKEN (this agent's token)
     environment:
       BM_API_URL: http://api:8929
-      BM_API_TOKEN: ${BM_AGENT_TOKEN:?set BM_AGENT_TOKEN}   # this agent's token (an agent-role token)
       BM_AGENT_NAME: local
       BM_TARGETS: /config/targets.yaml
       BM_INTERVAL: "900"
