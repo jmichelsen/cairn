@@ -28,6 +28,12 @@ services:
       - ./config:/config:ro
     ports:
       - "8929:8929"
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "-o", "/dev/null", "http://localhost:8929/login"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
   # ---- local agent: reads THIS host's ZFS/borg/backupninja and reports to the API ----
