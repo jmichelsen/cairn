@@ -16,6 +16,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 HERE = Path(__file__).resolve().parent
 DB = os.environ.get("BM_DB", "/var/lib/backup-monitor/backup-monitor.db")
+import sys as _sys
+_sys.path.insert(0, str(HERE))
+import collector as _cmd   # PURE build_command, for action PREVIEWS only; the API never executes it
 DAY = 86400
 app = FastAPI(title="backup-monitor", version="1.0")
 
@@ -412,12 +415,38 @@ async def create_action(request: Request):
             "agent": r["agent"], "opts": opts}
 
 @app.get("/api/v1/backup/actions")
-def list_actions(limit: int = 20):
+def list_actions(limit: int = 20, target: str = None):
+    """Recent intents, newest first. Pass ?target=<name> for one card's action history."""
     with db() as conn:
-        rows = [dict(r) for r in conn.execute(
-            "SELECT i.*, t.name AS target FROM intents i LEFT JOIN targets t ON t.id=i.target_id "
-            "ORDER BY i.created_ts DESC LIMIT ?", (limit,)).fetchall()]
+        if target:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT i.*, t.name AS target FROM intents i LEFT JOIN targets t ON t.id=i.target_id "
+                "WHERE t.name=? ORDER BY i.created_ts DESC LIMIT ?", (target, limit)).fetchall()]
+        else:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT i.*, t.name AS target FROM intents i LEFT JOIN targets t ON t.id=i.target_id "
+                "ORDER BY i.created_ts DESC LIMIT ?", (limit,)).fetchall()]
     return {"actions": rows}
+
+PREVIEWABLE = {"snapshot", "sync", "scrub", "recover-points"}  # build_command touches no ZFS for these
+
+@app.get("/api/v1/backup/actions/preview")
+def preview_action(target: str, action: str, create_snapshot: bool = True, path: str = None):
+    """Return the exact argv a click WILL run, rebuilt from the stored target row - so the confirm
+    dialog can show it. Read-only: only actions whose build_command has no side effects are previewed;
+    others resolve on the agent at run time (path→mountpoint needs a live ZFS read)."""
+    with db() as conn:
+        r = conn.execute("SELECT name,type,source,dest FROM targets WHERE name=?", (target,)).fetchone()
+    if not r:
+        raise HTTPException(404, f"unknown target '{target}'")
+    if action not in PREVIEWABLE:
+        return {"cmd": None, "note": "built on the agent at run time"}
+    t = {"name": r["name"], "type": r["type"], "source": r["source"], "dest": r["dest"]}
+    opts = {"create_snapshot": create_snapshot}
+    if path is not None:
+        opts["path"] = path
+    cmd, err = _cmd.build_command(action, t, opts)
+    return {"cmd": " ".join(cmd)} if not err else {"cmd": None, "error": err}
 
 @app.get("/api/v1/backup/actions/{iid}")
 def get_action(iid: int):
@@ -637,8 +666,41 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .crec{display:flex;gap:10px;margin-top:9px}
 .crec button{appearance:none;font:500 11px/1 "Red Hat Text";border:0;background:transparent;
   color:var(--acc);cursor:pointer;padding:2px 0;border-bottom:1px dotted var(--acc)}
-#actlog{margin-top:20px;padding:.7rem .9rem;background:var(--rail);border:1px solid var(--line);
-  border-radius:9px;font:12.5px/1.5 "Roboto Mono",monospace;color:var(--mut);white-space:pre-wrap;min-height:1.4em}
+/* per-card action history */
+.chistrow{margin-top:11px;border-top:1px dashed var(--line);padding-top:9px}
+.histbtn{appearance:none;font:600 11px/1 "Red Hat Text",sans-serif;border:0;background:transparent;
+  color:var(--mut);cursor:pointer;padding:2px 0;display:inline-flex;gap:6px;align-items:center}
+.histbtn:hover{color:var(--ink)}
+.histbtn::before{content:"▸";font-size:10px;display:inline-block;transition:transform .15s}
+.histbtn.open::before{transform:rotate(90deg)}
+.chist{margin-top:9px;display:flex;flex-direction:column;gap:8px}
+.chist .hrow{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center}
+.chist .hd{width:7px;height:7px;border-radius:50%;flex:none}
+.chist .hd.ok{background:var(--ok)} .chist .hd.warn{background:var(--warn)}
+.chist .hd.crit{background:var(--crit)} .chist .hd.unk{background:var(--unk)}
+.chist .ha{font-size:11.5px;font-weight:600}
+.chist .hdry{font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:var(--mut);
+  border:1px solid var(--line);border-radius:4px;padding:1px 4px;margin-left:5px;font-weight:700}
+.chist .ht{color:var(--mut);font-family:"Roboto Mono";font-size:10.5px;white-space:nowrap}
+.chist .hcmd{grid-column:1/-1;color:var(--mut);font-family:"Roboto Mono";font-size:10.5px;
+  background:var(--rail);border:1px solid var(--line);border-radius:6px;padding:5px 7px;
+  white-space:pre-wrap;word-break:break-all}
+.chist .hempty{color:var(--mut);font-size:11.5px;font-style:italic}
+#actlog{margin-top:20px;padding:.6rem;background:var(--rail);border:1px solid var(--line);
+  border-radius:9px;display:flex;flex-direction:column;gap:7px;min-height:1.4em}
+#actlog .amsg{color:var(--mut);font:12px/1.5 "Roboto Mono",monospace;padding:2px 4px}
+.actrow{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;
+  font:12px/1.4 "Roboto Mono",monospace;padding:7px 9px;background:var(--surf);
+  border:1px solid var(--line);border-radius:8px}
+.actrow .ad{width:8px;height:8px;border-radius:50%;flex:none}
+.actrow .ad.ok{background:var(--ok)} .actrow .ad.crit{background:var(--crit)}
+.actrow .ad.warn{background:var(--warn)} .actrow .ad.unk{background:var(--unk)}
+.actrow.spin .ad{animation:apulse 1.1s ease-in-out infinite}
+@keyframes apulse{0%,100%{opacity:.3}50%{opacity:1}}
+.actrow .at{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.actrow .as{color:var(--mut);white-space:nowrap;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em}
+.actrow .aout{grid-column:1/-1;color:var(--mut);font-size:10.5px;white-space:pre-wrap;word-break:break-all;
+  background:var(--rail);border:1px solid var(--line);border-radius:6px;padding:5px 7px}
 /* legend */
 .legend{grid-column:1/-1;background:var(--rail);border-top:1px solid var(--line);padding:20px 24px 26px}
 .legend h3{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);font-weight:700;margin:0 0 14px}
@@ -692,38 +754,71 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
   .lg{grid-template-columns:1fr} .tag{margin-left:0;text-align:left}
   .sumtiles{grid-template-columns:1fr} .sumasof{margin-left:0;text-align:left}
 }
-@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>"""
 
 # plain string (NOT an f-string) so JS ${...} and \n survive untouched
 PAGE_SCRIPT = """<script>
+var _seq=0;
+function setRow(key, o){
+  var el=document.getElementById('actlog'); var idle=el.querySelector('.amsg'); if(idle) idle.remove();
+  var row=document.getElementById('actrow-'+key);
+  if(!row){
+    row=document.createElement('div'); row.className='actrow'; row.id='actrow-'+key;
+    row.innerHTML='<span class="ad"></span><span class="at"></span><span class="as"></span><div class="aout" hidden></div>';
+    el.insertBefore(row, el.firstChild);            // newest on top
+    while(el.children.length>12) el.removeChild(el.lastChild);   // cap the queue
+  }
+  if(o.title!=null) row.querySelector('.at').textContent=o.title;
+  if(o.state!=null) row.querySelector('.as').textContent=o.state;
+  if(o.cls!=null) row.querySelector('.ad').className='ad '+o.cls;
+  if(o.spin===true) row.classList.add('spin'); else if(o.spin===false) row.classList.remove('spin');
+  if(o.out!=null){ var out=row.querySelector('.aout'); out.hidden=false; out.textContent=o.out; }
+}
 async function post(body){
-  const el=document.getElementById('actlog'); el.textContent='submitting: '+body.action+' '+body.target+' …';
-  let r,j;
+  var key='q'+(++_seq);
+  setRow(key,{title:body.action+' '+body.target, state:'submitting', cls:'warn', spin:true});
+  var r,j;
   try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify(body)}); j=await r.json(); }
-  catch(e){ el.textContent='network error: '+e; return; }
-  if(!r.ok){ el.textContent='error: '+(j.detail||r.status); return; }
-  poll(j.id);
+  catch(e){ setRow(key,{state:'network error', cls:'crit', spin:false, out:String(e)}); return; }
+  if(!r.ok){ setRow(key,{state:'rejected', cls:'crit', spin:false, out:(j.detail||('HTTP '+r.status))}); return; }
+  setRow(key,{title:'#'+j.id+' '+body.action+' '+body.target, state:'pending', cls:'warn', spin:true});
+  poll(j.id, key);
+}
+async function previewCmd(b){
+  var q='/api/v1/backup/actions/preview?target='+encodeURIComponent(b.target)+'&action='+encodeURIComponent(b.action);
+  if(b.create_snapshot!=null) q+='&create_snapshot='+b.create_snapshot;
+  if(b.path!=null) q+='&path='+encodeURIComponent(b.path);
+  try{ var j=await (await fetch(q)).json(); return j.cmd||j.note||j.error||''; }catch(e){ return ''; }
+}
+async function confirmRun(b, label){
+  var cmd=await previewCmd(b);
+  return confirm('Run '+label+'?'+(cmd?('\\n\\nwill run:\\n'+cmd):''));
 }
 async function act(target, action, createSnap){
-  const label = action+' '+target+(action==='sync'?(' (new snap: '+createSnap+')'):'');
-  if(!confirm('Run '+label+'?')) return;
-  const b={target:target, action:action, requested_by:'ui'};
+  var label=action+' '+target+(action==='sync'?(' (new snap: '+createSnap+')'):'');
+  var b={target:target, action:action, requested_by:'ui'};
   if(action==='sync') b.create_snapshot=createSnap;
+  if(!(await confirmRun(b,label))) return;
   post(b);
 }
 async function actPrompt(target, action, field, msg){
-  const v=prompt(msg); if(v===null) return;
-  if(!confirm('Run '+action+' '+target+' ['+(v||'(all)')+'] ?')) return;
-  const b={target:target, action:action, requested_by:'ui'}; b[field]=v; post(b);
+  var v=prompt(msg); if(v===null) return;
+  var b={target:target, action:action, requested_by:'ui'}; b[field]=v;
+  if(!(await confirmRun(b, action+' '+target+' ['+(v||'(all)')+']'))) return;
+  post(b);
 }
-async function poll(id){
-  const el=document.getElementById('actlog');
-  for(let i=0;i<180;i++){
-    let j; try{ j=await (await fetch('/api/v1/backup/actions/'+id)).json(); }catch(e){ break; }
-    el.textContent='#'+id+' '+j.target+' '+j.action+' -> '+j.state+(j.result?('\\n'+j.result):'');
-    if(['done','failed','stalled'].includes(j.state)) break;
+async function poll(id, key){
+  for(var i=0;i<180;i++){
+    var j; try{ j=await (await fetch('/api/v1/backup/actions/'+id)).json(); }catch(e){ break; }
+    var st=j.state||'?';
+    var done=['done','failed','stalled'].includes(st);
+    var cls = st==='done'?'ok' : (st==='failed'||st==='stalled')?'crit' : 'warn';
+    var res={}; try{res=JSON.parse(j.result||'{}')}catch(e){}
+    setRow(key,{title:'#'+id+' '+(j.target||'')+' '+(j.action||''), state:st, cls:cls,
+                spin:!done, out: done?(res.output||''):undefined});
+    if(done) break;
     await new Promise(s=>setTimeout(s,2000));
   }
 }
@@ -746,6 +841,32 @@ function drawGauge(){
 window.addEventListener('load',drawGauge);
 if(document.fonts&&document.fonts.ready) document.fonts.ready.then(drawGauge);
 if(window.matchMedia) matchMedia('(prefers-color-scheme:dark)').addEventListener('change',drawGauge);
+function esc(s){return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function relTime(ts){ if(!ts) return ''; var s=Math.max(0, Date.now()/1000 - ts);
+  if(s<90) return Math.round(s)+'s ago'; if(s<5400) return Math.round(s/60)+'m ago';
+  if(s<172800) return Math.round(s/3600)+'h ago'; return Math.round(s/86400)+'d ago';}
+function renderHist(x){
+  var st=x.state||'?';
+  var cls = st==='done'?'ok' : st==='failed'?'crit' : (st==='pending'||st==='claimed')?'warn':'unk';
+  var res={}; try{res=JSON.parse(x.result||'{}')}catch(e){}
+  var out=(res.output||res.cmd||'').toString();
+  var dry = out.indexOf('[DRYRUN]')===0 ? '<span class=hdry>dry</span>' : '';
+  var when = relTime(x.result_ts||x.claimed_ts||x.created_ts);
+  return '<div class=hrow><span class="hd '+cls+'"></span>'+
+    '<span class=ha>'+esc(x.action)+' · '+esc(st)+dry+'</span>'+
+    '<span class=ht>'+when+'</span>'+
+    (out?'<div class=hcmd>'+esc(out)+'</div>':'')+'</div>';
+}
+async function toggleHist(btn, target){
+  var box=btn.nextElementSibling; var open=btn.classList.toggle('open');
+  if(!open){ box.hidden=true; return; }
+  box.hidden=false; box.innerHTML='<div class=hempty>loading…</div>';
+  try{
+    var j=await (await fetch('/api/v1/backup/actions?limit=8&target='+encodeURIComponent(target))).json();
+    var a=(j.actions||[]);
+    box.innerHTML = a.length ? a.map(renderHist).join('') : '<div class=hempty>no actions yet</div>';
+  }catch(e){ box.innerHTML='<div class=hempty>error loading history</div>'; }
+}
 function setHero(h){var p=document.querySelector('.panel'); if(!p) return;
   p.dataset.hero=h; try{localStorage.setItem('bm_hero',h)}catch(e){}}
 (function(){try{var s=localStorage.getItem('bm_hero');
@@ -777,7 +898,7 @@ def _acts(r, can_act):
     return f'<div class="cact">{main}</div>{rec}'
 
 def _card(r, can_act):
-    n = _esc(r["name"]); sev = SEVCLS.get(r["severity"], "unk")
+    nm = r["name"]; n = _esc(nm); sev = SEVCLS.get(r["severity"], "unk")
     src = r.get("source") or ""
     src_line = f"{src} → {r['dest']}" if r.get("dest") else src
     meta = []
@@ -799,9 +920,13 @@ def _card(r, can_act):
     src_html = f'<div class="src">{_esc(src_line)}</div>' if src_line else ""
     mr_html = f'<div class="row">{mr}</div>' if mr else ""
     why_html = f'<div class="why">{why}</div>' if why else ""
+    hist_html = ""
+    if r["type"] in ("zfs-repl", "zfs-local"):   # the target types that receive action intents
+        hist_html = (f'<div class=chistrow><button class=histbtn onclick="toggleHist(this,\'{nm}\')">'
+                     f'History</button><div class=chist hidden></div></div>')
     return (f'<div class="card {sev}"><div class="ch"><span class="cn">{n}</span>'
             f'<span class="cs">{r["severity"]}</span></div>{src_html}{mr_html}{why_html}'
-            f'{_acts(r, can_act)}</div>')
+            f'{_acts(r, can_act)}{hist_html}</div>')
 
 def _heatmap(order_names):
     """14-day worst-severity-per-day grid, aligned to the card order."""
@@ -950,7 +1075,7 @@ def index():
         <div class=gauge-cap>Busiest pool<span>{glabel} · {gpct}% used</span></div></div>
       <div class=railsec><h3>Coverage gaps</h3>{gaps_html}</div>
     </div>
-    <div class=main>{cards}<div id=actlog>idle - actions stream here.</div></div>
+    <div class=main>{cards}<div id=actlog><span class=amsg>idle - actions stream here.</span></div></div>
     <div class=legend><h3>Metric key</h3><dl class=lg>{leg}</dl></div>
   </div>
   <script>var GP={{pct:{gpct},label:"{glabel}"}};</script>""")
