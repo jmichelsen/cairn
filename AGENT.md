@@ -13,6 +13,18 @@ Two capabilities:
 Intent routing is self-organizing: whatever an agent reports, it owns - the API routes that
 target's action intents back to it (`targets.agent`).
 
+## Auth (zero-trust)
+
+Every API request needs a token - no request is trusted for being local. Two roles:
+- **agent token** (`BM_API_TOKEN` on the agent) - may only `report` / poll `intents` / post
+  `results`. A leaked agent token (e.g. from the remote vault) **cannot** read the dashboard or
+  queue actions.
+- **admin token** (`BM_ADMIN_TOKEN` on the API) - dashboard login + read views + queueing actions.
+
+The agent presents its token via the `X-Backup-Token` header on every call. Set the API's
+`BM_AGENT_TOKENS` (comma-separated) to the agent tokens you issue. Generate tokens with
+`openssl rand -hex 32`.
+
 ## Config (env)
 
 | var | meaning |

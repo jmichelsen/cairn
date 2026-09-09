@@ -12,15 +12,89 @@ import hashlib, hmac, json, os, sqlite3, time
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 HERE = Path(__file__).resolve().parent
 DB = os.environ.get("BM_DB", "/var/lib/backup-monitor/backup-monitor.db")
-API_TOKEN = os.environ.get("BM_API_TOKEN", "")
 DAY = 86400
 app = FastAPI(title="backup-monitor", version="1.0")
 
 SEV_ORDER = {"CRIT": 0, "WARN": 1, "UNKNOWN": 2, "OK": 3}
+
+# ---------------- zero-trust auth: every request needs a token, no exceptions ----------------
+# Two roles. ADMIN_TOKEN = full access (dashboard, read views, queue actions). AGENT_TOKENS =
+# report/poll/result ONLY (a compromised agent can't read everything or trigger actions). The
+# admin token also satisfies the agent role. Set BM_ADMIN_TOKEN + BM_AGENT_TOKENS (comma-sep) to
+# separate them; if only BM_API_TOKEN/BM_ADMIN_TOKEN is set, one token serves both roles.
+ADMIN_TOKEN = os.environ.get("BM_ADMIN_TOKEN") or os.environ.get("BM_API_TOKEN", "")
+AGENT_TOKENS = set(t.strip() for t in os.environ.get("BM_AGENT_TOKENS", "").split(",") if t.strip())
+if not AGENT_TOKENS and ADMIN_TOKEN:
+    AGENT_TOKENS = {ADMIN_TOKEN}
+AGENT_PATHS = ("/api/v1/backup/report", "/api/v1/backup/intents")  # + /intents/{id}/result
+
+def _extract_token(request):
+    t = request.headers.get("x-backup-token")
+    if t:
+        return t
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:]
+    return request.cookies.get("bm_token", "")
+
+def _valid(token, role):
+    if not ADMIN_TOKEN:
+        return False  # nothing configured -> deny all (fail closed)
+    if role == "admin":
+        return hmac.compare_digest(token, ADMIN_TOKEN)
+    # agent role: admin token also works
+    if hmac.compare_digest(token, ADMIN_TOKEN):
+        return True
+    return any(hmac.compare_digest(token, t) for t in AGENT_TOKENS)
+
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    p = request.url.path
+    if p == "/login" or p == "/favicon.ico":
+        return await call_next(request)
+    if not ADMIN_TOKEN:
+        return JSONResponse({"detail": "server has no BM_ADMIN_TOKEN configured"}, status_code=503)
+    role = "agent" if p.startswith(AGENT_PATHS) else "admin"
+    if _valid(_extract_token(request), role):
+        return await call_next(request)
+    # browser GET of an admin page -> send to login; everything else -> 401
+    wants_html = "text/html" in request.headers.get("accept", "")
+    if role == "admin" and wants_html and request.method == "GET":
+        return RedirectResponse("/login", status_code=302)
+    return JSONResponse({"detail": "unauthorized"}, status_code=401)
+
+LOGIN_HTML = """<!doctype html><meta charset=utf-8><title>backup-monitor login</title>
+<style>body{font:15px system-ui,sans-serif;display:grid;place-items:center;height:90vh}
+form{display:grid;gap:.6rem;width:280px} input,button{padding:.5rem;font-size:1rem}</style>
+<form method=post action=/login><h2>backup-monitor</h2>
+<input type=password name=token placeholder="admin token" autofocus>
+<button>Sign in</button>{err}</form>"""
+
+@app.get("/login", response_class=HTMLResponse)
+def login_form(bad: int = 0):
+    return LOGIN_HTML.replace("{err}", "<p style='color:#c0392b'>invalid token</p>" if bad else "")
+
+@app.post("/login")
+async def login_submit(request: Request):
+    from urllib.parse import parse_qs
+    raw = (await request.body()).decode("utf-8", "replace")
+    token = parse_qs(raw).get("token", [""])[0].strip()
+    if ADMIN_TOKEN and hmac.compare_digest(token, ADMIN_TOKEN):
+        r = RedirectResponse("/", status_code=302)
+        r.set_cookie("bm_token", token, httponly=True, samesite="strict",
+                     secure=request.url.scheme == "https", max_age=30 * DAY)
+        return r
+    return RedirectResponse("/login?bad=1", status_code=302)
+
+@app.post("/logout")
+def logout():
+    r = RedirectResponse("/login", status_code=302)
+    r.delete_cookie("bm_token")
+    return r
 
 def db():
     c = sqlite3.connect(DB)
@@ -56,11 +130,6 @@ def latest_status(conn):
     """
     return [dict(r) for r in conn.execute(q).fetchall()]
 
-def require_token(tok):
-    if not API_TOKEN:
-        raise HTTPException(503, "API token not configured")
-    if not tok or not hmac.compare_digest(tok, API_TOKEN):
-        raise HTTPException(401, "invalid token")
 
 # ---------------- read-only views ----------------
 @app.get("/api/v1/backup/health")
@@ -153,6 +222,12 @@ STATUS_INGEST_COLS = ["snap_age_src_s","snap_age_dst_s","repl_lag_s","pool_healt
     "logical_size","physical_size","last_check_ts","last_check_result","lock_state","handler_type",
     "handler_result","last_run_ts","detail_json","last_error"]
 
+async def _json(request):
+    try:
+        return await request.json()
+    except Exception:
+        raise HTTPException(400, "invalid JSON body")
+
 def dispatch_alert(sev, title, body, key, info_email=False):
     """Central alerting - the API is the only place email/Gotify go out (agents carry no creds)."""
     if not os.path.exists(NOTIFY_SH):
@@ -168,11 +243,10 @@ def dispatch_alert(sev, title, body, key, info_email=False):
         pass
 
 @app.post("/api/v1/backup/report")
-async def report(request: Request, x_backup_token: str = Header(default="")):
+async def report(request: Request):
     """An agent reports its host's status. Upserts targets (ownership = reporting agent) +
-    inserts status rows, then dispatches WARN/CRIT alerts centrally."""
-    require_token(x_backup_token)
-    payload = await request.json()
+    inserts status rows, then dispatches WARN/CRIT alerts centrally. (auth: middleware)"""
+    payload = await _json(request)
     agent = payload.get("agent", "unknown")
     now = int(payload.get("ts") or time.time())
     statuses = payload.get("statuses", [])
@@ -207,9 +281,9 @@ async def report(request: Request, x_backup_token: str = Header(default="")):
     return {"ok": True, "ingested": len(statuses)}
 
 @app.get("/api/v1/backup/intents")
-def poll_intents(agent: str, x_backup_token: str = Header(default="")):
-    """An agent claims the pending intents for the targets IT owns (routed by targets.agent)."""
-    require_token(x_backup_token)
+def poll_intents(agent: str):
+    """An agent claims the pending intents for the targets IT owns (routed by targets.agent).
+    (auth: middleware - agent role)"""
     now = int(time.time())
     with db() as conn:
         rows = [dict(r) for r in conn.execute("""
@@ -229,10 +303,10 @@ def poll_intents(agent: str, x_backup_token: str = Header(default="")):
     return {"intents": rows}
 
 @app.post("/api/v1/backup/intents/{iid}/result")
-async def intent_result(iid: int, request: Request, x_backup_token: str = Header(default="")):
-    """An agent reports an action's outcome. The API fires the action-outcome notification."""
-    require_token(x_backup_token)
-    body = await request.json()
+async def intent_result(iid: int, request: Request):
+    """An agent reports an action's outcome. The API fires the action-outcome notification.
+    (auth: middleware - agent role)"""
+    body = await _json(request)
     ok = bool(body.get("ok"))
     state = "done" if ok else "failed"
     with db() as conn:
@@ -254,7 +328,7 @@ async def intent_result(iid: int, request: Request, x_backup_token: str = Header
 # Keep this POST surface PRIVATE (reverse proxy / VPN) - never on the public token path.
 @app.post("/api/v1/backup/actions")
 async def create_action(request: Request):
-    body = await request.json()
+    body = await _json(request)
     target = body.get("target"); action = body.get("action")
     create_snapshot = bool(body.get("create_snapshot", True))
     requested_by = body.get("requested_by", "ui")

@@ -20,6 +20,9 @@ services:
     environment:
       BM_DB: /data/backup-monitor.db
       STATE_DIR: /data/state
+      # zero-trust: EVERY request needs a token. admin = dashboard/views/actions; agents = report/poll.
+      BM_ADMIN_TOKEN: ${BM_ADMIN_TOKEN:?set BM_ADMIN_TOKEN (dashboard login + admin API)}
+      BM_AGENT_TOKENS: ${BM_AGENT_TOKEN:?set BM_AGENT_TOKEN (shared by report-only agents)}
     volumes:
       - bmdata:/data
       - ./config:/config:ro
@@ -34,7 +37,7 @@ services:
     command: ["agent"]
     environment:
       BM_API_URL: http://api:8929
-      BM_API_TOKEN: ${BM_API_TOKEN:?set BM_API_TOKEN in your environment or an .env file}
+      BM_API_TOKEN: ${BM_AGENT_TOKEN:?set BM_AGENT_TOKEN}   # this agent's token (an agent-role token)
       BM_AGENT_NAME: local
       BM_TARGETS: /config/targets.yaml
       BM_INTERVAL: "900"
