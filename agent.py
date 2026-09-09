@@ -101,13 +101,23 @@ def do_execute(cfg):
         if err:
             api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err})
             continue
-        if DRYRUN:
-            out, rc = f"[DRYRUN] would run: {' '.join(cmd)}", 0
+        # dry-run is per-action (opts.dryrun from the UI) OR agent-wide (BM_DRYRUN). A dry-run runs
+        # a native `-n`/read-only PROBE and returns its REAL output - never the mutating command.
+        dry = DRYRUN or bool(opts.get("dryrun"))
+        if dry:
+            dcmd, note = C.build_dryrun(action, t, opts)
+            header = f"[DRY-RUN] would run: {' '.join(cmd)}"
+            if dcmd is None:
+                rc, out = 0, f"{header}\n\n{note}"
+            else:
+                rc, so, se = C.run(dcmd, timeout=min(TIMEOUT, 900))
+                out = f"{header}\n\nprobe: {' '.join(dcmd)}\n\n{(so + se).strip()}"
+            body = {"ok": rc == 0, "output": out.strip()[-1800:], "cmd": " ".join(cmd), "dryrun": True}
         else:
-            rc, so, se = C.run(cmd, timeout=TIMEOUT); out = (so + se)
-        api_call("POST", f"/api/v1/backup/intents/{iid}/result",
-                 {"ok": rc == 0, "output": out.strip()[-1500:], "cmd": " ".join(cmd)})
-        print(f"  intent {iid} {target} {action} -> {'ok' if rc == 0 else 'FAIL'}")
+            rc, so, se = C.run(cmd, timeout=TIMEOUT)
+            body = {"ok": rc == 0, "output": (so + se).strip()[-1500:], "cmd": " ".join(cmd)}
+        api_call("POST", f"/api/v1/backup/intents/{iid}/result", body)
+        print(f"  intent {iid} {target} {action}{' [dry]' if dry else ''} -> {'ok' if rc == 0 else 'FAIL'}")
     return len(intents)
 
 def main():

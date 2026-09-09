@@ -454,7 +454,10 @@ def adapter_smart(t, defaults, now):
     if not devs:
         return [dict(severity="UNKNOWN", last_error="smartctl --scan found no devices")]
     is_root = os.geteuid() == 0
-    wrapper = str(HERE / "smart-probe.sh")
+    # Non-root reads go through a root-OWNED wrapper that sudoers pins by absolute path - never the
+    # user-writable repo copy (sudo-ing an editable script would be an escalation hole). grant-access.sh
+    # deploys it to /opt; override with BM_SMART_WRAPPER if you installed elsewhere.
+    wrapper = os.environ.get("BM_SMART_WRAPPER", "/opt/backup-monitor/phase1/smart-probe.sh")
     results = []
     for dev, typ in devs:
         cmd = (["smartctl", "-j", "-H", "-A", "-d", typ, dev] if is_root
@@ -621,6 +624,44 @@ def build_command(action, t, opts=None):
             dest = os.path.join(sp if not err else staging, os.path.basename(rp) + f".restored-{time.strftime('%Y%m%dT%H%M%S')}")
             return ["cp", "-a", "--no-clobber", "--", rp, dest], None
     return None, f"unknown action '{action}'"
+
+def build_dryrun(action, t, opts=None):
+    """A SAFE dry-run that shows the REAL projected result. Returns (argv, note):
+      - argv set  -> run it; it uses a native dry-run flag (`zfs send -nvP` for replication) or a
+        read-only probe (`zpool status` for scrub) - real output, zero side effects.
+      - argv None -> no meaningful native dry-run; `note` explains what the real run would do.
+    syncoid 2.2 has no --dryrun and `zfs snapshot`/`zpool scrub` have no -n, hence the split."""
+    opts = opts or {}
+    src = t.get("source")
+    if action == "sync":
+        dst = t.get("dest")
+        if not src or not dst:
+            return None, "target missing source/dest"
+        ssnaps = zfs_snapshots(src)
+        if not ssnaps:
+            return None, "source has no snapshots to send"
+        newest_src = ssnaps[-1][0]
+        dsnaps = zfs_snapshots(dst)
+        if not dsnaps:
+            return ["zfs", "send", "-nvP", newest_src], None          # first sync = full send estimate
+        dguids = {g for _, g, _ in dsnaps}
+        common = [s for s in ssnaps if s[1] in dguids]
+        if not common:
+            return None, "no snapshot in common with the destination - diverged; needs a manual base"
+        base = max(common, key=lambda x: x[2])[0]
+        if base == newest_src:
+            return None, "already up to date - 0 bytes pending to the destination"
+        return ["zfs", "send", "-nvP", "-I", base, newest_src], None   # real incremental size estimate
+    if action == "scrub":
+        pool = (src or "").split("/")[0]
+        return (["zpool", "status", pool], None) if pool else (None, "no pool for scrub")
+    if action == "snapshot":
+        return None, f"'zfs snapshot' has no dry-run - would create {src}@bm-manual-<timestamp>"
+    if action in ("recover-points", "recover-search", "recover-deleted"):
+        return build_command(action, t, opts)                          # read-only anyway
+    if action == "restore":
+        return None, "would copy the chosen snapshot version into the staging dir (copy-only, never overwrites live)"
+    return None, f"no dry-run for '{action}'"
 
 def _mountpoint(ds):
     rc, out, _ = run(["zfs", "get", "-H", "-o", "value", "mountpoint", ds])

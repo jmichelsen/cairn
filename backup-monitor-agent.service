@@ -8,12 +8,13 @@ Wants=network-online.target
 Type=simple
 # Token (BM_API_TOKEN) + SMTP/Gotify come from the config file via agent.py's load_env().
 # The BM_* below are set explicitly (setdefault in load_env won't override them).
+Environment=PYTHONUNBUFFERED=1
 Environment=BACKUP_MONITOR_ENV=%h/backup-monitor/config/backup-monitor.env
 Environment=BM_API_URL=http://localhost:8929
 Environment=BM_AGENT_NAME=local
 Environment=BM_TARGETS=%h/backup-monitor/config/targets.yaml
 Environment=BM_CAN_EXECUTE=1
-Environment=BM_INTERVAL=900
+Environment=BM_INTERVAL=120
 # Safety valve: flip to 1 (and `systemctl --user restart`) to log actions instead of running them.
 Environment=BM_DRYRUN=0
 WorkingDirectory=%h/backup-monitor

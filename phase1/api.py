@@ -363,7 +363,9 @@ async def intent_result(iid: int, request: Request):
         conn.commit()
     tgt = r["target"] if r else "?"; act = r["action"] if r else "?"
     out = (body.get("output") or "")[:1500]
-    if ok:
+    if body.get("dryrun"):
+        dispatch_alert("INFO", f"dry-run: {tgt} {act}", out, f"act-{iid}")  # UI-only feedback, no email/push
+    elif ok:
         dispatch_alert("INFO", f"action done: {tgt} {act}", out, f"act-{iid}", info_email=True)
     else:
         dispatch_alert("CRIT", f"action FAILED: {tgt} {act}", out, f"act-{iid}")
@@ -383,6 +385,8 @@ async def create_action(request: Request):
         raise HTTPException(400, f"action must be one of {sorted(ALLOWED_ACTIONS)}")
     # options carried to the agent (it builds the command from its trusted config + these).
     opts = {"create_snapshot": bool(body.get("create_snapshot", True))}
+    if body.get("dryrun"):
+        opts["dryrun"] = True   # per-action dry-run: the agent runs a native -n / read-only probe
     for k in ("path", "dest", "version"):
         if body.get(k) is not None:
             opts[k] = str(body[k])
@@ -717,6 +721,17 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
   font:600 12.5px/1 "Red Hat Text",sans-serif;padding:8px 14px;border-radius:7px;cursor:pointer}
 .seg button:hover{color:var(--ink)}
 .signout{color:var(--acc);text-decoration:none;font-size:12.5px;white-space:nowrap}
+.drysw{display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:12.5px;color:var(--mut);
+  border:1px solid var(--line);background:var(--surf);border-radius:9px;padding:6px 11px;user-select:none}
+.drysw input{appearance:none;-webkit-appearance:none;width:30px;height:17px;border-radius:10px;
+  background:var(--line);position:relative;cursor:pointer;transition:background .15s;flex:none;margin:0}
+.drysw input::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;
+  background:#fff;transition:transform .15s;box-shadow:0 1px 2px rgba(0,0,0,.3)}
+.drysw input:checked{background:var(--acc)}
+.drysw input:checked::after{transform:translateX(13px)}
+.drysw input:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.panel.drymode .drysw{color:var(--acc);border-color:var(--acc);font-weight:600}
+.actrow.dryrow{border-style:dashed}
 .panel[data-hero=steel] .seg [data-h=steel],
 .panel[data-hero=heat] .seg [data-h=heat],
 .panel:not([data-hero]) .seg [data-h=steel]{background:var(--acc);color:#fff}
@@ -769,6 +784,7 @@ function setRow(key, o){
     el.insertBefore(row, el.firstChild);            // newest on top
     while(el.children.length>12) el.removeChild(el.lastChild);   // cap the queue
   }
+  if(o.dry===true) row.classList.add('dryrow');
   if(o.title!=null) row.querySelector('.at').textContent=o.title;
   if(o.state!=null) row.querySelector('.as').textContent=o.state;
   if(o.cls!=null) row.querySelector('.ad').className='ad '+o.cls;
@@ -776,15 +792,15 @@ function setRow(key, o){
   if(o.out!=null){ var out=row.querySelector('.aout'); out.hidden=false; out.textContent=o.out; }
 }
 async function post(body){
-  var key='q'+(++_seq);
-  setRow(key,{title:body.action+' '+body.target, state:'submitting', cls:'warn', spin:true});
+  var key='q'+(++_seq); var dry=!!body.dryrun; var tag=dry?'[dry] ':'';
+  setRow(key,{title:tag+body.action+' '+body.target, state:'submitting', cls:'warn', spin:true, dry:dry});
   var r,j;
   try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify(body)}); j=await r.json(); }
   catch(e){ setRow(key,{state:'network error', cls:'crit', spin:false, out:String(e)}); return; }
   if(!r.ok){ setRow(key,{state:'rejected', cls:'crit', spin:false, out:(j.detail||('HTTP '+r.status))}); return; }
-  setRow(key,{title:'#'+j.id+' '+body.action+' '+body.target, state:'pending', cls:'warn', spin:true});
-  poll(j.id, key);
+  setRow(key,{title:tag+'#'+j.id+' '+body.action+' '+body.target, state:'pending', cls:'warn', spin:true});
+  poll(j.id, key, dry);
 }
 async function previewCmd(b){
   var q='/api/v1/backup/actions/preview?target='+encodeURIComponent(b.target)+'&action='+encodeURIComponent(b.action);
@@ -794,30 +810,33 @@ async function previewCmd(b){
 }
 async function confirmRun(b, label){
   var cmd=await previewCmd(b);
-  return confirm('Run '+label+'?'+(cmd?('\\n\\nwill run:\\n'+cmd):''));
+  var head = b.dryrun ? ('DRY-RUN - preview '+label+'?\\n(runs a safe probe / native -n, changes nothing)')
+                      : ('Run '+label+'?');
+  return confirm(head+(cmd?('\\n\\nwill run:\\n'+cmd):''));
 }
 async function act(target, action, createSnap){
   var label=action+' '+target+(action==='sync'?(' (new snap: '+createSnap+')'):'');
-  var b={target:target, action:action, requested_by:'ui'};
+  var b={target:target, action:action, requested_by:'ui', dryrun:!!window.BM_DRY};
   if(action==='sync') b.create_snapshot=createSnap;
   if(!(await confirmRun(b,label))) return;
   post(b);
 }
 async function actPrompt(target, action, field, msg){
   var v=prompt(msg); if(v===null) return;
-  var b={target:target, action:action, requested_by:'ui'}; b[field]=v;
+  var b={target:target, action:action, requested_by:'ui', dryrun:!!window.BM_DRY}; b[field]=v;
   if(!(await confirmRun(b, action+' '+target+' ['+(v||'(all)')+']'))) return;
   post(b);
 }
-async function poll(id, key){
+async function poll(id, key, dry){
+  var tag=dry?'[dry] ':'';
   for(var i=0;i<180;i++){
     var j; try{ j=await (await fetch('/api/v1/backup/actions/'+id)).json(); }catch(e){ break; }
     var st=j.state||'?';
     var done=['done','failed','stalled'].includes(st);
     var cls = st==='done'?'ok' : (st==='failed'||st==='stalled')?'crit' : 'warn';
     var res={}; try{res=JSON.parse(j.result||'{}')}catch(e){}
-    setRow(key,{title:'#'+id+' '+(j.target||'')+' '+(j.action||''), state:st, cls:cls,
-                spin:!done, out: done?(res.output||''):undefined});
+    setRow(key,{title:tag+'#'+id+' '+(j.target||'')+' '+(j.action||''), state:st+(dry?' · dry':''),
+                cls:cls, spin:!done, out: done?(res.output||''):undefined});
     if(done) break;
     await new Promise(s=>setTimeout(s,2000));
   }
@@ -871,6 +890,11 @@ function setHero(h){var p=document.querySelector('.panel'); if(!p) return;
   p.dataset.hero=h; try{localStorage.setItem('bm_hero',h)}catch(e){}}
 (function(){try{var s=localStorage.getItem('bm_hero');
   if(s) document.querySelector('.panel').dataset.hero=s;}catch(e){}})();
+function setDry(v){window.BM_DRY=!!v; var p=document.querySelector('.panel');
+  if(p) p.classList.toggle('drymode',!!v); try{localStorage.setItem('bm_dry', v?'1':'')}catch(e){}}
+(function(){try{ if(localStorage.getItem('bm_dry')){ window.BM_DRY=true;
+  var c=document.getElementById('drychk'); if(c) c.checked=true;
+  var p=document.querySelector('.panel'); if(p) p.classList.add('drymode'); } }catch(e){}})();
 </script>"""
 
 def _acts(r, can_act):
@@ -1062,6 +1086,8 @@ def index():
     <div class=seg role=tablist>
       <button data-h=steel onclick="setHero('steel')">Summary</button>
       <button data-h=heat onclick="setHero('heat')">14-day fleet</button></div>
+    <label class=drysw title="When on, every action runs a safe dry-run probe (native -n / read-only) instead of executing">
+      <input type=checkbox id=drychk onchange="setDry(this.checked)"><span>Dry-run</span></label>
     <a class=signout href=# onclick="lo.submit();return false">sign out</a></div>
   <div id=hero-steel class=herox>{steel_hero}</div>
   <div id=hero-heat class=herox><div class=hero>
