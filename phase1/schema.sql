@@ -75,12 +75,17 @@ CREATE TABLE IF NOT EXISTS vault_reports (
 );
 CREATE INDEX IF NOT EXISTS idx_vault_reports_ts ON vault_reports(agent, ts);
 
--- Auth tokens, HASH-AT-REST: only sha256(token) is stored, never the token. One row per
--- credential (per-agent tokens are individually revocable). role: admin | agent.
+-- Auth credentials, HASH-AT-REST: only sha256(secret) is stored, never the secret.
+-- Two-tier: an 'enroll' secret (long-lived, proves a box's identity) mints short-lived 'access'
+-- tokens; 'admin' is a human dashboard credential. role = what it may do (admin|agent);
+-- kind = credential type (admin|enroll|access). Per-agent rows are individually revocable.
 CREATE TABLE IF NOT EXISTS auth_tokens (
-  hash        TEXT PRIMARY KEY,       -- sha256 hex of the token
+  hash        TEXT PRIMARY KEY,       -- sha256 hex of the secret/token
   role        TEXT NOT NULL,          -- admin | agent
+  kind        TEXT NOT NULL DEFAULT 'access',  -- admin | enroll | access
   label       TEXT UNIQUE,            -- human name, e.g. 'vault', 'local', 'bootstrap-admin'
+  parent      TEXT,                   -- for access tokens: the enroll label that issued it
+  expires_ts  INTEGER,                -- access tokens expire; NULL = never (static/admin/enroll)
   created_ts  INTEGER,
   last_used_ts INTEGER,
   active      INTEGER DEFAULT 1

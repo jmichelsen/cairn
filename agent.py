@@ -30,7 +30,12 @@ except ImportError:
 C.load_env()                     # pull /config/backup-monitor.env if present
 def _e(k, d=None): return os.environ.get(k, d)
 API      = _e("BM_API_URL", "http://localhost:8929").rstrip("/")
-TOKEN    = _e("BM_API_TOKEN", "")
+# Two ways to authenticate:
+#  - BM_ENROLL_SECRET (preferred): the long-lived per-agent secret; the agent trades it for a
+#    short-lived access token via /enroll and auto-re-enrolls on 401 (so forced rotation self-heals).
+#  - BM_API_TOKEN (simple/legacy): a static access token, no rotation.
+ENROLL_SECRET = _e("BM_ENROLL_SECRET", "")
+_access = {"token": _e("BM_API_TOKEN", "")}
 NAME     = _e("BM_AGENT_NAME", "local")
 TARGETS  = _e("BM_TARGETS", str(HERE / "targets.yaml"))
 CAN_EXEC = _e("BM_CAN_EXECUTE", "0") == "1"
@@ -40,12 +45,30 @@ TIMEOUT  = int(_e("BM_ACTION_TIMEOUT", "7200"))
 
 META_KEYS = ["type", "source", "dest", "tier", "location", "encrypted", "cadence"]
 
-def api_call(method, path, body=None):
+def enroll():
+    """Trade the enrollment secret for a fresh short-lived access token."""
+    if not ENROLL_SECRET:
+        raise RuntimeError("got 401 and no BM_ENROLL_SECRET to re-enroll with")
+    req = urllib.request.Request(f"{API}/api/v1/backup/enroll", data=b"{}", method="POST",
+          headers={"Content-Type": "application/json", "X-Backup-Enroll": ENROLL_SECRET})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        j = json.loads(r.read())
+    _access["token"] = j["access_token"]
+    print(f"enrolled: fresh access token (expires_in {j.get('expires_in')}s)")
+
+def api_call(method, path, body=None, _retry=True):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(f"{API}{path}", data=data, method=method,
-          headers={"Content-Type": "application/json", "X-Backup-Token": TOKEN})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read() or "null")
+          headers={"Content-Type": "application/json", "X-Backup-Token": _access["token"]})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read() or "null")
+    except urllib.error.HTTPError as e:
+        # 401 with an enrollment secret => our access token was rotated/expired; re-enroll + retry once.
+        if e.code == 401 and ENROLL_SECRET and _retry:
+            enroll()
+            return api_call(method, path, body, _retry=False)
+        raise
 
 def do_report(cfg):
     items = []
@@ -90,7 +113,13 @@ def do_execute(cfg):
 def main():
     once = "--once" in sys.argv
     cfg = yaml.safe_load(Path(TARGETS).read_text())
-    print(f"agent '{NAME}' -> {API}  (execute={CAN_EXEC}, dryrun={DRYRUN}, interval={INTERVAL}s)")
+    auth = "enroll" if ENROLL_SECRET else "static-token"
+    print(f"agent '{NAME}' -> {API}  (auth={auth}, execute={CAN_EXEC}, dryrun={DRYRUN}, interval={INTERVAL}s)")
+    if ENROLL_SECRET:
+        try:
+            enroll()
+        except Exception as e:
+            print(f"initial enroll failed (will retry on first 401): {e}")
     while True:
         try:
             n = do_report(cfg); print(f"reported {n} statuses")

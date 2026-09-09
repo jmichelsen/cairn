@@ -21,22 +21,36 @@ Every API request needs a token - no request is trusted for being local. Two rol
   queue actions.
 - **admin token** (`BM_ADMIN_TOKEN` on the API) - dashboard login + read views + queueing actions.
 
-The agent presents its token via the `X-Backup-Token` header on every call.
+Everything is **hash-at-rest** (the API stores only `sha256(secret)`) and **per-agent** (one
+credential per box, individually revocable). Two ways an agent authenticates:
 
-**Per-agent tokens, hash-at-rest.** Each agent gets its OWN token (one row, individually
-revocable) and the API stores only `sha256(token)` - never the token. Mint one per box:
-
+**A. Enrollment (recommended - supports rotation).** Each agent holds a long-lived **enrollment
+secret** and trades it for a **short-lived access token** via `/enroll`; it re-enrolls
+automatically on any `401`. Mint the secret per box:
 ```
-# via the admin API (from anywhere, with the admin token):
+# admin API (from anywhere with the admin token):
 curl -X POST -H "X-Backup-Token: $ADMIN" -H 'Content-Type: application/json' \
      -d '{"role":"agent","label":"vault"}' https://backups.example.com/api/v1/backup/tokens
-# or offline on the API host (direct DB):
+# or offline on the API host:
 BM_DB=/data/backup-monitor.db phase1/bmtoken.py mint --role agent --label vault
 ```
-The token is shown **once**; put it in the agent's `BM_API_TOKEN`. Revoke a single box without
-touching the others: `DELETE /api/v1/backup/tokens/vault` (or `bmtoken.py revoke --label vault`).
-`GET /api/v1/backup/tokens` lists labels/roles/last-used (never the secret). The bootstrap admin
-comes from `BM_ADMIN_TOKEN` (hashed at startup); mint more admins the same way.
+Put the secret in the agent's **`BM_ENROLL_SECRET`**. The access token lives only in memory and
+expires (`BM_ACCESS_TTL`, default 24h) - the agent refreshes it silently.
+
+**B. Static token (simplest).** Put a fixed access token in `BM_API_TOKEN` (add it to the API's
+`BM_AGENT_TOKENS`). No rotation. Fine for a trusted local agent.
+
+### The three admin operations
+
+| Operation | Command | Effect |
+| --- | --- | --- |
+| **Scheduled rotation** | (automatic) | access tokens expire; the agent re-enrolls. Nothing to do. |
+| **Forced rotation** (a token *leaked*, box is fine) | `POST /api/v1/backup/tokens/<label>/rotate` | kills the current access token now; the leaked copy is dead; the box re-enrolls with its (non-leaked) enrollment secret and resumes. An attacker holding the leaked token is locked out. |
+| **Revoke** (box *compromised* / decommissioned) | `DELETE /api/v1/backup/tokens/<label>` | kills the enrollment secret **and** its access tokens - terminal; the box cannot self-heal. Provision a new credential out-of-band. |
+
+`GET /api/v1/backup/tokens` lists labels/roles/kind/last-used (never the secret). A lockout guard
+refuses to revoke the last active admin. The bootstrap admin comes from `BM_ADMIN_TOKEN` (hashed
+at startup); mint more admins via `POST /tokens {role:"admin", label:"…"}`.
 
 ## Config (env)
 

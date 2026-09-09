@@ -28,6 +28,7 @@ SEV_ORDER = {"CRIT": 0, "WARN": 1, "UNKNOWN": 2, "OK": 3}
 # into the store at startup; mint per-agent tokens via POST /tokens or the bmtoken CLI.
 import hashlib as _hashlib, secrets as _secrets
 AGENT_PATHS = ("/api/v1/backup/report", "/api/v1/backup/intents")  # + /intents/{id}/result
+ACCESS_TTL = int(os.environ.get("BM_ACCESS_TTL", str(24 * 3600)))  # access-token lifetime (s)
 
 def _hash(token):
     return _hashlib.sha256(token.encode()).hexdigest()
@@ -44,8 +45,9 @@ def _seed_tokens():
         seeds.append((_hash(t), "agent", f"env-agent-{i}"))
     with db() as c:
         for h, role, label in seeds:
-            c.execute("INSERT OR IGNORE INTO auth_tokens(hash,role,label,created_ts,active) "
-                      "VALUES(?,?,?,?,1)", (h, role, label, now))
+            kind = "admin" if role == "admin" else "access"   # env agent tokens are static access
+            c.execute("INSERT OR IGNORE INTO auth_tokens(hash,role,kind,label,created_ts,active) "
+                      "VALUES(?,?,?,?,?,1)", (h, role, kind, label, now))
         c.commit()
         return c.execute("SELECT COUNT(*) FROM auth_tokens WHERE role='admin' AND active=1").fetchone()[0]
 
@@ -59,16 +61,22 @@ def _extract_token(request):
     return request.cookies.get("bm_token", "")
 
 def _lookup_role(token):
-    """Return the role for a presented token, or None. Hash lookup = no plaintext at rest."""
+    """Return the role for a presented token, or None. Only admin+access kinds authenticate
+    requests (enroll secrets are used only at /enroll); access tokens must be unexpired."""
     if not token:
         return None
+    now = int(time.time())
     h = _hash(token)
     with db() as c:
-        r = c.execute("SELECT role FROM auth_tokens WHERE hash=? AND active=1", (h,)).fetchone()
-        if r:
-            c.execute("UPDATE auth_tokens SET last_used_ts=? WHERE hash=?", (int(time.time()), h))
-            c.commit()
-    return r["role"] if r else None
+        r = c.execute("SELECT role,kind,expires_ts FROM auth_tokens WHERE hash=? AND active=1",
+                      (h,)).fetchone()
+        if not r or r["kind"] not in ("admin", "access"):
+            return None
+        if r["kind"] == "access" and r["expires_ts"] and r["expires_ts"] < now:
+            return None
+        c.execute("UPDATE auth_tokens SET last_used_ts=? WHERE hash=?", (now, h))
+        c.commit()
+    return r["role"]
 
 def _valid(token, need):
     role = _lookup_role(token)
@@ -79,8 +87,8 @@ def _valid(token, need):
 @app.middleware("http")
 async def auth_gate(request: Request, call_next):
     p = request.url.path
-    if p == "/login" or p == "/favicon.ico":
-        return await call_next(request)
+    if p in ("/login", "/favicon.ico", "/api/v1/backup/enroll"):
+        return await call_next(request)   # /enroll authenticates via the enrollment secret itself
     if not HAS_ADMIN:
         return JSONResponse({"detail": "no admin token configured - set BM_ADMIN_TOKEN and restart"},
                             status_code=503)
@@ -135,7 +143,10 @@ def _init_db():
         with sqlite3.connect(DB) as c:
             c.executescript(schema.read_text())
             # idempotent migrations for DBs created before these columns existed
-            for tbl, col, typ in [("targets", "agent", "TEXT"), ("intents", "opts", "TEXT")]:
+            for tbl, col, typ in [("targets", "agent", "TEXT"), ("intents", "opts", "TEXT"),
+                                  ("auth_tokens", "kind", "TEXT DEFAULT 'access'"),
+                                  ("auth_tokens", "parent", "TEXT"),
+                                  ("auth_tokens", "expires_ts", "INTEGER")]:
                 try:
                     c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
                 except sqlite3.OperationalError:
@@ -399,38 +410,83 @@ def get_action(iid: int):
         raise HTTPException(404, "no such action")
     return dict(r)
 
+# ---------------- enrollment (two-tier): agent trades its enroll secret for an access token ----
+# Authenticated by the enrollment SECRET itself (not admin/agent role) - see middleware bypass.
+@app.post("/api/v1/backup/enroll")
+async def enroll(request: Request):
+    secret = _extract_token(request) or request.headers.get("x-backup-enroll", "")
+    now = int(time.time())
+    with db() as c:
+        r = c.execute("SELECT role,label FROM auth_tokens WHERE hash=? AND kind='enroll' AND active=1",
+                      (_hash(secret),)).fetchone()
+        if not r:
+            raise HTTPException(401, "invalid or revoked enrollment secret")
+        access = _secrets.token_hex(32)
+        # one active access token per agent: drop any prior (also kills a leaked one on refresh).
+        # DELETE (not deactivate) so the timestamped label is free to reuse immediately.
+        c.execute("DELETE FROM auth_tokens WHERE parent=? AND kind='access'", (r["label"],))
+        alabel = f"{r['label']}-access-{now}-{_secrets.token_hex(3)}"
+        c.execute("INSERT INTO auth_tokens(hash,role,kind,label,parent,expires_ts,created_ts,active) "
+                  "VALUES(?,?, 'access', ?, ?, ?, ?, 1)",
+                  (_hash(access), r["role"], alabel, r["label"], now + ACCESS_TTL, now))
+        c.commit()
+    return {"access_token": access, "expires_in": ACCESS_TTL, "agent": r["label"]}
+
 # ---------------- token management (admin role; hash-at-rest) ----------------
 @app.post("/api/v1/backup/tokens")
 async def mint_token(request: Request):
     body = await _json(request)
     role = body.get("role"); label = body.get("label")
+    kind = body.get("kind") or ("admin" if role == "admin" else "enroll")  # agents get enroll secrets
     if role not in ("admin", "agent"):
         raise HTTPException(400, "role must be 'admin' or 'agent'")
+    if kind not in ("admin", "enroll", "access"):
+        raise HTTPException(400, "kind must be admin | enroll | access")
     if not label:
         raise HTTPException(400, "label required (e.g. the agent/host name)")
     token = _secrets.token_hex(32)
     try:
         with db() as c:
-            c.execute("INSERT INTO auth_tokens(hash,role,label,created_ts,active) VALUES(?,?,?,?,1)",
-                      (_hash(token), role, label, int(time.time())))
+            c.execute("INSERT INTO auth_tokens(hash,role,kind,label,created_ts,active) VALUES(?,?,?,?,?,1)",
+                      (_hash(token), role, kind, label, int(time.time())))
             c.commit()
     except sqlite3.IntegrityError:
         raise HTTPException(409, f"label '{label}' already exists")
     global HAS_ADMIN
     if role == "admin":
         HAS_ADMIN = True
-    return {"token": token, "label": label, "role": role,
-            "note": "SAVE THIS NOW - only its hash is stored; it can never be shown again"}
+    hint = ("enrollment secret - put on the agent as BM_ENROLL_SECRET; it mints short-lived "
+            "access tokens") if kind == "enroll" else "SAVE NOW - only its hash is stored"
+    return {"token": token, "label": label, "role": role, "kind": kind, "note": hint}
 
 @app.get("/api/v1/backup/tokens")
 def list_tokens():
     with db() as c:
         rows = [dict(r) for r in c.execute(
-            "SELECT label,role,created_ts,last_used_ts,active FROM auth_tokens ORDER BY role,label")]
+            "SELECT label,role,kind,parent,expires_ts,created_ts,last_used_ts,active "
+            "FROM auth_tokens ORDER BY role,kind,label")]
     return {"tokens": rows}   # never returns the token or its hash
+
+@app.post("/api/v1/backup/tokens/{label}/rotate")
+def force_rotate(label: str):
+    """Forced rotation for a LEAKED token on a TRUSTED box: kill the agent's current access
+    token(s) now; the box re-enrolls with its (non-leaked) enrollment secret and gets a fresh one.
+    An attacker holding the leaked access token is locked out (they lack the enrollment secret)."""
+    with db() as c:
+        r = c.execute("SELECT role FROM auth_tokens WHERE label=? AND kind='enroll' AND active=1",
+                      (label,)).fetchone()
+        if not r:
+            raise HTTPException(404, f"no active enrollment secret labelled '{label}' to rotate")
+        n = c.execute("UPDATE auth_tokens SET active=0 WHERE parent=? AND kind='access' AND active=1",
+                      (label,)).rowcount
+        c.commit()
+    return {"ok": True, "rotated": label, "access_tokens_invalidated": n,
+            "note": "agent re-enrolls on its next call and resumes; leaked access token is dead"}
 
 @app.delete("/api/v1/backup/tokens/{label}")
 def revoke_token(label: str):
+    """Terminal revoke (compromised box): kill the enrollment secret AND its access tokens.
+    The box cannot self-heal - provision a new credential out-of-band."""
     with db() as c:
         row = c.execute("SELECT role,active FROM auth_tokens WHERE label=?", (label,)).fetchone()
         if not row:
@@ -439,7 +495,8 @@ def revoke_token(label: str):
             n = c.execute("SELECT COUNT(*) FROM auth_tokens WHERE role='admin' AND active=1").fetchone()[0]
             if n <= 1:
                 raise HTTPException(409, "refusing to revoke the last active admin token (lockout guard)")
-        c.execute("UPDATE auth_tokens SET active=0 WHERE label=?", (label,))
+        # kill the credential itself + any access tokens it issued
+        c.execute("UPDATE auth_tokens SET active=0 WHERE label=? OR parent=?", (label, label))
         c.commit()
     return {"ok": True, "revoked": label}
 

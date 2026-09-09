@@ -22,7 +22,8 @@ def _c():
     os.makedirs(os.path.dirname(DB) or ".", exist_ok=True)
     c = sqlite3.connect(DB); c.row_factory = sqlite3.Row
     c.execute("""CREATE TABLE IF NOT EXISTS auth_tokens(
-        hash TEXT PRIMARY KEY, role TEXT NOT NULL, label TEXT UNIQUE,
+        hash TEXT PRIMARY KEY, role TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'access',
+        label TEXT UNIQUE, parent TEXT, expires_ts INTEGER,
         created_ts INTEGER, last_used_ts INTEGER, active INTEGER DEFAULT 1)""")
     return c
 
@@ -31,19 +32,24 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     m = sub.add_parser("mint"); m.add_argument("--role", required=True, choices=["admin", "agent"])
     m.add_argument("--label", required=True)
+    m.add_argument("--kind", choices=["admin", "enroll", "access"],
+                   help="default: admin->admin, agent->enroll (a per-agent enrollment secret)")
     sub.add_parser("list")
     rv = sub.add_parser("revoke"); rv.add_argument("--label", required=True)
     a = ap.parse_args()
     c = _c()
     if a.cmd == "mint":
+        kind = a.kind or ("admin" if a.role == "admin" else "enroll")
         tok = secrets.token_hex(32)
         try:
-            c.execute("INSERT INTO auth_tokens(hash,role,label,created_ts,active) VALUES(?,?,?,?,1)",
-                      (_h(tok), a.role, a.label, int(time.time())))
+            c.execute("INSERT INTO auth_tokens(hash,role,kind,label,created_ts,active) VALUES(?,?,?,?,?,1)",
+                      (_h(tok), a.role, kind, a.label, int(time.time())))
             c.commit()
         except sqlite3.IntegrityError:
             sys.exit(f"label '{a.label}' already exists")
-        print(f"role={a.role} label={a.label}\nTOKEN: {tok}\n(save it now - only its hash is stored)")
+        var = "BM_ENROLL_SECRET" if kind == "enroll" else "BM_API_TOKEN/admin token"
+        print(f"role={a.role} kind={kind} label={a.label}\nSECRET: {tok}\n"
+              f"(save now - only its hash is stored; put it on the agent as {var})")
     elif a.cmd == "list":
         for r in c.execute("SELECT label,role,active,created_ts,last_used_ts FROM auth_tokens ORDER BY role,label"):
             used = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["last_used_ts"])) if r["last_used_ts"] else "never"
