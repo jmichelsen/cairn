@@ -655,6 +655,10 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .card.ok{border-top-color:var(--ok)} .card.warn{border-top-color:var(--warn)} .card.crit{border-top-color:var(--crit)}
 .card .ch{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .card .cn{font-family:"Red Hat Display";font-weight:700;font-size:15px;word-break:break-word}
+.card .chr{display:inline-flex;align-items:center;gap:8px;flex:none}
+.card .cbusy{display:none;width:8px;height:8px;border-radius:50%;background:var(--warn);
+  animation:apulse 1.1s ease-in-out infinite}
+.card.busy .cbusy{display:inline-block}
 .card .cs{font-size:10.5px;font-weight:700;letter-spacing:.05em;flex:none}
 .card.ok .cs{color:var(--ok)} .card.warn .cs{color:var(--warn)} .card.crit .cs{color:var(--crit)} .card.unk .cs{color:var(--unk)}
 .card .src{font-family:"Roboto Mono";font-size:11.5px;color:var(--mut);margin-top:3px;word-break:break-all}
@@ -782,7 +786,13 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 
 # plain string (NOT an f-string) so JS ${...} and \n survive untouched
 PAGE_SCRIPT = """<script>
-var _seq=0;
+var _seq=0, _busy={};
+function cardBusy(target, delta){   // ref-counted; marks the card while it has actions in flight
+  if(!target) return;
+  _busy[target]=Math.max(0,(_busy[target]||0)+delta);
+  var c=document.querySelector('.card[data-t="'+String(target).replace(/"/g,'')+'"]');
+  if(c) c.classList.toggle('busy', _busy[target]>0);
+}
 function setRow(key, o){
   var el=document.getElementById('actlog'); var idle=el.querySelector('.amsg'); if(idle) idle.remove();
   var row=document.getElementById('actrow-'+key);
@@ -808,14 +818,15 @@ function setRow(key, o){
 }
 async function post(body){
   var key='q'+(++_seq); var dry=!!body.dryrun; var tag=dry?'[dry] ':'';
+  cardBusy(body.target, +1);
   setRow(key,{title:tag+body.action+' '+body.target, state:'submitting', cls:'warn', spin:true, dry:dry});
   var r,j;
   try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify(body)}); j=await r.json(); }
-  catch(e){ setRow(key,{state:'network error', cls:'crit', spin:false, out:String(e)}); return; }
-  if(!r.ok){ setRow(key,{state:'rejected', cls:'crit', spin:false, out:(j.detail||('HTTP '+r.status))}); return; }
+  catch(e){ setRow(key,{state:'network error', cls:'crit', spin:false, out:String(e)}); cardBusy(body.target,-1); return; }
+  if(!r.ok){ setRow(key,{state:'rejected', cls:'crit', spin:false, out:(j.detail||('HTTP '+r.status))}); cardBusy(body.target,-1); return; }
   setRow(key,{title:tag+'#'+j.id+' '+body.action+' '+body.target, state:'pending', cls:'warn', spin:true});
-  poll(j.id, key, dry);
+  poll(j.id, key, dry, body.target);
 }
 async function previewCmd(b){
   var q='/api/v1/backup/actions/preview?target='+encodeURIComponent(b.target)+'&action='+encodeURIComponent(b.action);
@@ -842,7 +853,7 @@ async function actPrompt(target, action, field, msg){
   if(!(await confirmRun(b, action+' '+target+' ['+(v||'(all)')+']'))) return;
   post(b);
 }
-async function poll(id, key, dry){
+async function poll(id, key, dry, target){
   var tag=dry?'[dry] ':'';
   for(var i=0;i<180;i++){
     var j; try{ j=await (await fetch('/api/v1/backup/actions/'+id)).json(); }catch(e){ break; }
@@ -850,11 +861,13 @@ async function poll(id, key, dry){
     var done=['done','failed','stalled'].includes(st);
     var cls = st==='done'?'ok' : (st==='failed'||st==='stalled')?'crit' : 'warn';
     var res={}; try{res=JSON.parse(j.result||'{}')}catch(e){}
+    if(!target) target=j.target;
     setRow(key,{title:tag+'#'+id+' '+(j.target||'')+' '+(j.action||''), state:st+(dry?' · dry':''),
                 cls:cls, spin:!done, out: done?(res.output||''):undefined, expand: done&&cls==='crit'});
     if(done) break;
     await new Promise(s=>setTimeout(s,2000));
   }
+  cardBusy(target, -1);   // clear the card indicator whether it finished, gave up, or errored
 }
 function drawGauge(){
   var c=document.getElementById('gauge'); if(!c||!window.GP) return;
@@ -923,7 +936,7 @@ async function loadStream(){
       var key='srv'+x.id, tag=dry?'[dry] ':'';
       setRow(key,{title:tag+'#'+x.id+' '+(x.target||'')+' '+(x.action||''), state:st+(dry?' · dry':''),
                   cls:cls, spin:!done, dry:dry, out: done?(res.output||''):undefined, expand:false});
-      if(!done) poll(x.id, key, dry);   // resume live updates for anything still running
+      if(!done){ cardBusy(x.target, +1); poll(x.id, key, dry, x.target); }   // resume + mark card busy
     }
   }catch(e){}
 }
@@ -949,7 +962,10 @@ def _acts(r, can_act):
                 f"<button onclick=\"act('{n}','snapshot',true)\">Snapshot</button>"
                 f"<button onclick=\"act('{n}','sync',false)\">no-snap</button>")
     elif t == "zfs-local":
-        main = f"<button class=pri onclick=\"act('{n}','scrub',true)\">Scrub</button>"
+        main = ""
+        if r.get("source"):   # snapshot any dataset-backed volume (pool root or child dataset)
+            main += f"<button class=pri onclick=\"act('{n}','snapshot',true)\">Snapshot</button>"
+        main += f"<button onclick=\"act('{n}','scrub',true)\">Scrub</button>"
     else:
         return ""
     return f'<div class="cact">{main}</div>{rec}'
@@ -981,8 +997,9 @@ def _card(r, can_act):
     if r["type"] in ("zfs-repl", "zfs-local"):   # the target types that receive action intents
         hist_html = (f'<div class=chistrow><button class=histbtn onclick="toggleHist(this,\'{nm}\')">'
                      f'History</button><div class=chist hidden></div></div>')
-    return (f'<div class="card {sev}"><div class="ch"><span class="cn">{n}</span>'
-            f'<span class="cs">{r["severity"]}</span></div>{src_html}{mr_html}{why_html}'
+    return (f'<div class="card {sev}" data-t="{n}"><div class="ch"><span class="cn">{n}</span>'
+            f'<span class="chr"><span class="cbusy" title="action running"></span>'
+            f'<span class="cs">{r["severity"]}</span></span></div>{src_html}{mr_html}{why_html}'
             f'{_acts(r, can_act)}{hist_html}</div>')
 
 def _heatmap(order_names):
