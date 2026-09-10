@@ -18,7 +18,11 @@ Environment=BM_INTERVAL=120
 # Safety valve: flip to 1 (and `systemctl --user restart`) to log actions instead of running them.
 Environment=BM_DRYRUN=0
 WorkingDirectory=%h/backup-monitor
-ExecStart=/usr/bin/python3 %h/backup-monitor/agent.py
+# The user must be in the 'backup' group to read the root-owned borg repos. A `systemd --user`
+# manager started BEFORE that membership won't carry the group, and a user unit can't add a group
+# its manager lacks -- so wrap the agent in `sg backup`, which re-reads the group list at exec.
+# (Harmless once the user manager is restarted/rebooted with the membership already in place.)
+ExecStart=/usr/bin/sg backup -c "exec /usr/bin/python3 %h/backup-monitor/agent.py"
 Restart=on-failure
 RestartSec=15
 # Hardening: the agent needs ZFS/borg reads + zfs-delegated writes as this user; keep the rest tight.

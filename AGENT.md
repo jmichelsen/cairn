@@ -189,6 +189,19 @@ count drops to 0 (the card's reason says so). **Fix: re-run `sudo phase1/grant-a
 chmod's the existing files group-readable *and* sets `umask 0027` on the backupninja cron so future
 segments stay readable. (Running the agent as root avoids this but gives up least privilege.)
 
+**Borg still UNKNOWN after grant-access.sh, yet `borg info` works in your shell.** The
+`systemd --user` agent isn't carrying the `backup` group: a user manager started *before* you joined
+the group can't gain it, and a user unit can't add a group its manager lacks. The shipped unit works
+around this by wrapping the agent in `sg backup` (re-reads the group list at exec). The clean
+alternative is to restart the user manager so it re-reads membership - `sudo systemctl restart
+user@$(id -u).service` (or reboot) - after which the `sg` wrapper is redundant.
+
+**Replicate warns `cannot destroy snapshots: permission denied`.** The replication still succeeds;
+syncoid just can't prune its old sync-snapshots on the source because the agent user lacks `destroy`
+on that pool (intentional - see the tank read-only rule). Either use **no-snap** replication (sends
+existing sanoid snapshots, creates none to prune), or delegate `destroy` *scoped to the replicated
+datasets only* (`zfs allow -u <user> destroy pool/dataset`), never pool-wide.
+
 **SMART all UNKNOWN as a non-root agent.** SMART reads through a scoped sudoers wrapper - run
 `grant-access.sh`. The agent calls the root-owned `/opt/backup-monitor/phase1/smart-probe.sh` (not
 the user-writable repo copy, which sudoers won't allow); set `BM_SMART_WRAPPER` if you deployed it
