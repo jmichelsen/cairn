@@ -426,6 +426,34 @@ def adapter_backupninja(t, defaults, now):
                 st["severity"], st["handler_result"] = "WARN", "warning"
             elif "finished" in low or "info" in low:
                 st["severity"], st["handler_result"] = "OK", "ok"
+        detail = {}
+        # Surface the ACTUAL warning/error text from this handler's last run block, not just the
+        # "finished ...: WARNING" bookkeeping line. (backupninja collapses a handler's multi-line
+        # output onto single Warning:/Error: log lines, e.g. borg's "file changed while we backed
+        # it up" for a live DB file.)
+        if st.get("handler_result") in ("warning", "fatal"):
+            lines = logtxt.splitlines()
+            starts = [i for i, l in enumerate(lines) if "starting action" in l and h in l]
+            if starts:
+                s = starts[-1]
+                ends = [i for i, l in enumerate(lines) if i > s and "finished action" in l and h in l]
+                e = ends[0] if ends else len(lines) - 1
+                msgs, seen = [], set()
+                for l in lines[s:e + 1]:
+                    ll = l.lower()
+                    if "starting action" in ll or "finished action" in ll:
+                        continue
+                    m2 = re.search(r"\b(?:Warning|Error|Fatal):\s*(.+)", l)
+                    if not m2:
+                        continue
+                    txt = re.split(r"\s-{3,}", m2.group(1).strip())[0].strip()[:200]  # trim borg's ---- summary
+                    if txt and txt not in seen:
+                        seen.add(txt); msgs.append(txt)
+                specific = [m for m in msgs if "finished with warnings" not in m.lower()]
+                use = (specific or msgs)[:4]   # prefer the specific message over the generic tail
+                if use:
+                    detail["reasons"] = use
+                    st["last_error"] = "; ".join(use)[:400]
         # freshness (daily schedule)
         if st.get("last_run_ts"):
             age = now - st["last_run_ts"]
@@ -436,7 +464,9 @@ def adapter_backupninja(t, defaults, now):
                 st["severity"] = worst(st["severity"], "WARN")
         # DB dumps are higher-consequence
         if htype in ("mysql", "pgsql") and st["severity"] in ("CRIT", "WARN"):
-            st["detail_json"] = json.dumps(dict(note="DB dump - app-consistent backup at risk"))
+            detail["note"] = "DB dump - app-consistent backup at risk"
+        if detail:
+            st["detail_json"] = json.dumps(detail)
         out.append(st)
     if not out:
         out = [dict(severity="UNKNOWN", last_error="no handlers enumerated")]
