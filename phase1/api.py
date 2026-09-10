@@ -773,9 +773,13 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .stile .sub{color:var(--mut);font-size:12.5px;margin-top:4px}
 .smeter{height:8px;border-radius:5px;background:var(--heatbg);margin-top:12px;overflow:hidden}
 .smeter i{display:block;height:100%;border-radius:5px}
-.pill321{display:inline-flex;gap:4px;margin-top:11px;flex-wrap:wrap}
-.pill321 s{width:24px;height:6px;border-radius:3px;background:var(--ok)}
-.pill321 s.off{background:var(--crit)} .pill321 s.warn{background:var(--warn)}
+.legs{display:flex;flex-direction:column;gap:7px;margin-top:12px}
+.leg{display:grid;grid-template-columns:auto 1fr auto;gap:9px;align-items:center;font-size:12.5px}
+.leg .legmark{width:17px;height:17px;border-radius:5px;display:grid;place-items:center;
+  font-size:11px;font-weight:800;color:#fff;flex:none;line-height:1}
+.leg.met .legmark{background:var(--ok)} .leg.unmet .legmark{background:var(--crit)}
+.leg .legname{color:var(--ink);font-weight:600}
+.leg .legval{color:var(--mut);font-family:"Roboto Mono";font-size:11px}
 @media (max-width:760px){
   .split{grid-template-columns:1fr} .rail{border-right:0;border-bottom:1px solid var(--line)}
   .lg{grid-template-columns:1fr} .tag{margin-left:0;text-align:left}
@@ -1056,9 +1060,19 @@ def _hero_steel(rows, h, gpct, glabel):
     sc = scorecard(); cards = sc["cards"]
     npass = sum(1 for c in cards if c["pass_321"]); ntot = len(cards)
     if ntot:
-        pills = "".join(("<s></s>" if c["pass_321"] else "<s class=off></s>") for c in cards)
+        # Show the THREE legs of 3-2-1, not one pill per dataset. A leg is met only if EVERY
+        # Tier-A dataset satisfies it (the fleet is as compliant as its weakest dataset).
+        mc = min(c["copies"] for c in cards); mm = min(c["media"] for c in cards)
+        mo = min(c["offsite"] for c in cards)
+        legs_data = [("≥3 copies",   mc >= 3, f"{mc} of 3"),
+                     ("≥2 media",    mm >= 2, f"{mm} of 2"),
+                     ("≥1 off-site", mo >= 1, "yes" if mo >= 1 else "on-site only")]
+        pills = "".join(
+            f'<div class="leg {"met" if ok else "unmet"}"><span class=legmark>{"✓" if ok else "✗"}</span>'
+            f'<span class=legname>{nm}</span><span class=legval>{vl}</span></div>'
+            for nm, ok, vl in legs_data)
         s_big, s_cls = f"{npass} / {ntot}", ("ok" if npass == ntot else "crit" if npass == 0 else "warn")
-        s_sub = "Tier-A datasets with ≥3 copies · 2 media · 1 off-site"
+        s_sub = "Tier-A datasets meeting all three legs"
     else:
         pills, s_big, s_cls, s_sub = "", "-", "unk", "no Tier-A datasets defined"
     arch = [r for r in rows if r["type"] == "borg-repo" and r.get("archive_count") is not None]
@@ -1091,7 +1105,7 @@ def _hero_steel(rows, h, gpct, glabel):
     <div class=sumtiles>
       <div class=stile><div class=lbl>3-2-1 coverage</div>
         <div class=big style="color:var(--{s_cls})">{s_big}</div><div class=sub>{s_sub}</div>
-        <div class=pill321>{pills}</div></div>
+        <div class=legs>{pills}</div></div>
       <div class=stile><div class=lbl>Capacity · busiest pool</div>
         <div class=big style="color:var(--{cap_cls})">{gpct}%</div><div class=sub>{_esc(glabel)}</div>{meter}</div>
       <div class=stile><div class=lbl>Restore points</div>
