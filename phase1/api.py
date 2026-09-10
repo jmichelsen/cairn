@@ -679,6 +679,7 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .histbtn::before{content:"▸";font-size:10px;display:inline-block;transition:transform .15s}
 .histbtn.open::before{transform:rotate(90deg)}
 .chist{margin-top:9px;display:flex;flex-direction:column;gap:8px}
+.chist[hidden]{display:none}   /* a class selector's display: beats the UA [hidden] rule; force it */
 .chist .hrow{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center}
 .chist .hd{width:7px;height:7px;border-radius:50%;flex:none}
 .chist .hd.ok{background:var(--ok)} .chist .hd.warn{background:var(--warn)}
