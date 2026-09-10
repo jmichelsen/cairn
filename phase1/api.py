@@ -868,6 +868,7 @@ async function poll(id, key, dry, target){
     await new Promise(s=>setTimeout(s,2000));
   }
   cardBusy(target, -1);   // clear the card indicator whether it finished, gave up, or errored
+  refreshCards();         // pull the target's new status/history as soon as it settles
 }
 function drawGauge(){
   var c=document.getElementById('gauge'); if(!c||!window.GP) return;
@@ -904,16 +905,48 @@ function renderHist(x){
     '<span class=ht>'+when+'</span>'+
     (out?'<div class=hcmd>'+esc(out)+'</div>':'')+'</div>';
 }
-async function toggleHist(btn, target){
-  var box=btn.nextElementSibling; var open=btn.classList.toggle('open');
-  if(!open){ box.hidden=true; return; }
-  box.hidden=false; box.innerHTML='<div class=hempty>loading…</div>';
+async function loadHist(target, box){
   try{
     var j=await (await fetch('/api/v1/backup/actions?limit=8&target='+encodeURIComponent(target))).json();
     var a=(j.actions||[]);
     box.innerHTML = a.length ? a.map(renderHist).join('') : '<div class=hempty>no actions yet</div>';
   }catch(e){ box.innerHTML='<div class=hempty>error loading history</div>'; }
 }
+async function toggleHist(btn, target){
+  var box=btn.nextElementSibling; var open=btn.classList.toggle('open');
+  if(!open){ box.hidden=true; return; }
+  box.hidden=false; box.innerHTML='<div class=hempty>loading…</div>';
+  loadHist(target, box);
+}
+// ---- live refresh: cards + open History poll status in the background ----
+function metricRowHtml(r){
+  var p='';
+  if(r.pool_cap_pct!=null) p+='<div><div class="mv">'+r.pool_cap_pct+'%</div><div class="ml">capacity</div></div>';
+  if(r.repl_lag_s!=null) p+='<div><div class="mv">'+Math.floor(r.repl_lag_s/3600)+'h</div><div class="ml">repl lag</div></div>';
+  if(r.archive_count!=null) p+='<div><div class="mv">'+r.archive_count+'</div><div class="ml">archives</div></div>';
+  if(r.dedup_ratio!=null) p+='<div><div class="mv">'+r.dedup_ratio+'\\u00d7</div><div class="ml">dedup</div></div>';
+  return p;
+}
+var _SEVC={CRIT:'crit',WARN:'warn',UNKNOWN:'unk',OK:'ok'};
+async function refreshCards(){
+  var j; try{ j=await (await fetch('/api/v1/backup/status')).json(); }catch(e){ return; }
+  (j.targets||[]).forEach(function(r){
+    var c=document.querySelector('.card[data-t="'+String(r.name).replace(/"/g,'')+'"]'); if(!c) return;
+    var cls=_SEVC[(r.severity||'').toUpperCase()]||'unk';
+    c.className='card '+cls+(c.classList.contains('busy')?' busy':'');   // updates the severity stripe
+    var cs=c.querySelector('.cs'); if(cs) cs.textContent=(r.severity||'').toUpperCase();
+    var mr=metricRowHtml(r), rowEl=c.querySelector('.row');
+    if(mr && rowEl) rowEl.innerHTML=mr; else if(!mr && rowEl) rowEl.remove();
+    var d=r.detail||{}, why=(d.reasons&&d.reasons.length)?d.reasons.join(', '):(r.last_error||'');
+    var whyEl=c.querySelector('.why'); if(whyEl) whyEl.textContent=why;
+  });
+  document.querySelectorAll('.histbtn.open').forEach(function(btn){          // keep open History current
+    var box=btn.nextElementSibling, target=btn.getAttribute('data-t');
+    if(box && !box.hidden && target) loadHist(target, box);
+  });
+}
+window.addEventListener('load', refreshCards);
+setInterval(refreshCards, 20000);
 function setHero(h){var p=document.querySelector('.panel'); if(!p) return;
   p.dataset.hero=h; try{localStorage.setItem('bm_hero',h)}catch(e){}}
 (function(){try{var s=localStorage.getItem('bm_hero');
@@ -995,7 +1028,7 @@ def _card(r, can_act):
     why_html = f'<div class="why">{why}</div>' if why else ""
     hist_html = ""
     if r["type"] in ("zfs-repl", "zfs-local"):   # the target types that receive action intents
-        hist_html = (f'<div class=chistrow><button class=histbtn onclick="toggleHist(this,\'{nm}\')">'
+        hist_html = (f'<div class=chistrow><button class=histbtn data-t="{n}" onclick="toggleHist(this,\'{nm}\')">'
                      f'History</button><div class=chist hidden></div></div>')
     return (f'<div class="card {sev}" data-t="{n}"><div class="ch"><span class="cn">{n}</span>'
             f'<span class="chr"><span class="cbusy" title="action running"></span>'
