@@ -8,7 +8,7 @@ dashboard, and the token-authed vault endpoints (report + intent poll/result).
 Run:  uvicorn api:app --host 127.0.0.1 --port 8929
 Env:  BM_DB, BM_API_TOKEN (vault/agent bearer token; hash-at-rest is a deploy hardening)
 """
-import hashlib, hmac, json, os, sqlite3, time
+import hashlib, hmac, json, os, re, sqlite3, time
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -158,8 +158,20 @@ def _init_db():
 _init_db()
 HAS_ADMIN = _seed_tokens() > 0   # false => middleware returns 503 until BM_ADMIN_TOKEN is set
 
+ACK_TTL = int(os.environ.get("BM_ACK_TTL", str(14 * DAY)))  # an acknowledgement lapses after this
+
+def _reason(r):
+    """Human reason for a status row: detail reasons, else last_error."""
+    d = json.loads(r.get("detail_json") or "{}")
+    return ", ".join(d.get("reasons", [])) or (r.get("last_error") or "")
+
+def _sig(sev, reason):
+    """Ack fingerprint: severity + reason with digits masked, so tick-by-tick number changes
+    (25h -> 26h) still match but a different condition or a worse severity does not."""
+    return f"{sev}|" + re.sub(r"\d+", "#", reason or "")
+
 def latest_status(conn):
-    """Latest status row per target, joined to target meta."""
+    """Latest status row per target, joined to target meta, annotated with an `acked` flag."""
     q = """
     SELECT t.name,t.type,t.tier,t.source,t.dest,t.location,t.encrypted,t.agent,s.*
     FROM targets t
@@ -169,7 +181,13 @@ def latest_status(conn):
     WHERE t.enabled=1
     ORDER BY t.name
     """
-    return [dict(r) for r in conn.execute(q).fetchall()]
+    rows = [dict(r) for r in conn.execute(q).fetchall()]
+    now = int(time.time())
+    acks = {a["target"]: a for a in conn.execute("SELECT target,sig,ts FROM acks").fetchall()}
+    for r in rows:
+        a = acks.get(r["name"])
+        r["acked"] = bool(a and (now - a["ts"]) < ACK_TTL and _sig(r["severity"], _reason(r)) == a["sig"])
+    return rows
 
 
 # ---------------- read-only views ----------------
@@ -178,13 +196,41 @@ def health():
     with db() as conn:
         rows = latest_status(conn)
     counts = {"CRIT": 0, "WARN": 0, "UNKNOWN": 0, "OK": 0}
-    worst = "OK"
+    worst = "OK"; acked = 0
     for r in rows:
+        if r.get("acked"):                 # acknowledged -> excluded from the alarm rollup
+            acked += 1; counts["OK"] += 1; continue
         sev = r["severity"]
         counts[sev] = counts.get(sev, 0) + 1
         if SEV_ORDER.get(sev, 9) < SEV_ORDER.get(worst, 9):
             worst = sev
-    return {"severity": worst, "counts": counts, "targets": len(rows), "ts": int(time.time())}
+    return {"severity": worst, "counts": counts, "acked": acked,
+            "targets": len(rows), "ts": int(time.time())}
+
+@app.post("/api/v1/backup/acks")
+async def ack_target(request: Request):
+    """Acknowledge a target's current WARN/CRIT - silence it until the condition changes or ACK_TTL
+    lapses. Records a fingerprint of the current severity+reason so a *different* problem re-alerts."""
+    body = await _json(request)
+    target = body.get("target")
+    with db() as conn:
+        r = {x["name"]: x for x in latest_status(conn)}.get(target)
+        if not r:
+            raise HTTPException(404, f"unknown target '{target}'")
+        if r["severity"] not in ("WARN", "CRIT"):
+            raise HTTPException(400, f"nothing to acknowledge - {target} is {r['severity']}")
+        conn.execute("INSERT INTO acks(target,sig,ts,note) VALUES(?,?,?,?) "
+                     "ON CONFLICT(target) DO UPDATE SET sig=excluded.sig,ts=excluded.ts,note=excluded.note",
+                     (target, _sig(r["severity"], _reason(r)), int(time.time()), body.get("note")))
+        conn.commit()
+    return {"ok": True, "target": target, "acked": True}
+
+@app.delete("/api/v1/backup/acks/{target}")
+def unack_target(target: str):
+    with db() as conn:
+        n = conn.execute("DELETE FROM acks WHERE target=?", (target,)).rowcount
+        conn.commit()
+    return {"ok": True, "target": target, "removed": n}
 
 @app.get("/api/v1/backup/status")
 def status():
@@ -653,6 +699,12 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .card{background:var(--surf);border:1px solid var(--line);border-radius:13px;padding:15px 16px;
   border-top:3px solid var(--unk);box-shadow:0 1px 2px rgba(20,40,60,.05)}
 .card.ok{border-top-color:var(--ok)} .card.warn{border-top-color:var(--warn)} .card.crit{border-top-color:var(--crit)}
+.card.ack{border-top-color:var(--unk);opacity:.72}
+.card.ack .cs{color:var(--unk)}
+.ackbtn{appearance:none;margin-top:11px;font:600 11.5px/1 "Red Hat Text",sans-serif;
+  border:1px solid var(--line);background:var(--surf);color:var(--mut);border-radius:7px;padding:7px 10px;cursor:pointer}
+.ackbtn:hover{color:var(--ink)}
+.ackbtn.on{color:var(--ok);border-color:var(--ok)}
 .card .ch{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .card .cn{font-family:"Red Hat Display";font-weight:700;font-size:15px;word-break:break-word}
 .card .chr{display:inline-flex;align-items:center;gap:8px;flex:none}
@@ -862,6 +914,17 @@ async function actPrompt(target, action, field, msg){
   if(!(await confirmRun(b, action+' '+target+' ['+(v||'(all)')+']'))) return;
   post(b);
 }
+async function ackTarget(t){
+  if(!confirm('Acknowledge '+t+'?\\nSilences this warning until the condition changes or 14 days pass.')) return;
+  try{ await fetch('/api/v1/backup/acks',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({target:t})}); }catch(e){ alert('ack failed: '+e); return; }
+  location.reload();
+}
+async function unackTarget(t){
+  try{ await fetch('/api/v1/backup/acks/'+encodeURIComponent(t),{method:'DELETE'}); }
+  catch(e){ alert('clear failed: '+e); return; }
+  location.reload();
+}
 async function poll(id, key, dry, target){
   var tag=dry?'[dry] ':'';
   for(var i=0;i<180;i++){
@@ -941,9 +1004,9 @@ async function refreshCards(){
   var j; try{ j=await (await fetch('/api/v1/backup/status')).json(); }catch(e){ return; }
   (j.targets||[]).forEach(function(r){
     var c=document.querySelector('.card[data-t="'+String(r.name).replace(/"/g,'')+'"]'); if(!c) return;
-    var cls=_SEVC[(r.severity||'').toUpperCase()]||'unk';
+    var cls=r.acked?'ack':(_SEVC[(r.severity||'').toUpperCase()]||'unk');
     c.className='card '+cls+(c.classList.contains('busy')?' busy':'');   // updates the severity stripe
-    var cs=c.querySelector('.cs'); if(cs) cs.textContent=(r.severity||'').toUpperCase();
+    var cs=c.querySelector('.cs'); if(cs) cs.textContent=r.acked?'ACK':(r.severity||'').toUpperCase();
     var mr=metricRowHtml(r), rowEl=c.querySelector('.row');
     if(mr && rowEl) rowEl.innerHTML=mr; else if(!mr && rowEl) rowEl.remove();
     var d=r.detail||{}, why=(d.reasons&&d.reasons.length)?d.reasons.join(', '):(r.last_error||'');
@@ -1052,10 +1115,19 @@ def _card(r, can_act):
     if r["type"] in ("zfs-repl", "zfs-local"):   # the target types that receive action intents
         hist_html = (f'<div class=chistrow><button class=histbtn data-t="{n}" onclick="toggleHist(this,\'{nm}\')">'
                      f'History</button><div class=chist hidden></div></div>')
-    return (f'<div class="card {sev}" data-t="{n}"><div class="ch"><span class="cn">{n}</span>'
+    acked = r.get("acked")
+    card_cls, cs_text = ("ack", "ACK") if acked else (sev, r["severity"])
+    if acked:
+        ack_html = (f'<button class="ackbtn on" onclick="unackTarget(\'{nm}\')" '
+                    f'title="acknowledged - click to clear">✓ acknowledged</button>')
+    elif r["severity"] in ("WARN", "CRIT"):
+        ack_html = f'<button class=ackbtn onclick="ackTarget(\'{nm}\')">Acknowledge</button>'
+    else:
+        ack_html = ""
+    return (f'<div class="card {card_cls}" data-t="{n}"><div class="ch"><span class="cn">{n}</span>'
             f'<span class="chr"><span class="cbusy" title="action running"></span>'
-            f'<span class="cs">{r["severity"]}</span></span></div>{src_html}{c321_html}{mr_html}{why_html}'
-            f'{_acts(r, can_act)}{hist_html}</div>')
+            f'<span class="cs">{cs_text}</span></span></div>{src_html}{c321_html}{mr_html}{why_html}'
+            f'{ack_html}{_acts(r, can_act)}{hist_html}</div>')
 
 def _heatmap(order_names):
     """14-day worst-severity-per-day grid, aligned to the card order."""

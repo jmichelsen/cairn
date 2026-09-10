@@ -98,3 +98,13 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
   last_used_ts INTEGER,
   active      INTEGER DEFAULT 1
 );
+
+-- acknowledgements: silence a known/transient WARN|CRIT until the condition changes or it expires.
+-- sig = "<severity>|<reasons with digits masked>" so "resilvered 25h ago" and "...26h ago" match,
+-- but a genuinely different condition (or a worse severity) does NOT - the ack auto-lapses.
+CREATE TABLE IF NOT EXISTS acks (
+  target  TEXT PRIMARY KEY,
+  sig     TEXT NOT NULL,
+  ts      INTEGER NOT NULL,
+  note    TEXT
+);
