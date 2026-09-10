@@ -666,6 +666,11 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .card .mv{font-family:"Roboto Mono";font-weight:500;font-size:16px}
 .card .ml{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}
 .card .why{color:var(--mut);font-size:12px;margin-top:11px;line-height:1.4}
+.card .c321{display:inline-flex;align-items:center;gap:4px;margin-top:10px}
+.card .c321l{font-size:9px;letter-spacing:.09em;text-transform:uppercase;color:var(--mut);font-weight:700;margin-right:4px}
+.card .c321p{width:17px;height:17px;border-radius:5px;display:grid;place-items:center;
+  font:800 11px/1 "Roboto Mono",monospace;color:#fff;cursor:default}
+.card .c321p.met{background:var(--ok)} .card .c321p.unmet{background:var(--crit)}
 .cact{display:flex;gap:6px;margin-top:13px;flex-wrap:wrap}
 .cact button{appearance:none;font:600 11.5px/1 "Red Hat Text";border:1px solid var(--line);
   background:var(--surf);color:var(--acc2);border-radius:7px;padding:7px 10px;cursor:pointer}
@@ -1030,13 +1035,26 @@ def _card(r, can_act):
     src_html = f'<div class="src">{_esc(src_line)}</div>' if src_line else ""
     mr_html = f'<div class="row">{mr}</div>' if mr else ""
     why_html = f'<div class="why">{why}</div>' if why else ""
+    # per-dataset 3-2-1 badge (replication sets only): each digit green if that leg is met.
+    c321_html = ""
+    if r["type"] == "zfs-repl" and r.get("source") and r.get("dest"):
+        pools = {(r["source"] or "").split("/")[0], (r["dest"] or "").split("/")[0]}
+        pools.discard("")
+        copies = media = len(pools)
+        offsite = 1 if r.get("location") == "offsite" else 0
+        legs = [("3", copies >= 3, f"≥3 copies - {copies} of 3"),
+                ("2", media >= 2, f"≥2 media - {media}"),
+                ("1", offsite >= 1, "off-site copy" if offsite else "off-site - none (on-site only)")]
+        chips = "".join(f'<span class="c321p {"met" if ok else "unmet"}" title="{ti}">{d}</span>'
+                        for d, ok, ti in legs)
+        c321_html = f'<div class=c321><span class=c321l>3-2-1</span>{chips}</div>'
     hist_html = ""
     if r["type"] in ("zfs-repl", "zfs-local"):   # the target types that receive action intents
         hist_html = (f'<div class=chistrow><button class=histbtn data-t="{n}" onclick="toggleHist(this,\'{nm}\')">'
                      f'History</button><div class=chist hidden></div></div>')
     return (f'<div class="card {sev}" data-t="{n}"><div class="ch"><span class="cn">{n}</span>'
             f'<span class="chr"><span class="cbusy" title="action running"></span>'
-            f'<span class="cs">{r["severity"]}</span></span></div>{src_html}{mr_html}{why_html}'
+            f'<span class="cs">{r["severity"]}</span></span></div>{src_html}{c321_html}{mr_html}{why_html}'
             f'{_acts(r, can_act)}{hist_html}</div>')
 
 def _heatmap(order_names):
