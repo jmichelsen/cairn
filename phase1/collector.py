@@ -584,6 +584,11 @@ def build_command(action, t, opts=None):
         if not src or not dst:
             return None, "target missing source/dest"
         cmd = ["syncoid", "--no-privilege-elevation", "--no-stream"]
+        if t.get("encrypted"):
+            # raw send (-w) for zero-knowledge replicas: the destination stays encrypted with its
+            # key unavailable. A non-raw send would need the dest key loaded ("inherited key must be
+            # loaded") and would defeat the zero-knowledge property.
+            cmd.append("--sendoptions=w")
         if not opts.get("create_snapshot", True):
             cmd.append("--no-sync-snap")
         return cmd + [src, dst], None
@@ -641,9 +646,10 @@ def build_dryrun(action, t, opts=None):
         if not ssnaps:
             return None, "source has no snapshots to send"
         newest_src = ssnaps[-1][0]
+        raw = ["-w"] if t.get("encrypted") else []                    # match the real (raw) send
         dsnaps = zfs_snapshots(dst)
         if not dsnaps:
-            return ["zfs", "send", "-nvP", newest_src], None          # first sync = full send estimate
+            return ["zfs", "send", "-nvP"] + raw + [newest_src], None  # first sync = full send estimate
         dguids = {g for _, g, _ in dsnaps}
         common = [s for s in ssnaps if s[1] in dguids]
         if not common:
@@ -651,7 +657,7 @@ def build_dryrun(action, t, opts=None):
         base = max(common, key=lambda x: x[2])[0]
         if base == newest_src:
             return None, "already up to date - 0 bytes pending to the destination"
-        return ["zfs", "send", "-nvP", "-I", base, newest_src], None   # real incremental size estimate
+        return ["zfs", "send", "-nvP"] + raw + ["-I", base, newest_src], None  # real incremental estimate
     if action == "scrub":
         pool = (src or "").split("/")[0]
         return (["zpool", "status", pool], None) if pool else (None, "no pool for scrub")

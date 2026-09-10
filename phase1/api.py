@@ -440,12 +440,13 @@ def preview_action(target: str, action: str, create_snapshot: bool = True, path:
     dialog can show it. Read-only: only actions whose build_command has no side effects are previewed;
     others resolve on the agent at run time (path→mountpoint needs a live ZFS read)."""
     with db() as conn:
-        r = conn.execute("SELECT name,type,source,dest FROM targets WHERE name=?", (target,)).fetchone()
+        r = conn.execute("SELECT name,type,source,dest,encrypted FROM targets WHERE name=?", (target,)).fetchone()
     if not r:
         raise HTTPException(404, f"unknown target '{target}'")
     if action not in PREVIEWABLE:
         return {"cmd": None, "note": "built on the agent at run time"}
-    t = {"name": r["name"], "type": r["type"], "source": r["source"], "dest": r["dest"]}
+    t = {"name": r["name"], "type": r["type"], "source": r["source"], "dest": r["dest"],
+         "encrypted": bool(r["encrypted"])}   # so encrypted targets preview as raw (-w) sends
     opts = {"create_snapshot": create_snapshot}
     if path is not None:
         opts["path"] = path
