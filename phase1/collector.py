@@ -276,8 +276,9 @@ def adapter_borg(t, defaults, now):
         keys = ("Permission denied", "does not exist", "passphrase", "not a valid repository",
                 "acquire the lock", "No such file")
         msg = next((l for l in lines if any(k in l for k in keys)), lines[-1] if lines else f"rc={rc}")
-        st["last_error"] = ("needs group read (root:root repo)" if "Permission denied" in msg
-                            else msg)[:120]
+        st["last_error"] = (("borg segments unreadable by the agent user - nightly root borg wrote them "
+                             "root-only; run grant-access.sh (adds --umask 0027), see AGENT.md")
+                            if "Permission denied" in msg else msg)[:170]
         # unreadable/needs-passphrase -> stays UNKNOWN (resolves once the 'backup' group can read)
         return [st]
     try:

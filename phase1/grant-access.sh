@@ -22,6 +22,24 @@ for r in "${BORG_REPOS[@]}"; do
   echo "  opened: $r"
 done
 
+echo "== backupninja cron: umask 0027 so NEW nightly segments are group-readable, not root-only =="
+# The setgid dirs above fix the GROUP of new files, but root's default umask (0077) still writes
+# them mode 0600 -> the non-root agent can't read them and every borg repo goes UNKNOWN after the
+# next run. Set umask 0027 on the invocation so root creates 0640 (group-readable) files.
+CRON=/etc/cron.d/backupninja
+if [ -f "$CRON" ]; then
+  if grep -q 'umask' "$CRON"; then
+    echo "  already sets umask: $CRON"
+  else
+    cp -a "$CRON" "$CRON.bm-bak"
+    sed -i -E '/backupninja/ s#(^[0-9*/, ]+root )#\1umask 0027; #' "$CRON"
+    grep -q 'umask 0027' "$CRON" && echo "  applied umask 0027 (backup: $CRON.bm-bak)" \
+      || { echo "  WARN: could not patch $CRON automatically - add 'umask 0027;' after 'root' by hand"; cp -a "$CRON.bm-bak" "$CRON"; }
+  fi
+else
+  echo "  no $CRON - if backupninja runs via systemd, add 'UMask=0027' to its unit instead"
+fi
+
 echo "== backupninja reports/log: adm-readable =="
 [ -d "$BN_REPORTS" ] && { chgrp -R adm "$BN_REPORTS"; chmod -R g+rX "$BN_REPORTS"; echo "  opened: $BN_REPORTS"; }
 if [ -f /var/log/backupninja.log ]; then
@@ -54,8 +72,9 @@ cat <<EOF
 DONE. Notes:
   * Log out/in (or 'exec su - $U') for group membership to take effect in your shell.
   * Mail: uses a local SMTP relay on 127.0.0.1:2500 (MAIL_MODE=relay) - no msmtprc widening.
-  * After the next 01:00 backupninja run, verify borg's NEW files are still group-readable:
+  * borg repos: this run chmod'd EXISTING files group-readable and set 'umask 0027' in
+    /etc/cron.d/backupninja so FUTURE nightly segments stay group-readable. Verify after the
+    next run (restore-points should be non-zero on the dashboard):
       sudo -u $U borg info --bypass-lock /mnt/backups/home | head
-    If it fails on permissions, backupninja is writing 0600 - add 'umask 027' to its
-    invocation in /etc/cron.d/backupninja (the setgid dirs already fix group ownership).
+  * Re-run this script any time the borg repos show UNKNOWN - it re-opens new root-only files.
 EOF

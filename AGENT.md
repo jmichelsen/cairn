@@ -179,3 +179,31 @@ photos is in sync with backup but stopped being snapshotted 2025-12-05 (not in s
    tank/yourhost/photos backup/photos` (verified).
 2. Drop `BM_DRYRUN`, click again - syncoid takes a fresh snapshot, sends it to backup, lag resets.
 3. Real fix for the gap: add photos (+ laptop) to `sanoid.conf` + `syncoid.service`.
+
+## Troubleshooting
+
+**Borg repos show UNKNOWN / "Restore points: 0".** The nightly borg runs as **root** (via
+`/etc/cron.d/backupninja`); with root's default umask it writes new repo segment files mode `0600`,
+unreadable by the non-root agent - so every borg repo degrades to UNKNOWN and the restore-point
+count drops to 0 (the card's reason says so). **Fix: re-run `sudo phase1/grant-access.sh`** - it
+chmod's the existing files group-readable *and* sets `umask 0027` on the backupninja cron so future
+segments stay readable. (Running the agent as root avoids this but gives up least privilege.)
+
+**SMART all UNKNOWN as a non-root agent.** SMART reads through a scoped sudoers wrapper - run
+`grant-access.sh`. The agent calls the root-owned `/opt/backup-monitor/phase1/smart-probe.sh` (not
+the user-writable repo copy, which sudoers won't allow); set `BM_SMART_WRAPPER` if you deployed it
+elsewhere.
+
+**A target is stuck at an old status, or a renamed target lingers as UNKNOWN.** A target an agent
+stops reporting (a rename like `smart` → `smart:sda`, a removed dataset) freezes at its last status
+forever. Retire it: `UPDATE targets SET enabled=0 WHERE name='<name>'` in the DB (report ingest
+never re-enables it).
+
+**Encrypted replica fails: "cannot receive incremental stream: inherited key must be loaded".** The
+destination is a zero-knowledge copy (its key is deliberately unavailable). Flag the target
+`encrypted: true` so the agent sends **raw** (`--sendoptions=w`); a non-raw send needs the dest key
+loaded and would defeat the zero-knowledge property.
+
+**Action buttons hang / say "report-only".** The target is owned by a report-only agent
+(`BM_CAN_EXECUTE=0`). Run an execute-capable agent on the owning host - see *Upgrading past
+read-only* above. `zpool scrub` additionally needs real root (pool ops aren't `zfs allow`-able).
