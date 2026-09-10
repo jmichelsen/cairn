@@ -693,9 +693,10 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 #actlog{margin-top:20px;padding:.6rem;background:var(--rail);border:1px solid var(--line);
   border-radius:9px;display:flex;flex-direction:column;gap:7px;min-height:1.4em}
 #actlog .amsg{color:var(--mut);font:12px/1.5 "Roboto Mono",monospace;padding:2px 4px}
-.actrow{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;
-  font:12px/1.4 "Roboto Mono",monospace;padding:7px 9px;background:var(--surf);
-  border:1px solid var(--line);border-radius:8px}
+.actrow{display:flex;flex-direction:column;font:12px/1.4 "Roboto Mono",monospace;padding:7px 9px;
+  background:var(--surf);border:1px solid var(--line);border-radius:8px}
+.actrow .ahead{display:grid;grid-template-columns:auto 1fr auto auto;gap:10px;align-items:center}
+.actrow.hasout .ahead{cursor:pointer}
 .actrow .ad{width:8px;height:8px;border-radius:50%;flex:none}
 .actrow .ad.ok{background:var(--ok)} .actrow .ad.crit{background:var(--crit)}
 .actrow .ad.warn{background:var(--warn)} .actrow .ad.unk{background:var(--unk)}
@@ -703,8 +704,13 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 @keyframes apulse{0%,100%{opacity:.3}50%{opacity:1}}
 .actrow .at{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .actrow .as{color:var(--mut);white-space:nowrap;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em}
-.actrow .aout{grid-column:1/-1;color:var(--mut);font-size:10.5px;white-space:pre-wrap;word-break:break-all;
-  background:var(--rail);border:1px solid var(--line);border-radius:6px;padding:5px 7px}
+.actrow .acar{width:10px;color:var(--mut);font-size:10px;text-align:center}
+.actrow.hasout .acar::before{content:"\\25B8";display:inline-block;transition:transform .15s}
+.actrow.open .acar::before{transform:rotate(90deg)}
+.actrow .aout{display:none;margin-top:7px;color:var(--mut);font-size:10.5px;white-space:pre-wrap;
+  word-break:break-all;background:var(--rail);border:1px solid var(--line);border-radius:6px;padding:5px 7px;
+  max-height:340px;overflow:auto}
+.actrow.open .aout{display:block}
 /* legend */
 .legend{grid-column:1/-1;background:var(--rail);border-top:1px solid var(--line);padding:20px 24px 26px}
 .legend h3{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);font-weight:700;margin:0 0 14px}
@@ -780,16 +786,23 @@ function setRow(key, o){
   var row=document.getElementById('actrow-'+key);
   if(!row){
     row=document.createElement('div'); row.className='actrow'; row.id='actrow-'+key;
-    row.innerHTML='<span class="ad"></span><span class="at"></span><span class="as"></span><div class="aout" hidden></div>';
+    row.innerHTML='<div class="ahead"><span class="ad"></span><span class="at"></span>'+
+      '<span class="as"></span><span class="acar"></span></div><div class="aout"></div>';
+    row.querySelector('.ahead').addEventListener('click', function(){
+      if(row.classList.contains('hasout')) row.classList.toggle('open'); });
     el.insertBefore(row, el.firstChild);            // newest on top
-    while(el.children.length>12) el.removeChild(el.lastChild);   // cap the queue
+    while(el.children.length>15) el.removeChild(el.lastChild);   // cap the queue
   }
   if(o.dry===true) row.classList.add('dryrow');
   if(o.title!=null) row.querySelector('.at').textContent=o.title;
   if(o.state!=null) row.querySelector('.as').textContent=o.state;
   if(o.cls!=null) row.querySelector('.ad').className='ad '+o.cls;
   if(o.spin===true) row.classList.add('spin'); else if(o.spin===false) row.classList.remove('spin');
-  if(o.out!=null){ var out=row.querySelector('.aout'); out.hidden=false; out.textContent=o.out; }
+  if(o.out!==undefined){                            // only touch output when told to
+    var out=row.querySelector('.aout'); var txt=(o.out||'').trim();
+    if(txt){ out.textContent=txt; row.classList.add('hasout'); if(o.expand) row.classList.add('open'); }
+    else { out.textContent=''; row.classList.remove('hasout','open'); }   // never show an empty box
+  }
 }
 async function post(body){
   var key='q'+(++_seq); var dry=!!body.dryrun; var tag=dry?'[dry] ':'';
@@ -836,7 +849,7 @@ async function poll(id, key, dry){
     var cls = st==='done'?'ok' : (st==='failed'||st==='stalled')?'crit' : 'warn';
     var res={}; try{res=JSON.parse(j.result||'{}')}catch(e){}
     setRow(key,{title:tag+'#'+id+' '+(j.target||'')+' '+(j.action||''), state:st+(dry?' · dry':''),
-                cls:cls, spin:!done, out: done?(res.output||''):undefined});
+                cls:cls, spin:!done, out: done?(res.output||''):undefined, expand: done&&cls==='crit'});
     if(done) break;
     await new Promise(s=>setTimeout(s,2000));
   }
@@ -895,6 +908,24 @@ function setDry(v){window.BM_DRY=!!v; var p=document.querySelector('.panel');
 (function(){try{ if(localStorage.getItem('bm_dry')){ window.BM_DRY=true;
   var c=document.getElementById('drychk'); if(c) c.checked=true;
   var p=document.querySelector('.panel'); if(p) p.classList.add('drymode'); } }catch(e){}})();
+async function loadStream(){
+  var el=document.getElementById('actlog'); if(!el) return;
+  try{
+    var j=await (await fetch('/api/v1/backup/actions?limit=10')).json();
+    var a=(j.actions||[]).slice().sort(function(x,y){return (x.created_ts||0)-(y.created_ts||0);});
+    for(var i=0;i<a.length;i++){
+      var x=a[i], st=x.state||'?', done=['done','failed','stalled'].indexOf(st)>=0;
+      var cls = st==='done'?'ok':(st==='failed'||st==='stalled')?'crit':'warn';
+      var res={}; try{res=JSON.parse(x.result||'{}')}catch(e){}
+      var dry=false; try{dry=!!JSON.parse(x.opts||'{}').dryrun}catch(e){}
+      var key='srv'+x.id, tag=dry?'[dry] ':'';
+      setRow(key,{title:tag+'#'+x.id+' '+(x.target||'')+' '+(x.action||''), state:st+(dry?' · dry':''),
+                  cls:cls, spin:!done, dry:dry, out: done?(res.output||''):undefined, expand:false});
+      if(!done) poll(x.id, key, dry);   // resume live updates for anything still running
+    }
+  }catch(e){}
+}
+window.addEventListener('load', loadStream);
 </script>"""
 
 def _acts(r, can_act):
