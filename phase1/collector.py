@@ -378,6 +378,135 @@ def adapter_kernel_errors(t, defaults, now):
         st["severity"] = "WARN"; st["last_error"] = f"HBA rescan storm: {rescans} target rescans in {win}h"
     return [st]
 
+def _sd_show(unit, props):
+    rc, o, _ = run(["systemctl", "show", unit, "-p", ",".join(props)])
+    d = {}
+    for ln in o.splitlines():
+        if "=" in ln:
+            k, v = ln.split("=", 1)
+            d[k] = v.strip()
+    return d
+
+def _sd_epoch(ts):
+    """systemd prints timestamps like 'Mon 2026-09-07 00:00:04 MDT' - turn one into epoch secs."""
+    if not ts or ts in ("n/a", "0"):
+        return None
+    rc, o, _ = run(["date", "-d", ts, "+%s"])
+    return int(o.strip()) if rc == 0 and o.strip().lstrip("-").isdigit() else None
+
+def _pretty_cal(c):
+    if not c:
+        return None
+    c = c.strip()
+    if c in ("weekly", "daily", "hourly", "monthly", "yearly"):
+        return c
+    m = re.fullmatch(r"\*:0?/(\d+)", c)
+    if m:
+        return f"every {m.group(1)} min"
+    m = re.fullmatch(r"\*-\*-\* (\d\d):(\d\d)(?::\d\d)?", c)
+    if m:
+        return f"daily {m.group(1)}:{m.group(2)}"
+    return c
+
+def _timer_oncalendar(timer):
+    rc, o, _ = run(["systemctl", "cat", timer])
+    for ln in o.splitlines():
+        s = ln.strip()
+        if s.startswith("#"):
+            continue
+        m = re.match(r"OnCalendar=(.+)", s)
+        if m:
+            return m.group(1).strip()
+    return None
+
+def _syncoid_pairs():
+    rc, o, _ = run(["systemctl", "cat", "syncoid.service"])
+    pairs = []
+    for ln in o.splitlines():
+        m = re.search(r"ExecStart=-?\S*syncoid\s+(\S+)\s+(\S+)", ln)
+        if m and not m.group(1).startswith("-"):
+            pairs.append((m.group(1), m.group(2)))
+    return pairs
+
+def _journal_lines(args, n=200):
+    rc, o, _ = run(["journalctl", "-o", "cat", "--no-pager", "-q", "-n", str(n)] + args)
+    return o.splitlines() if rc == 0 else []
+
+def _last_run_journal(service):
+    """Just the most recent invocation of a service (via its systemd InvocationID), so we show
+    THIS run's failure - not lines bleeding in from older runs. Falls back to a tail by unit."""
+    inv = _sd_show(service, ["InvocationID"]).get("InvocationID")
+    if inv:
+        ls = _journal_lines([f"_SYSTEMD_INVOCATION_ID={inv}"], 400)
+        if ls:
+            return ls
+    return _journal_lines(["-u", service], 80)
+
+_ERRPAT = re.compile(r"\b(CRITICAL|ERROR|Error|Fatal|FATAL|FAILED|failed|cannot|warning|WARN|denied|refused)\b")
+def _error_lines(lines):
+    seen, out = set(), []
+    for l in lines:
+        s = l.strip()
+        if s and _ERRPAT.search(s) and s not in seen:
+            seen.add(s); out.append(s)
+    return out
+
+def adapter_schedules(t, defaults, now):
+    """Surface the systemd-timer backup jobs (syncoid replication, sanoid snapshots) as
+    scheduled-job cards: WHAT each backs up + its schedule + next/last run. All readable
+    without root (systemctl show/cat). Add/adjust units via the target's `units:` list."""
+    specs = t.get("units") or [
+        {"kind": "syncoid", "timer": "syncoid.timer", "service": "syncoid.service", "label": "ZFS replication (syncoid)"},
+        {"kind": "sanoid",  "timer": "sanoid.timer",  "service": "sanoid.service",  "label": "ZFS snapshots (sanoid)"},
+    ]
+    out = []
+    for sp in specs:
+        tp = _sd_show(sp["timer"], ["ActiveState", "UnitFileState", "NextElapseUSecRealtime",
+                                    "LastTriggerUSec", "Result"])
+        if not tp.get("UnitFileState") and not tp.get("ActiveState"):
+            continue                                   # timer not installed on this host
+        st = dict(severity="OK", name_suffix=sp["kind"], last_error=None)
+        detail = {"label": sp["label"],
+                  "schedule": _pretty_cal(_timer_oncalendar(sp["timer"])) or "(schedule unknown)",
+                  "next_ts": _sd_epoch(tp.get("NextElapseUSecRealtime")),
+                  "last_ts": _sd_epoch(tp.get("LastTriggerUSec"))}
+        st["last_run_ts"] = detail["last_ts"]
+        if sp["kind"] == "syncoid":
+            pairs = _syncoid_pairs()
+            detail["backs_up"] = ", ".join(f"{s} → {d}" for s, d in pairs) or "(no syncoid jobs configured)"
+            sv = _sd_show(sp["service"], ["Result", "ExecMainStatus"])
+            # ExecStart uses a '-' prefix so the timer stays 'success' even when syncoid itself errors -
+            # surface a non-zero last exit as a warning, since it means a replication run had problems.
+            if sv.get("ExecMainStatus") not in (None, "", "0"):
+                st["severity"] = worst(st["severity"], "WARN")
+                st["last_error"] = f"last run exited status {sv['ExecMainStatus']}"
+        else:
+            detail["backs_up"] = "ZFS snapshots per sanoid.conf"
+        # pull the actual failure text from THIS run's journal (portable: journalctl, no custom log)
+        if sp.get("service"):
+            errs = _error_lines(_last_run_journal(sp["service"]))
+            if errs:
+                spec = [e for e in errs if re.search(r"CRITICAL|ERROR|Fatal|FATAL|FAILED|denied|refused", e)]
+                warns = [e for e in errs if e not in spec]      # lead with real errors, then warnings
+                keep = (spec + warns) if len(spec + warns) <= 20 else \
+                    spec[:12] + warns[:6] + [f"… +{len(spec + warns) - 18} more line(s)"]
+                detail["journal"] = keep
+                if st["severity"] != "OK":                      # replace the vague exit code with the real reason
+                    pick = (spec or errs)[:2]
+                    st["last_error"] = "; ".join(x[:160] for x in pick)[:340]
+        ufs = tp.get("UnitFileState")
+        if ufs and ufs not in ("enabled", "enabled-runtime", "static"):
+            st["severity"] = worst(st["severity"], "WARN")
+            st["last_error"] = f"timer {ufs}"
+        if tp.get("Result") not in (None, "", "success"):
+            st["severity"] = worst(st["severity"], "WARN")
+            st["last_error"] = f"timer result {tp.get('Result')}"
+        st["detail_json"] = json.dumps(detail)
+        out.append(st)
+    if not out:
+        return [dict(severity="UNKNOWN", last_error="no schedule timers found (syncoid/sanoid absent)")]
+    return out
+
 def adapter_backupninja(t, defaults, now):
     """One status per handler, parsed from the log + reports dir (both adm-readable) so this
     works in user mode WITHOUT reading /etc/backup.d (root 0750, may hold DB passwords)."""
@@ -428,6 +557,27 @@ def adapter_backupninja(t, defaults, now):
             elif "finished" in low or "info" in low:
                 st["severity"], st["handler_result"] = "OK", "ok"
         detail = {}
+        # schedule: backupninja logs "(because current time matches <when>)" on each handler's
+        # "starting action" line - the effective schedule, without reading the root-only config.
+        for ln in reversed(mentions):
+            if "starting action" not in ln:
+                continue
+            ms = re.search(r"because current time matches ([^)]+)\)", ln)
+            if ms:
+                detail["schedule"] = ms.group(1).strip(); break
+        jcfg = (t.get("jobs") or {}).get(h) or {}
+        if jcfg.get("schedule"):
+            detail["schedule"] = jcfg["schedule"]
+        elif "schedule" not in detail and t.get("schedule"):
+            detail["schedule"] = t["schedule"]
+        # what it backs up: explicit config label wins; else scrape the repo path from the log if present
+        if jcfg.get("backs_up"):
+            detail["backs_up"] = jcfg["backs_up"]
+        else:
+            for ln in reversed(mentions):
+                mr = re.search(r"[Rr]epository:\s*(\S+)", ln)
+                if mr and "/" in mr.group(1):
+                    detail["backs_up"] = mr.group(1); break
         # Surface the ACTUAL warning/error text from this handler's last run block, not just the
         # "finished ...: WARNING" bookkeeping line. (backupninja collapses a handler's multi-line
         # output onto single Warning:/Error: log lines, e.g. borg's "file changed while we backed
@@ -454,6 +604,7 @@ def adapter_backupninja(t, defaults, now):
                 use = (specific or msgs)[:4]   # prefer the specific message over the generic tail
                 if use:
                     detail["reasons"] = use
+                    detail["journal"] = use          # feed the collapsible "Job log" on the card
                     st["last_error"] = "; ".join(use)[:400]
         # freshness (daily schedule)
         if st.get("last_run_ts"):
@@ -473,9 +624,88 @@ def adapter_backupninja(t, defaults, now):
         out = [dict(severity="UNKNOWN", last_error="no handlers enumerated")]
     return out
 
-def adapter_smart(t, defaults, now):
-    """One status per physical disk backing the pools. Health-first (works for ATA + SCSI).
-    Reads via scoped sudo wrapper when not root; degrades to UNKNOWN if it can't read."""
+def _smart_cache_path():
+    d = os.environ.get("BM_SMART_CACHE", os.path.expanduser("~/.cache/backup-monitor"))
+    return os.path.join(d, "smart-cache.json")
+
+def _smart_parse(dev, typ, o, err, now):
+    """Normalize one smartctl -a JSON blob (ATA / NVMe / SCSI) into a status dict whose
+    detail_json carries identity, key stats, and the full attribute table for the drive view."""
+    st = dict(severity="UNKNOWN", name_suffix=os.path.basename(dev), last_error=None)
+    try:
+        d = json.loads(o)
+    except ValueError:
+        st["last_error"] = ((err or o).strip().splitlines()[-1] if (err or o) else "no json")[:120]
+        return st
+    if isinstance(d.get("error"), str):
+        st["last_error"] = d["error"][:120]; return st
+    proto = (d.get("device") or {}).get("protocol") or ""
+    passed = (d.get("smart_status") or {}).get("passed")
+    temp = (d.get("temperature") or {}).get("current")
+    poh = (d.get("power_on_time") or {}).get("hours")
+    cycles = d.get("power_cycle_count")
+    cap = (d.get("user_capacity") or {}).get("bytes") or d.get("nvme_total_capacity")
+    rot = d.get("rotation_rate")            # 0 => SSD
+    realloc = pending = offline_unc = crc = pct_used = None
+    attrs = []
+    for a in (d.get("ata_smart_attributes") or {}).get("table", []):
+        aid = a.get("id"); raw = a.get("raw") or {}
+        rawv = raw.get("value"); raws = raw.get("string")
+        attrs.append(dict(id=aid, name=a.get("name"), value=a.get("value"), worst=a.get("worst"),
+                          thresh=a.get("thresh"), raw=(raws if raws is not None else rawv),
+                          when_failed=a.get("when_failed")))
+        if aid == 5:   realloc = rawv
+        if aid == 197: pending = rawv
+        if aid == 198: offline_unc = rawv
+        if aid == 199: crc = rawv           # UDMA CRC = cable/link/backplane, not disk surface
+        if aid in (231, 177, 202, 233) and pct_used is None and isinstance(a.get("value"), int):
+            pct_used = max(0, 100 - a["value"])     # SSD wear/life-left → % used (best-effort)
+    nl = d.get("nvme_smart_health_information_log") or {}
+    if nl:
+        pct_used = nl.get("percentage_used", pct_used)
+        if temp is None:   temp = nl.get("temperature")
+        if poh is None:    poh = nl.get("power_on_hours")
+        if cycles is None: cycles = nl.get("power_cycles")
+        for k in ("critical_warning", "available_spare", "available_spare_threshold",
+                  "percentage_used", "media_errors", "num_err_log_entries", "unsafe_shutdowns",
+                  "data_units_written", "data_units_read", "controller_busy_time",
+                  "warning_temp_time", "critical_comp_time"):
+            if k in nl:
+                attrs.append(dict(id=None, name=k, value=None, worst=None, thresh=None,
+                                  raw=nl[k], when_failed=None))
+    if passed is True:
+        st["severity"] = "OK"
+    elif passed is False:
+        st["severity"] = "CRIT"; st["last_error"] = "SMART health FAILED"
+    else:
+        st["last_error"] = "no smart_status (needs root/sudo - grant smartctl sudoers)"
+    if realloc or pending or offline_unc:
+        st["severity"] = worst(st["severity"], "WARN")
+        st["last_error"] = f"reallocated={realloc} pending={pending} offline_uncorrectable={offline_unc}"
+    if crc:
+        st["severity"] = worst(st["severity"], "WARN")
+        st["last_error"] = f"UDMA CRC errors={crc} (cable/backplane/HBA link - not disk surface)"
+    if nl.get("critical_warning"):
+        st["severity"] = worst(st["severity"], "WARN")
+        st["last_error"] = f"NVMe critical_warning={nl['critical_warning']}"
+    sp, spt = nl.get("available_spare"), nl.get("available_spare_threshold")
+    if sp is not None and spt is not None and sp <= spt:
+        st["severity"] = worst(st["severity"], "WARN")
+        st["last_error"] = f"NVMe available spare {sp}% ≤ threshold {spt}%"
+    if pct_used is not None and pct_used >= 90:
+        st["severity"] = worst(st["severity"], "WARN")
+        st["last_error"] = ((st["last_error"] + " · ") if st["last_error"] else "") + f"SSD life {pct_used}% used"
+    st["detail_json"] = json.dumps(dict(
+        passed=passed, proto=proto,
+        model=(d.get("model_name") or d.get("model_family") or d.get("scsi_model_name")),
+        serial=d.get("serial_number"), firmware=d.get("firmware_version"),
+        capacity=cap, rotation=rot, is_ssd=(rot == 0) or proto.upper() == "NVME",
+        temp=temp, power_on_hours=poh, power_cycles=cycles, pct_used=pct_used,
+        realloc=realloc, pending=pending, offline_unc=offline_unc, crc=crc,
+        dev=dev, typ=typ, attrs=attrs, probed_ts=now))
+    return st
+
+def _smart_probe_all(now):
     rc, out, _ = run(["smartctl", "--scan"])
     devs = []
     for ln in out.splitlines():
@@ -491,42 +721,107 @@ def adapter_smart(t, defaults, now):
     wrapper = os.environ.get("BM_SMART_WRAPPER", "/opt/backup-monitor/phase1/smart-probe.sh")
     results = []
     for dev, typ in devs:
-        cmd = (["smartctl", "-j", "-H", "-A", "-d", typ, dev] if is_root
+        cmd = (["smartctl", "-j", "-a", "-d", typ, dev] if is_root
                else ["sudo", "-n", wrapper, dev, typ])
         rc, o, err = run(cmd, timeout=30)
-        st = dict(severity="UNKNOWN", name_suffix=os.path.basename(dev), last_error=None)
-        try:
-            d = json.loads(o)
-        except ValueError:
-            st["last_error"] = ((err or o).strip().splitlines()[-1] if (err or o) else "no json")[:100]
-            results.append(st); continue
-        passed = d.get("smart_status", {}).get("passed")
-        realloc = pending = offline_unc = crc = None
-        for a in d.get("ata_smart_attributes", {}).get("table", []):
-            aid = a.get("id"); raw = a.get("raw", {}).get("value")
-            if aid == 5:   realloc = raw
-            if aid == 197: pending = raw
-            if aid == 198: offline_unc = raw
-            if aid == 199: crc = raw          # UDMA CRC errors = cable/link/backplane, not disk surface
-        temp = d.get("temperature", {}).get("current")
-        st["detail_json"] = json.dumps(dict(passed=passed, realloc=realloc, pending=pending,
-                                            offline_unc=offline_unc, crc=crc, temp=temp,
-                                            model=d.get("model_name")))
-        if passed is True:
-            st["severity"] = "OK"
-        elif passed is False:
-            st["severity"] = "CRIT"; st["last_error"] = "SMART health FAILED"
+        results.append(_smart_parse(dev, typ, o, err, now))
+    return results
+
+def _smartd_alerts(window_h=72):
+    """Real-time SMART alerts from smartd's journal - the PORTABLE source (systemd + smartmontools,
+    no custom wrapper), and free: smartd already polls every drive ~every 30 min, so reading its log
+    costs zero extra drive access. Returns {device_basename: {sev, msgs, ts}}."""
+    rc, o, _ = run(["journalctl", "-u", "smartd", "--since", f"{window_h} hours ago",
+                    "-o", "short-unix", "--no-pager", "-q"])
+    if rc != 0 or not o.strip():
+        rc, o, _ = run(["journalctl", "-t", "smartd", "--since", f"{window_h} hours ago",
+                        "-o", "short-unix", "--no-pager", "-q"])
+    alerts = {}
+    for ln in o.splitlines():
+        mt = re.match(r"(\d+)(?:\.\d+)?\s", ln)
+        ts = int(mt.group(1)) if mt else 0
+        m = re.search(r"Device:\s*(/dev/\S+?)(?:\s*\[[^\]]*\])?,\s*(.+?)\s*$", ln)
+        if not m:
+            continue
+        dev, msg = m.group(1), m.group(2).strip()
+        low = msg.lower()
+        # Skip the non-fault chatter smartd emits: self-test SUCCESS notices ("completed without
+        # error") and attribute trend TRACKING ("... changed from A to B", e.g. Seagate
+        # Raw_Read_Error_Rate, which fluctuates normally). Alert only on genuine failures.
+        if "without error" in low or "completed without" in low or "no error" in low:
+            continue
+        if "changed" in low:
+            continue
+        if "failed smart" in low or "back up data now" in low:
+            sev = "CRIT"
+        elif re.search(r"currently unreadable|pending sector|offline uncorrectable|uncorrectable sector|"
+                       r"error count increased|below threshold|failing_now|failing now|read failure|"
+                       r"self-test.*(failed|failure)", low):
+            sev = "WARN"
         else:
-            st["last_error"] = "no smart_status (needs root/sudo - grant smartctl sudoers)"
-        # disk-surface degradation -> WARN (watch), any nonzero is worth knowing
-        if realloc or pending or offline_unc:
-            st["severity"] = worst(st["severity"], "WARN")
-            st["last_error"] = f"reallocated={realloc} pending={pending} offline_uncorrectable={offline_unc}"
-        # link/cable errors -> WARN, flagged distinctly (this is what a flaky-connection event shows)
-        if crc:
-            st["severity"] = worst(st["severity"], "WARN")
-            st["last_error"] = f"UDMA CRC errors={crc} (cable/backplane/HBA link - not disk surface)"
-        results.append(st)
+            continue
+        # smartd names disks by their config path (often /dev/disk/by-id/...); resolve to the same
+        # /dev/sdX basename our cards use so the alert attaches to the right drive.
+        try:
+            key = os.path.basename(os.path.realpath(dev))
+        except OSError:
+            key = os.path.basename(dev)
+        a = alerts.setdefault(key, {"sev": "OK", "msgs": [], "ts": 0})
+        a["sev"] = worst(a["sev"], sev)
+        if msg not in a["msgs"]:
+            a["msgs"].append(msg)
+        a["ts"] = max(a["ts"], ts)
+    return alerts
+
+def _merge_smartd(results, alerts):
+    for r in results:
+        a = alerts.get(r.get("name_suffix"))
+        if not a:
+            continue
+        r["severity"] = worst(r.get("severity", "OK"), a["sev"])
+        note = "smartd: " + "; ".join(a["msgs"][:3])
+        r["last_error"] = note[:300] if not r.get("last_error") else (r["last_error"] + " · " + note)[:400]
+        try:
+            d = json.loads(r.get("detail_json") or "{}")
+        except (ValueError, TypeError):
+            d = {}
+        d["smartd"] = a["msgs"][:10]
+        r["detail_json"] = json.dumps(d)
+
+def adapter_smart(t, defaults, now):
+    """Per-disk health. Two sources, by design:
+      • ALERTS come from smartd's journal (real-time, portable, and free - smartd already polls the
+        drives ~every 30 min, so we add no drive access for alerting).
+      • The DETAIL snapshot (identity + full attribute table) comes from `smartctl -a`, which is the
+        only source for it. That's ~static, so it's cached long (BM_SMART_TTL, default 24h) and only
+        re-read when the cache is stale, missing, or smartd just flagged a change on a drive.
+    Result: fresh alerts without hammering disks, and the tool still surfaces health on a box that
+    only has smartd (no privileged wrapper) - the detail table is simply absent there."""
+    ttl = int(os.environ.get("BM_SMART_TTL", str(24 * 3600)))
+    alerts = _smartd_alerts(int(t.get("smartd_window_h", 72)))
+    newest_alert = max((a["ts"] for a in alerts.values()), default=0)
+    cp = _smart_cache_path()
+    cached = None
+    try:
+        if os.path.isfile(cp):
+            cached = json.loads(Path(cp).read_text())
+    except Exception:
+        cached = None
+    cache_fresh = bool(cached and cached.get("results") and (now - cached.get("ts", 0)) < ttl
+                       and not (newest_alert and newest_alert > cached.get("ts", 0)))
+    if cache_fresh:
+        results = cached["results"]
+    else:
+        results = _smart_probe_all(now)                # re-read smartctl (stale / missing / smartd changed)
+        if any(r.get("detail_json") for r in results):
+            try:
+                os.makedirs(os.path.dirname(cp), exist_ok=True)
+                Path(cp).write_text(json.dumps({"ts": now, "results": results}))
+            except Exception:
+                pass
+        elif cached and cached.get("results"):
+            results = cached["results"]                # keep last-good detail if this probe couldn't read
+    _merge_smartd(results, alerts)                     # fold real-time alerts onto whatever detail we have
     return results
 
 # ---------- persistence ----------
@@ -590,11 +885,24 @@ def collect_all(cfg, now=None):
                 sts = adapter_kernel_errors(t, defaults, now)
             elif typ == "backupninja-handler":
                 sts = adapter_backupninja(t, defaults, now)
+            elif typ == "schedules":
+                sts = adapter_schedules(t, defaults, now)
             else:
                 sts = [dict(severity="UNKNOWN", last_error=f"unknown type {typ}")]
         except Exception as e:
             sts = [dict(severity="UNKNOWN", last_error=f"adapter error: {e}")]
         for i, st in enumerate(sts):
+            # uniform passthrough: any target may advertise WHAT it backs up + its schedule; merge
+            # into detail without overriding a value the adapter already derived (e.g. per-handler).
+            extra = {k: t[k] for k in ("backs_up", "schedule") if t.get(k)}
+            if extra:
+                try:
+                    d = json.loads(st.get("detail_json") or "{}")
+                except (ValueError, TypeError):
+                    d = {}
+                for k, v in extra.items():
+                    d.setdefault(k, v)
+                st["detail_json"] = json.dumps(d)
             name = t["name"] if len(sts) == 1 else f"{t['name']}:{st.get('name_suffix', i)}"
             out.append((dict(t, name=name), st))
     return out
