@@ -856,17 +856,39 @@ def _merge_smartd(results, alerts):
         d["smartd"] = a["msgs"][:10]
         r["detail_json"] = json.dumps(d)
 
+def _smart_scan_only():
+    """Sudoless DEFAULT: enumerate SMART devices via `smartctl --scan` (works unprivileged) with NO
+    privileged probe. Health/alerts are folded in from smartd's journal by _merge_smartd. The rich
+    attribute table is opt-in (BM_SMART_DETAIL=1 + the scoped smartctl wrapper via grant-access.sh
+    --smart-detail)."""
+    rc, out, _ = run(["smartctl", "--scan"])
+    results = []
+    for ln in out.splitlines():
+        m = re.match(r"(/dev/\S+)\s+-d\s+(\S+)", ln)
+        if m:
+            results.append(dict(severity="OK", name_suffix=os.path.basename(m.group(1)), last_error=None,
+                                detail_json=json.dumps({"dev": m.group(1), "typ": m.group(2),
+                                                        "detail_optin": True})))
+    return results
+
 def adapter_smart(t, defaults, now):
-    """Per-disk health. Two sources, by design:
-      • ALERTS come from smartd's journal (real-time, portable, and free - smartd already polls the
-        drives ~every 30 min, so we add no drive access for alerting).
-      • The DETAIL snapshot (identity + full attribute table) comes from `smartctl -a`, which is the
-        only source for it. That's ~static, so it's cached long (BM_SMART_TTL, default 24h) and only
-        re-read when the cache is stale, missing, or smartd just flagged a change on a drive.
-    Result: fresh alerts without hammering disks, and the tool still surfaces health on a box that
-    only has smartd (no privileged wrapper) - the detail table is simply absent there."""
-    ttl = int(os.environ.get("BM_SMART_TTL", str(24 * 3600)))
+    """Per-disk health, sudoless by default:
+      • ALERTS + status come from smartd's journal (real-time, portable, free - smartd already polls
+        every drive ~30 min), folded onto a device list from unprivileged `smartctl --scan`.
+      • The DETAIL snapshot (identity + full attribute table) needs a privileged `smartctl -a`, so it
+        is OPT-IN: set BM_SMART_DETAIL=1 (and install the scoped wrapper via grant-access.sh
+        --smart-detail). It's ~static, so it's cached long (BM_SMART_TTL, default 24h) and only re-read
+        when the cache is stale/missing or smartd just flagged a change.
+    Default install therefore elevates NOTHING at runtime; the attribute table is simply absent until
+    opted in."""
     alerts = _smartd_alerts(int(t.get("smartd_window_h", 72)))
+    detail_on = os.environ.get("BM_SMART_DETAIL", "").lower() in ("1", "true", "yes", "on") \
+        or os.geteuid() == 0
+    if not detail_on:
+        results = _smart_scan_only()
+        _merge_smartd(results, alerts)
+        return results or [dict(severity="UNKNOWN", last_error="smartctl --scan found no devices")]
+    ttl = int(os.environ.get("BM_SMART_TTL", str(24 * 3600)))
     newest_alert = max((a["ts"] for a in alerts.values()), default=0)
     cp = _smart_cache_path()
     cached = None

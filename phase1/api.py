@@ -1385,10 +1385,13 @@ def _smart_card(r):
                  f'<td class=anm>{_esc(a.get("name") or "")}</td><td>{_c(a.get("value"))}</td>'
                  f'<td>{_c(a.get("worst"))}</td><td>{_c(a.get("thresh"))}</td>'
                  f'<td class=araw>{_c(raw)}</td></tr>')
+    optin_note = ('SMART detail is opt-in - health &amp; alerts here come from smartd. To add the '
+                  'attribute table: <code>grant-access.sh --smart-detail</code> + set '
+                  '<code>BM_SMART_DETAIL=1</code> on the agent') if d.get("detail_optin") else \
+                 ('no attribute table - re-run grant-access.sh --smart-detail and restart the agent')
     tbl = (f'<table class=smt><thead><tr><th>#</th><th>Attribute</th><th>Val</th><th>Wst</th>'
            f'<th>Thr</th><th>Raw</th></tr></thead><tbody>{rows}</tbody></table>' if rows
-           else '<div class=hempty>no attribute table - re-run grant-access.sh to deploy the '
-                'full-info probe (<code>-a</code>), then restart the agent</div>')
+           else f'<div class=hempty>{optin_note}</div>')
     why = _esc(", ".join(d.get("reasons", [])) or (r.get("last_error") or ""))
     why_html = f'<div class="why">{why}</div>' if why else ""
     if acked:

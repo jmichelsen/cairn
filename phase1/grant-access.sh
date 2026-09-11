@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
-# grant-access.sh - one-time setup so the collector can run as jmichelsen (least privilege).
-# Run with sudo. Idempotent. Makes NO backups run as the user (they stay root); only opens
-# READ access + a scoped smartctl sudoers. Mail uses a local SMTP relay (no widening needed).
+# grant-access.sh - one-time setup so the collector can run as jmichelsen with NO runtime sudo.
+# Run with sudo. Idempotent. Makes NO backups run as the user (they stay root); it only grants
+# durable READ access (group membership + group-readable borg segments via borg's own --umask), so
+# the agent afterwards elevates nothing. SMART attribute-table detail is OPT-IN (--smart-detail),
+# the one thing that needs a privileged probe. Mail uses a local SMTP relay (no widening needed).
 set -euo pipefail
 U=jmichelsen
+# SMART detail (identity + attribute table) needs a privileged smartctl and is therefore OPT-IN -
+# the default install elevates NOTHING at runtime (disk health comes from smartd's journal). Pass
+# --smart-detail (or SMART_DETAIL=1) to also install the scoped read-only smartctl sudo wrapper.
+SMART_DETAIL="${SMART_DETAIL:-0}"
+for a in "$@"; do [ "$a" = "--smart-detail" ] && SMART_DETAIL=1; done
 BORG_REPOS=(/mnt/backups/docker_data /mnt/backups/home /mnt/backups/var /srv/borg-pre)
 BN_REPORTS=/var/lib/backupninja/reports
 OPT=/opt/backup-monitor/phase1
@@ -66,25 +73,32 @@ if [ -f /var/log/backupninja.log ]; then
   chmod g+r  /var/log/backupninja.log 2>/dev/null || true
 fi
 
-echo "== smartctl: scoped sudoers for the read-only probe wrapper =="
-SRC_WRAPPER="$(dirname "$0")/smart-probe.sh"
-[ -f "$SRC_WRAPPER" ] || { echo "  ERROR: $SRC_WRAPPER not found (run from the phase1 dir)" >&2; exit 1; }
-install -D -o root -g root -m 0755 "$SRC_WRAPPER" "$OPT/smart-probe.sh"
-# Validate a TEMP copy first - a broken file in /etc/sudoers.d can wedge all sudo.
-SUDO_TMP="$(mktemp)"
-cat >"$SUDO_TMP" <<EOF
+if [ "$SMART_DETAIL" = 1 ]; then
+  echo "== smartctl: scoped sudoers for the read-only probe wrapper (OPT-IN --smart-detail) =="
+  SRC_WRAPPER="$(dirname "$0")/smart-probe.sh"
+  [ -f "$SRC_WRAPPER" ] || { echo "  ERROR: $SRC_WRAPPER not found (run from the phase1 dir)" >&2; exit 1; }
+  install -D -o root -g root -m 0755 "$SRC_WRAPPER" "$OPT/smart-probe.sh"
+  # Validate a TEMP copy first - a broken file in /etc/sudoers.d can wedge all sudo.
+  SUDO_TMP="$(mktemp)"
+  cat >"$SUDO_TMP" <<EOF
 # backup-monitor: allow jmichelsen to run ONLY the read-only SMART probe wrapper as root.
 Defaults:$U !requiretty
 $U ALL=(root) NOPASSWD: $OPT/smart-probe.sh
 EOF
-if visudo -cf "$SUDO_TMP" >/dev/null; then
-  install -o root -g root -m 0440 "$SUDO_TMP" /etc/sudoers.d/backup-monitor-smart
-  echo "  sudoers installed + validated"
+  if visudo -cf "$SUDO_TMP" >/dev/null; then
+    install -o root -g root -m 0440 "$SUDO_TMP" /etc/sudoers.d/backup-monitor-smart
+    echo "  sudoers installed + validated - now set BM_SMART_DETAIL=1 on the agent + restart it"
+  else
+    echo "  ERROR: generated sudoers failed validation - NOT installing" >&2
+    rm -f "$SUDO_TMP"; exit 1
+  fi
+  rm -f "$SUDO_TMP"
 else
-  echo "  ERROR: generated sudoers failed validation - NOT installing" >&2
-  rm -f "$SUDO_TMP"; exit 1
+  echo "== smartctl: SKIPPED (default) - disk health comes from smartd's journal, no runtime sudo =="
+  echo "   to add the full attribute table later: re-run with --smart-detail, then set"
+  echo "   BM_SMART_DETAIL=1 on the agent and restart it. To REMOVE a previously-installed wrapper:"
+  echo "     rm -f /etc/sudoers.d/backup-monitor-smart $OPT/smart-probe.sh"
 fi
-rm -f "$SUDO_TMP"
 
 cat <<EOF
 
