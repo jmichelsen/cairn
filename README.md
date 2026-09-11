@@ -10,17 +10,35 @@ computes real **replication lag** (newest snapshot common to source and destinat
 **3-2-1 compliance scorecard**, a **coverage-gap** view ("what is backed up by nothing"), and
 respects zero-knowledge encrypted replicas (flags a destination whose key unexpectedly loads).
 
-## Quick start (Docker)
+## Quick start (`./install.sh`)
+
+One entry point. It asks a few questions, elevates **once** (a single sudo for borg/backupninja
+read access + linger), then builds, configures, and starts everything - control plane, dashboard,
+and the execute-capable local agent. Re-running is idempotent (your tokens/config are kept).
 
 ```bash
 git clone https://github.com/jmichelsen/backup-monitor && cd backup-monitor
-cp config/backup-monitor.env.example config/backup-monitor.env
-#   REQUIRED in that file: the 3 auth tokens (generate: openssl rand -hex 32) + SMTP/Gotify.
-cp config/targets.example.yaml config/targets.yaml   # list YOUR pools / datasets / repos
-#   edit the agent's borg/backupninja mounts in docker-compose.yml to your paths, then:
-docker compose up -d --build
+./install.sh            # answer: role=home, alert email, (optional) Gotify, (optional) add a vault
 ```
-Open `http://<host>:8929/` and log in with your `BM_ADMIN_TOKEN`.
+Open `http://<host>:8929/` and log in with the `BM_ADMIN_TOKEN` it prints. `./install.sh --check`
+runs preflight only (changes nothing).
+
+**Remote off-site vault.** When `install.sh` (on home) asks *"add a remote vault?"*, it mints a
+per-vault enrollment secret and either writes a `vault-install.conf` bundle to copy over, **or** -
+if the vault is reachable by SSH - offers `ssh-copy-id` (so home always connects by key) and then
+pushes + runs the vault install for you. On the vault, the same script consumes the bundle:
+`./install.sh vault --config vault-install.conf`.
+
+<details><summary>Manual Docker setup (what install.sh automates)</summary>
+
+```bash
+cp config/backup-monitor.env.example config/backup-monitor.env   # 3 tokens (openssl rand -hex 32) + SMTP/Gotify
+cp config/targets.example.yaml config/targets.yaml               # list YOUR pools / datasets / repos
+docker compose up -d --build                                     # api + report-only container agent
+```
+Then `phase1/grant-access.sh` (borg/backupninja read access) and the host agent unit for actions -
+see `AGENT.md`.
+</details>
 
 **Read-only first (recommended).** The default compose runs an **unprivileged, report-only**
 container agent - great for kicking the tires. What you get vs. what needs the host agent:

@@ -5,7 +5,10 @@
 # the agent afterwards elevates nothing. SMART attribute-table detail is OPT-IN (--smart-detail),
 # the one thing that needs a privileged probe. Mail uses a local SMTP relay (no widening needed).
 set -euo pipefail
-U=jmichelsen
+# The unprivileged user the monitor runs as. Derived from whoever invoked sudo (so it works for any
+# user, not just the author); override with BM_USER=... if needed.
+U="${BM_USER:-${SUDO_USER:-$(id -un)}}"
+[ "$U" = root ] && { echo "FATAL: run me via sudo as your normal user (or set BM_USER=<user>), not as root directly" >&2; exit 1; }
 # SMART detail (identity + attribute table) needs a privileged smartctl and is therefore OPT-IN -
 # the default install elevates NOTHING at runtime (disk health comes from smartd's journal). Pass
 # --smart-detail (or SMART_DETAIL=1) to also install the scoped read-only smartctl sudo wrapper.
