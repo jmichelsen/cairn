@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""backup-monitor Phase 1 API (read-only status + derived views) with Phase-3 stubs.
+"""cairn Phase 1 API (read-only status + derived views) with Phase-3 stubs.
 
 Serves the aggregated status the collector writes, the Tier-1 derived views
 (single health badge, 3-2-1 scorecard, coverage-gap, timeline), a minimal HTML
 dashboard, and the token-authed vault endpoints (report + intent poll/result).
 
 Run:  uvicorn api:app --host 127.0.0.1 --port 8929
-Env:  BM_DB, BM_API_TOKEN (vault/agent bearer token; hash-at-rest is a deploy hardening)
+Env:  CAIRN_DB, CAIRN_API_TOKEN (vault/agent bearer token; hash-at-rest is a deploy hardening)
 """
 import hashlib, hmac, json, os, re, sqlite3, time
 from pathlib import Path
@@ -15,7 +15,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 HERE = Path(__file__).resolve().parent
-DB = os.environ.get("BM_DB", "/var/lib/backup-monitor/backup-monitor.db")
+DB = os.environ.get("CAIRN_DB", "/var/lib/cairn/cairn.db")
 import sys as _sys
 _sys.path.insert(0, str(HERE))
 import collector as _cmd   # PURE build_command, for action PREVIEWS only; the API never executes it
@@ -28,11 +28,11 @@ SEVCLS = {"CRIT": "crit", "WARN": "warn", "UNKNOWN": "unk", "OK": "ok"}  # sever
 # ---------------- zero-trust auth: every request needs a token; HASH-AT-REST ----------------
 # Only sha256(token) is ever stored (auth_tokens table). Two roles: admin (dashboard/views/
 # actions) and agent (report/poll/result only). Per-agent tokens are individual rows, so one can
-# be revoked without touching the others. Bootstrap: BM_ADMIN_TOKEN (plaintext env) is hashed
-# into the store at startup; mint per-agent tokens via POST /tokens or the bmtoken CLI.
+# be revoked without touching the others. Bootstrap: CAIRN_ADMIN_TOKEN (plaintext env) is hashed
+# into the store at startup; mint per-agent tokens via POST /tokens or the cairn-token CLI.
 import hashlib as _hashlib, secrets as _secrets
 AGENT_PATHS = ("/api/v1/backup/report", "/api/v1/backup/intents")  # + /intents/{id}/result
-ACCESS_TTL = int(os.environ.get("BM_ACCESS_TTL", str(24 * 3600)))  # access-token lifetime (s)
+ACCESS_TTL = int(os.environ.get("CAIRN_ACCESS_TTL", str(24 * 3600)))  # access-token lifetime (s)
 
 def _hash(token):
     return _hashlib.sha256(token.encode()).hexdigest()
@@ -42,10 +42,10 @@ def _seed_tokens():
     secret - it is hashed, never stored raw."""
     now = int(time.time())
     seeds = []
-    adm = os.environ.get("BM_ADMIN_TOKEN") or os.environ.get("BM_API_TOKEN")
+    adm = os.environ.get("CAIRN_ADMIN_TOKEN") or os.environ.get("CAIRN_API_TOKEN")
     if adm:
         seeds.append((_hash(adm), "admin", "bootstrap-admin"))
-    for i, t in enumerate(x.strip() for x in os.environ.get("BM_AGENT_TOKENS", "").split(",") if x.strip()):
+    for i, t in enumerate(x.strip() for x in os.environ.get("CAIRN_AGENT_TOKENS", "").split(",") if x.strip()):
         seeds.append((_hash(t), "agent", f"env-agent-{i}"))
     with db() as c:
         for h, role, label in seeds:
@@ -94,7 +94,7 @@ async def auth_gate(request: Request, call_next):
     if p in ("/login", "/favicon.ico", "/api/v1/backup/enroll"):
         return await call_next(request)   # /enroll authenticates via the enrollment secret itself
     if not HAS_ADMIN:
-        return JSONResponse({"detail": "no admin token configured - set BM_ADMIN_TOKEN and restart"},
+        return JSONResponse({"detail": "no admin token configured - set CAIRN_ADMIN_TOKEN and restart"},
                             status_code=503)
     role = "agent" if p.startswith(AGENT_PATHS) else "admin"
     if _valid(_extract_token(request), role):
@@ -157,9 +157,9 @@ def _init_db():
                 except sqlite3.OperationalError:
                     pass  # already exists
 _init_db()
-HAS_ADMIN = _seed_tokens() > 0   # false => middleware returns 503 until BM_ADMIN_TOKEN is set
+HAS_ADMIN = _seed_tokens() > 0   # false => middleware returns 503 until CAIRN_ADMIN_TOKEN is set
 
-ACK_TTL = int(os.environ.get("BM_ACK_TTL", str(14 * DAY)))  # an acknowledgement lapses after this
+ACK_TTL = int(os.environ.get("CAIRN_ACK_TTL", str(14 * DAY)))  # an acknowledgement lapses after this
 
 def _reason(r):
     """Human reason for a status row: detail reasons, else last_error."""
@@ -349,9 +349,9 @@ def dispatch_alert(sev, title, body, key, info_email=False):
         pass
 
 # ---- agent liveness (dead-man's-switch for remote agents e.g. the off-site vault) ----
-AGENT_STALE_FACTOR = int(os.environ.get("BM_AGENT_STALE_FACTOR", "3"))     # missed N cycles -> WARN
-AGENT_MISS_FACTOR = int(os.environ.get("BM_AGENT_MISS_FACTOR", "8"))       # missed N cycles -> CRIT
-AGENT_STALE_FLOOR = int(os.environ.get("BM_AGENT_STALE_FLOOR", "600"))     # min WARN threshold (s)
+AGENT_STALE_FACTOR = int(os.environ.get("CAIRN_AGENT_STALE_FACTOR", "3"))     # missed N cycles -> WARN
+AGENT_MISS_FACTOR = int(os.environ.get("CAIRN_AGENT_MISS_FACTOR", "8"))       # missed N cycles -> CRIT
+AGENT_STALE_FLOOR = int(os.environ.get("CAIRN_AGENT_STALE_FLOOR", "600"))     # min WARN threshold (s)
 
 def _ago_s(s):
     s = int(s)
@@ -426,7 +426,7 @@ async def report(request: Request):
                 except (ValueError, TypeError):
                     pass
                 why = ", ".join(d.get("reasons", [])) or (s.get("last_error") or "")
-                alerts.append((s["severity"], f"{name}: {s['severity']}", f"[{agent}] {why}".strip(), f"bm-{name}"))
+                alerts.append((s["severity"], f"{name}: {s['severity']}", f"[{agent}] {why}".strip(), f"cairn-{name}"))
         conn.execute("DELETE FROM status WHERE ts < ?", (now - 90 * DAY,))
         conn.commit()
         _reap_agents(conn, now)   # dead-man's-switch: alert on any OTHER agent gone silent
@@ -516,7 +516,7 @@ async def create_action(request: Request):
         cap = conn.execute("SELECT can_execute FROM agents WHERE name=?", (r["agent"],)).fetchone()
         if not cap or not cap["can_execute"]:
             raise HTTPException(409, f"target '{target}' is owned by report-only agent "
-                                     f"'{r['agent']}' (BM_CAN_EXECUTE=0) - no executor to run this")
+                                     f"'{r['agent']}' (CAIRN_CAN_EXECUTE=0) - no executor to run this")
         cur = conn.execute(
             "INSERT INTO intents(target_id,action,opts,state,requested_by,created_ts) "
             "VALUES(?,?,?,'pending',?,strftime('%s','now'))",
@@ -615,7 +615,7 @@ async def mint_token(request: Request):
     global HAS_ADMIN
     if role == "admin":
         HAS_ADMIN = True
-    hint = ("enrollment secret - put on the agent as BM_ENROLL_SECRET; it mints short-lived "
+    hint = ("enrollment secret - put on the agent as CAIRN_ENROLL_SECRET; it mints short-lived "
             "access tokens") if kind == "enroll" else "SAVE NOW - only its hash is stored"
     return {"token": token, "label": label, "role": role, "kind": kind, "note": hint}
 
@@ -1020,14 +1020,14 @@ async function confirmRun(b, label){
 }
 async function act(target, action, createSnap){
   var label=action+' '+target+(action==='sync'?(' (new snap: '+createSnap+')'):'');
-  var b={target:target, action:action, requested_by:'ui', dryrun:!!window.BM_DRY};
+  var b={target:target, action:action, requested_by:'ui', dryrun:!!window.CAIRN_DRY};
   if(action==='sync') b.create_snapshot=createSnap;
   if(!(await confirmRun(b,label))) return;
   post(b);
 }
 async function actPrompt(target, action, field, msg){
   var v=prompt(msg); if(v===null) return;
-  var b={target:target, action:action, requested_by:'ui', dryrun:!!window.BM_DRY}; b[field]=v;
+  var b={target:target, action:action, requested_by:'ui', dryrun:!!window.CAIRN_DRY}; b[field]=v;
   if(!(await confirmRun(b, action+' '+target+' ['+(v||'(all)')+']'))) return;
   post(b);
 }
@@ -1152,9 +1152,9 @@ function setHero(h){var p=document.querySelector('.panel'); if(!p) return;
   p.dataset.hero=h; try{localStorage.setItem('bm_hero',h)}catch(e){}}
 (function(){try{var s=localStorage.getItem('bm_hero');
   if(s) document.querySelector('.panel').dataset.hero=s;}catch(e){}})();
-function setDry(v){window.BM_DRY=!!v; var p=document.querySelector('.panel');
+function setDry(v){window.CAIRN_DRY=!!v; var p=document.querySelector('.panel');
   if(p) p.classList.toggle('drymode',!!v); try{localStorage.setItem('bm_dry', v?'1':'')}catch(e){}}
-(function(){try{ if(localStorage.getItem('bm_dry')){ window.BM_DRY=true;
+(function(){try{ if(localStorage.getItem('bm_dry')){ window.CAIRN_DRY=true;
   var c=document.getElementById('drychk'); if(c) c.checked=true;
   var p=document.querySelector('.panel'); if(p) p.classList.add('drymode'); } }catch(e){}})();
 async function loadStream(){
@@ -1387,7 +1387,7 @@ def _smart_card(r):
                  f'<td class=araw>{_c(raw)}</td></tr>')
     optin_note = ('SMART detail is opt-in - health &amp; alerts here come from smartd. To add the '
                   'attribute table: <code>grant-access.sh --smart-detail</code> + set '
-                  '<code>BM_SMART_DETAIL=1</code> on the agent') if d.get("detail_optin") else \
+                  '<code>CAIRN_SMART_DETAIL=1</code> on the agent') if d.get("detail_optin") else \
                  ('no attribute table - re-run grant-access.sh --smart-detail and restart the agent')
     tbl = (f'<table class=smt><thead><tr><th>#</th><th>Attribute</th><th>Val</th><th>Wst</th>'
            f'<th>Thr</th><th>Raw</th></tr></thead><tbody>{rows}</tbody></table>' if rows

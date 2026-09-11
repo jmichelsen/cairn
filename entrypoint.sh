@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Container entrypoint. Dispatches by first arg:
 #   api        - serve the dashboard + API (default)
-#   collect    - run the collector on a loop every $BM_INTERVAL seconds
+#   collect    - run the collector on a loop every $CAIRN_INTERVAL seconds
 #   collect-1  - run the collector once and exit (for cron/testing)
 #   runner     - process queued action intents once (usually the HOST runs this, not the container)
 #   <other>    - exec it verbatim
@@ -19,18 +19,18 @@ _require() {  # _require VARNAME "hint"
 
 case "${1:-api}" in
   api)
-    _require BM_ADMIN_TOKEN "Set the 3 tokens in config/backup-monitor.env (generate: openssl rand -hex 32)."
-    _require BM_AGENT_TOKENS "Set BM_AGENT_TOKENS in config/backup-monitor.env."
+    _require CAIRN_ADMIN_TOKEN "Set the 3 tokens in config/cairn.env (generate: openssl rand -hex 32)."
+    _require CAIRN_AGENT_TOKENS "Set CAIRN_AGENT_TOKENS in config/cairn.env."
     # pure control plane - no ZFS/host access; ingests agent reports, serves the dashboard.
-    exec uvicorn api:app --app-dir /app/phase1 --host 0.0.0.0 --port "${BM_PORT:-8929}"
+    exec uvicorn api:app --app-dir /app/phase1 --host 0.0.0.0 --port "${CAIRN_PORT:-8929}"
     ;;
   agent)
-    _require BM_API_URL "Set BM_API_URL (e.g. http://api:8929)."
-    if [ -z "${BM_ENROLL_SECRET:-}" ]; then
-      _require BM_API_TOKEN "Set BM_API_TOKEN (this agent's token) in config/backup-monitor.env, or use BM_ENROLL_SECRET."
+    _require CAIRN_API_URL "Set CAIRN_API_URL (e.g. http://api:8929)."
+    if [ -z "${CAIRN_ENROLL_SECRET:-}" ]; then
+      _require CAIRN_API_TOKEN "Set CAIRN_API_TOKEN (this agent's token) in config/cairn.env, or use CAIRN_ENROLL_SECRET."
     fi
-    # the uniform agent: report status (+ execute intents if BM_CAN_EXECUTE=1), talking HTTP
-    # to BM_API_URL. Same command whether this is the local host or a remote vault.
+    # the uniform agent: report status (+ execute intents if CAIRN_CAN_EXECUTE=1), talking HTTP
+    # to CAIRN_API_URL. Same command whether this is the local host or a remote vault.
     exec python3 /app/agent.py
     ;;
   agent-1)

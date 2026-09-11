@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""backup-monitor agent - one uniform agent for ANY host (local main host or remote vault).
+"""cairn agent - one uniform agent for ANY host (local main host or remote vault).
 
 Talks ONLY to the API over HTTP - localhost or a public URL + token. Same code regardless of
-distance; the only difference is BM_API_URL + BM_API_TOKEN + BM_AGENT_NAME. Two capabilities:
+distance; the only difference is CAIRN_API_URL + CAIRN_API_TOKEN + CAIRN_AGENT_NAME. Two capabilities:
 
   report  (always)  - collect THIS host's backup status and POST it to the API.
   execute (opt-in)  - poll the API for intents assigned to this agent, run them, POST results.
@@ -12,8 +12,8 @@ distance; the only difference is BM_API_URL + BM_API_TOKEN + BM_AGENT_NAME. Two 
 Report-only agents need no privilege beyond reads. There is no file-based path - every host,
 near or far, uses this one HTTP agent.
 
-Env: BM_API_URL, BM_API_TOKEN, BM_AGENT_NAME, BM_TARGETS, BM_CAN_EXECUTE(0/1),
-     BM_INTERVAL, BM_DRYRUN(0/1), BM_ACTION_TIMEOUT
+Env: CAIRN_API_URL, CAIRN_API_TOKEN, CAIRN_AGENT_NAME, CAIRN_TARGETS, CAIRN_CAN_EXECUTE(0/1),
+     CAIRN_INTERVAL, CAIRN_DRYRUN(0/1), CAIRN_ACTION_TIMEOUT
 Run: agent.py [--once]
 """
 import json, os, sys, time, urllib.request, urllib.error
@@ -27,28 +27,28 @@ try:
 except ImportError:
     sys.exit("PyYAML required")
 
-C.load_env()                     # pull /config/backup-monitor.env if present
+C.load_env()                     # pull /config/cairn.env if present
 def _e(k, d=None): return os.environ.get(k, d)
-API      = _e("BM_API_URL", "http://localhost:8929").rstrip("/")
+API      = _e("CAIRN_API_URL", "http://localhost:8929").rstrip("/")
 # Two ways to authenticate:
-#  - BM_ENROLL_SECRET (preferred): the long-lived per-agent secret; the agent trades it for a
+#  - CAIRN_ENROLL_SECRET (preferred): the long-lived per-agent secret; the agent trades it for a
 #    short-lived access token via /enroll and auto-re-enrolls on 401 (so forced rotation self-heals).
-#  - BM_API_TOKEN (simple/legacy): a static access token, no rotation.
-ENROLL_SECRET = _e("BM_ENROLL_SECRET", "")
-_access = {"token": _e("BM_API_TOKEN", "")}
-NAME     = _e("BM_AGENT_NAME", "local")
-TARGETS  = _e("BM_TARGETS", str(HERE / "targets.yaml"))
-CAN_EXEC = _e("BM_CAN_EXECUTE", "0") == "1"
-INTERVAL = int(_e("BM_INTERVAL", "900"))
-DRYRUN   = _e("BM_DRYRUN", "0") == "1"
-TIMEOUT  = int(_e("BM_ACTION_TIMEOUT", "7200"))
+#  - CAIRN_API_TOKEN (simple/legacy): a static access token, no rotation.
+ENROLL_SECRET = _e("CAIRN_ENROLL_SECRET", "")
+_access = {"token": _e("CAIRN_API_TOKEN", "")}
+NAME     = _e("CAIRN_AGENT_NAME", "local")
+TARGETS  = _e("CAIRN_TARGETS", str(HERE / "targets.yaml"))
+CAN_EXEC = _e("CAIRN_CAN_EXECUTE", "0") == "1"
+INTERVAL = int(_e("CAIRN_INTERVAL", "900"))
+DRYRUN   = _e("CAIRN_DRYRUN", "0") == "1"
+TIMEOUT  = int(_e("CAIRN_ACTION_TIMEOUT", "7200"))
 
 META_KEYS = ["type", "source", "dest", "tier", "location", "encrypted", "cadence"]
 
 def enroll():
     """Trade the enrollment secret for a fresh short-lived access token."""
     if not ENROLL_SECRET:
-        raise RuntimeError("got 401 and no BM_ENROLL_SECRET to re-enroll with")
+        raise RuntimeError("got 401 and no CAIRN_ENROLL_SECRET to re-enroll with")
     req = urllib.request.Request(f"{API}/api/v1/backup/enroll", data=b"{}", method="POST",
           headers={"Content-Type": "application/json", "X-Backup-Enroll": ENROLL_SECRET})
     with urllib.request.urlopen(req, timeout=30) as r:
@@ -102,7 +102,7 @@ def do_execute(cfg):
         if err:
             api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err})
             continue
-        # dry-run is per-action (opts.dryrun from the UI) OR agent-wide (BM_DRYRUN). A dry-run runs
+        # dry-run is per-action (opts.dryrun from the UI) OR agent-wide (CAIRN_DRYRUN). A dry-run runs
         # a native `-n`/read-only PROBE and returns its REAL output - never the mutating command.
         dry = DRYRUN or bool(opts.get("dryrun"))
         if dry:

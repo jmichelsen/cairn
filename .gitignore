@@ -1,8 +1,8 @@
 # secrets & runtime state - never commit
 *.env
-.backup-monitor.env
-backup-monitor.env
-!backup-monitor.env.example
+.cairn.env
+cairn.env
+!cairn.env.example
 *.db
 *.db-wal
 *.db-shm

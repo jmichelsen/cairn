@@ -11,10 +11,10 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ENV_FILE="${BACKUP_MONITOR_ENV:-/etc/backup-monitor/backup-monitor.env}"
+ENV_FILE="${CAIRN_ENV:-/etc/cairn/cairn.env}"
 [ -r "$ENV_FILE" ] && . "$ENV_FILE"
 NOTIFY="$HERE/notify.sh"
-LOG="${NOTIFY_LOG:-/var/log/backup-monitor.log}"
+LOG="${NOTIFY_LOG:-/var/log/cairn.log}"
 CAP_WARN="${cap_warn_pct:-85}"; CAP_CRIT="${cap_crit_pct:-92}"
 
 log(){ printf '%s [check] %s\n' "$(date '+%F %T')" "$*" >>"$LOG" 2>/dev/null; }

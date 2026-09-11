@@ -1,10 +1,10 @@
-# backup-monitor - aggregate ZFS/borg/backupninja backup status, alert, and trigger actions.
+# cairn - aggregate ZFS/borg/backupninja backup status, alert, and trigger actions.
 FROM python:3.12-slim
 
-LABEL org.opencontainers.image.title="backup-monitor" \
+LABEL org.opencontainers.image.title="cairn" \
       org.opencontainers.image.description="Aggregate ZFS/borg/backupninja backup status, alert (email + Gotify), and trigger on-demand snapshot/replicate/scrub." \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.source="https://github.com/jmichelsen/backup-monitor"
+      org.opencontainers.image.source="https://github.com/jmichelsen/cairn"
 
 # Userland tools the adapters shell out to. zfsutils-linux lives in Debian 'contrib' (ZFS
 # licensing), so enable it first. It is the ONLY version-sensitive tool: for ZFS reads the
@@ -32,13 +32,13 @@ COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh /app/agent.py /app/phase0/*.sh 2>/dev/null || true
 
 ENV PYTHONUNBUFFERED=1 \
-    BM_DB=/data/backup-monitor.db \
-    BM_TARGETS=/config/targets.yaml \
-    BACKUP_MONITOR_ENV=/config/backup-monitor.env \
+    CAIRN_DB=/data/cairn.db \
+    CAIRN_TARGETS=/config/targets.yaml \
+    CAIRN_ENV=/config/cairn.env \
     NOTIFY_SH=/app/phase0/notify.sh \
     INTENT_DIR=/run/backup-intents \
-    BM_PORT=8929 \
-    BM_INTERVAL=900
+    CAIRN_PORT=8929 \
+    CAIRN_INTERVAL=900
 
 EXPOSE 8929
 VOLUME ["/data"]

@@ -21,16 +21,16 @@ the execute-capable local agent. Re-running is idempotent (your tokens/config ar
 
 ```bash
 # one-liner - self-clones, then installs:
-curl -fsSL https://raw.githubusercontent.com/jmichelsen/backup-monitor/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jmichelsen/cairn/main/install.sh | bash
 ```
 or clone first:
 ```bash
-git clone https://github.com/jmichelsen/backup-monitor && cd backup-monitor
+git clone https://github.com/jmichelsen/cairn && cd cairn
 ./install.sh            # answer: role=home, alert email, (optional) Gotify, (optional) add a vault
 ```
-Open `http://<host>:8929/` and log in with the `BM_ADMIN_TOKEN` it prints. `./install.sh --check`
+Open `http://<host>:8929/` and log in with the `CAIRN_ADMIN_TOKEN` it prints. `./install.sh --check`
 runs preflight only (changes nothing). Prompts read from your terminal even under `curl … | bash`.
-The bootstrap clones to `~/backup-monitor` (override with `BM_DIR=` / `BM_REPO=`).
+The bootstrap clones to `~/cairn` (override with `CAIRN_DIR=` / `CAIRN_REPO=`).
 
 **Remote off-site vault.** When `install.sh` (on home) asks *"add a remote vault?"*, it mints a
 per-vault enrollment secret and either writes a `vault-install.conf` bundle to copy over, **or** -
@@ -41,7 +41,7 @@ pushes + runs the vault install for you. On the vault, the same script consumes 
 <details><summary>Manual Docker setup (what install.sh automates)</summary>
 
 ```bash
-cp config/backup-monitor.env.example config/backup-monitor.env   # 3 tokens (openssl rand -hex 32) + SMTP/Gotify
+cp config/cairn.env.example config/cairn.env   # 3 tokens (openssl rand -hex 32) + SMTP/Gotify
 cp config/targets.example.yaml config/targets.yaml               # list YOUR pools / datasets / repos
 docker compose up -d --build                                     # api + report-only container agent
 ```
@@ -54,7 +54,7 @@ container agent - great for kicking the tires. What you get vs. what needs the h
 
 | Works in the default RO container | Needs the host/execute agent |
 | --- | --- |
-| ZFS pool health, capacity, scrub age, **replication lag**, **resilver / vdev-error detection** | **action buttons** (replicate/scrub/snapshot/restore) - `BM_CAN_EXECUTE=1` + ZFS write |
+| ZFS pool health, capacity, scrub age, **replication lag**, **resilver / vdev-error detection** | **action buttons** (replicate/scrub/snapshot/restore) - `CAIRN_CAN_EXECUTE=1` + ZFS write |
 | borg repos, backupninja handlers, 3-2-1 scorecard, coverage-gap, timeline | **SMART** (needs disk passthrough) and **kernel-error watch** (needs journald access) |
 
 Targets owned by a report-only agent show **"report-only"** instead of action buttons, and the
@@ -62,13 +62,13 @@ API refuses to queue actions for them - so nothing hangs. When you're ready for 
 kernel-watch, run the agent on the host (see `AGENT.md`). The **`api`** service is a pure control plane (stores state, serves
 the dashboard, dispatches alerts - it never touches ZFS). The **`agent`** service reads *this*
 host's ZFS (via mounted `/dev/zfs`, unprivileged) + borg/backupninja and reports to the API every
-`BM_INTERVAL` seconds. **Monitoring needs no root.**
+`CAIRN_INTERVAL` seconds. **Monitoring needs no root.**
 
 **One agent, any distance.** The same `agent.py` runs on a remote **off-site vault** pointed at
 the API's public URL + a token - outbound HTTPS only, no separate design. See `AGENT.md`.
 
 **On-demand actions** (Replicate/Snapshot/Scrub buttons) are executed by an agent running with
-`BM_CAN_EXECUTE=1` (needs ZFS write privilege - run it on the host as root, or grant the container
+`CAIRN_CAN_EXECUTE=1` (needs ZFS write privilege - run it on the host as root, or grant the container
 `SYS_ADMIN`). Commands are built from the agent's trusted local config, never from the wire.
 
 ## What runs where
@@ -78,12 +78,12 @@ the API's public URL + a token - outbound HTTPS only, no separate design. See `A
 | API + dashboard, SQLite, alert dispatch (**no host access**) | **api** (container) | unprivileged; holds the SMTP/Gotify creds |
 | ZFS/borg/backupninja **reads** → report to API | **agent** (container or host) | `/dev/zfs` mounted; matching ZFS major (or mount host binaries) |
 | SMART | **agent** | disk device passthrough + `SYS_RAWIO` (optional) |
-| On-demand **actions** (`syncoid`/`zfs snapshot`/`zpool scrub`) | **agent** with `BM_CAN_EXECUTE=1` | ZFS write → host root or container `SYS_ADMIN` |
+| On-demand **actions** (`syncoid`/`zfs snapshot`/`zpool scrub`) | **agent** with `CAIRN_CAN_EXECUTE=1` | ZFS write → host root or container `SYS_ADMIN` |
 | Off-site **vault** reporting + pulls | **same agent**, remote | outbound HTTPS + token; no inbound, no creds |
 
 **One uniform agent** does all host work - locally and remotely - talking only HTTP to the API.
 The API never touches ZFS. A ZFS *action* tool can't avoid *some* write privilege where actions
-run, but it lives only in an agent you opt into (`BM_CAN_EXECUTE`); monitoring-only agents and the
+run, but it lives only in an agent you opt into (`CAIRN_CAN_EXECUTE`); monitoring-only agents and the
 API are unprivileged.
 
 ## Status

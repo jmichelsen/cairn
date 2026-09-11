@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""backup-monitor Phase 1 collector.
+"""cairn Phase 1 collector.
 
 Reads targets.yaml, runs one adapter per target type, computes severity, and writes
 a status row per target into SQLite. Read-only against all backups. Designed to run
@@ -9,7 +9,7 @@ runs partially as an unprivileged user for testing.
 
 Usage:
   collector.py [--once] [--db PATH] [--targets PATH] [--alert]
-Env (or /etc/backup-monitor/backup-monitor.env): BM_DB, BM_TARGETS, BORG_PASSPHRASE_*
+Env (or /etc/cairn/cairn.env): CAIRN_DB, CAIRN_TARGETS, BORG_PASSPHRASE_*
 """
 import argparse, json, os, re, sqlite3, subprocess, sys, time
 from pathlib import Path
@@ -35,8 +35,8 @@ def run(cmd, timeout=60, env=None):
     except FileNotFoundError as e:
         return 127, "", str(e)
 
-def load_env(path="/etc/backup-monitor/backup-monitor.env"):
-    p = Path(os.environ.get("BACKUP_MONITOR_ENV", path))
+def load_env(path="/etc/cairn/cairn.env"):
+    p = Path(os.environ.get("CAIRN_ENV", path))
     if p.is_file():
         for line in p.read_text().splitlines():
             line = line.strip()
@@ -693,7 +693,7 @@ def adapter_backupninja(t, defaults, now):
     return out
 
 def _smart_cache_path():
-    d = os.environ.get("BM_SMART_CACHE", os.path.expanduser("~/.cache/backup-monitor"))
+    d = os.environ.get("CAIRN_SMART_CACHE", os.path.expanduser("~/.cache/cairn"))
     return os.path.join(d, "smart-cache.json")
 
 def _smart_parse(dev, typ, o, err, now):
@@ -785,8 +785,8 @@ def _smart_probe_all(now):
     is_root = os.geteuid() == 0
     # Non-root reads go through a root-OWNED wrapper that sudoers pins by absolute path - never the
     # user-writable repo copy (sudo-ing an editable script would be an escalation hole). grant-access.sh
-    # deploys it to /opt; override with BM_SMART_WRAPPER if you installed elsewhere.
-    wrapper = os.environ.get("BM_SMART_WRAPPER", "/opt/backup-monitor/phase1/smart-probe.sh")
+    # deploys it to /opt; override with CAIRN_SMART_WRAPPER if you installed elsewhere.
+    wrapper = os.environ.get("CAIRN_SMART_WRAPPER", "/opt/cairn/phase1/smart-probe.sh")
     results = []
     for dev, typ in devs:
         cmd = (["smartctl", "-j", "-a", "-d", typ, dev] if is_root
@@ -859,7 +859,7 @@ def _merge_smartd(results, alerts):
 def _smart_scan_only():
     """Sudoless DEFAULT: enumerate SMART devices via `smartctl --scan` (works unprivileged) with NO
     privileged probe. Health/alerts are folded in from smartd's journal by _merge_smartd. The rich
-    attribute table is opt-in (BM_SMART_DETAIL=1 + the scoped smartctl wrapper via grant-access.sh
+    attribute table is opt-in (CAIRN_SMART_DETAIL=1 + the scoped smartctl wrapper via grant-access.sh
     --smart-detail)."""
     rc, out, _ = run(["smartctl", "--scan"])
     results = []
@@ -876,19 +876,19 @@ def adapter_smart(t, defaults, now):
       • ALERTS + status come from smartd's journal (real-time, portable, free - smartd already polls
         every drive ~30 min), folded onto a device list from unprivileged `smartctl --scan`.
       • The DETAIL snapshot (identity + full attribute table) needs a privileged `smartctl -a`, so it
-        is OPT-IN: set BM_SMART_DETAIL=1 (and install the scoped wrapper via grant-access.sh
-        --smart-detail). It's ~static, so it's cached long (BM_SMART_TTL, default 24h) and only re-read
+        is OPT-IN: set CAIRN_SMART_DETAIL=1 (and install the scoped wrapper via grant-access.sh
+        --smart-detail). It's ~static, so it's cached long (CAIRN_SMART_TTL, default 24h) and only re-read
         when the cache is stale/missing or smartd just flagged a change.
     Default install therefore elevates NOTHING at runtime; the attribute table is simply absent until
     opted in."""
     alerts = _smartd_alerts(int(t.get("smartd_window_h", 72)))
-    detail_on = os.environ.get("BM_SMART_DETAIL", "").lower() in ("1", "true", "yes", "on") \
+    detail_on = os.environ.get("CAIRN_SMART_DETAIL", "").lower() in ("1", "true", "yes", "on") \
         or os.geteuid() == 0
     if not detail_on:
         results = _smart_scan_only()
         _merge_smartd(results, alerts)
         return results or [dict(severity="UNKNOWN", last_error="smartctl --scan found no devices")]
-    ttl = int(os.environ.get("BM_SMART_TTL", str(24 * 3600)))
+    ttl = int(os.environ.get("CAIRN_SMART_TTL", str(24 * 3600)))
     newest_alert = max((a["ts"] for a in alerts.values()), default=0)
     cp = _smart_cache_path()
     cached = None
@@ -1007,7 +1007,7 @@ def build_command(action, t, opts=None):
     if action == "snapshot":
         if not src:
             return None, "target has no source dataset"
-        return ["zfs", "snapshot", f"{src}@bm-manual-{time.strftime('%Y%m%dT%H%M%S')}"], None
+        return ["zfs", "snapshot", f"{src}@cairn-manual-{time.strftime('%Y%m%dT%H%M%S')}"], None
     if action == "sync":
         if typ != "zfs-repl":
             return None, f"'sync' not allowed for type '{typ}'"
@@ -1093,7 +1093,7 @@ def build_dryrun(action, t, opts=None):
         pool = (src or "").split("/")[0]
         return (["zpool", "status", pool], None) if pool else (None, "no pool for scrub")
     if action == "snapshot":
-        return None, f"'zfs snapshot' has no dry-run - would create {src}@bm-manual-<timestamp>"
+        return None, f"'zfs snapshot' has no dry-run - would create {src}@cairn-manual-<timestamp>"
     if action in ("recover-points", "recover-search", "recover-deleted"):
         return build_command(action, t, opts)                          # read-only anyway
     if action == "restore":
@@ -1134,8 +1134,8 @@ def main():
     ap.add_argument("--print", dest="pr", action="store_true", help="print a summary table")
     a = ap.parse_args()
     load_env()
-    db = a.db or os.environ.get("BM_DB", "/var/lib/backup-monitor/backup-monitor.db")
-    tf = a.targets or os.environ.get("BM_TARGETS", str(HERE.parent / "targets.yaml"))
+    db = a.db or os.environ.get("CAIRN_DB", "/var/lib/cairn/cairn.db")
+    tf = a.targets or os.environ.get("CAIRN_TARGETS", str(HERE.parent / "targets.yaml"))
     cfg = yaml.safe_load(Path(tf).read_text())
     defaults = cfg["defaults"]; scrub_cad = cfg.get("scrub_cadence", {})
     now = int(time.time())

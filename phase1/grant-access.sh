@@ -6,9 +6,9 @@
 # the one thing that needs a privileged probe. Mail uses a local SMTP relay (no widening needed).
 set -euo pipefail
 # The unprivileged user the monitor runs as. Derived from whoever invoked sudo (so it works for any
-# user, not just the author); override with BM_USER=... if needed.
-U="${BM_USER:-${SUDO_USER:-$(id -un)}}"
-[ "$U" = root ] && { echo "FATAL: run me via sudo as your normal user (or set BM_USER=<user>), not as root directly" >&2; exit 1; }
+# user, not just the author); override with CAIRN_USER=... if needed.
+U="${CAIRN_USER:-${SUDO_USER:-$(id -un)}}"
+[ "$U" = root ] && { echo "FATAL: run me via sudo as your normal user (or set CAIRN_USER=<user>), not as root directly" >&2; exit 1; }
 # SMART detail (identity + attribute table) needs a privileged smartctl and is therefore OPT-IN -
 # the default install elevates NOTHING at runtime (disk health comes from smartd's journal). Pass
 # --smart-detail (or SMART_DETAIL=1) to also install the scoped read-only smartctl sudo wrapper.
@@ -16,7 +16,7 @@ SMART_DETAIL="${SMART_DETAIL:-0}"
 for a in "$@"; do [ "$a" = "--smart-detail" ] && SMART_DETAIL=1; done
 BORG_REPOS=(/mnt/backups/docker_data /mnt/backups/home /mnt/backups/var /srv/borg-pre)
 BN_REPORTS=/var/lib/backupninja/reports
-OPT=/opt/backup-monitor/phase1
+OPT=/opt/cairn/phase1
 
 echo "== groups (already members here, but idempotent) =="
 getent group backup >/dev/null || groupadd -f backup
@@ -49,7 +49,7 @@ for h in /etc/backup.d/*.borg; do
   if grep -Eq '^[[:space:]]*create_options[[:space:]]*=' "$h"; then
     sed -i -E 's#^([[:space:]]*create_options[[:space:]]*=[[:space:]]*)#\1--umask 0027 #' "$h"
   elif grep -Eq '^[[:space:]]*\[source\]' "$h"; then
-    sed -i -E '/^[[:space:]]*\[source\]/a create_options = --umask 0027   # backup-monitor: group-readable segments' "$h"
+    sed -i -E '/^[[:space:]]*\[source\]/a create_options = --umask 0027   # cairn: group-readable segments' "$h"
   else
     echo "  WARN: no [source] section in $h - add 'create_options = --umask 0027' under [source] by hand"
     rm -f "$h.bm-bak"; continue
@@ -84,13 +84,13 @@ if [ "$SMART_DETAIL" = 1 ]; then
   # Validate a TEMP copy first - a broken file in /etc/sudoers.d can wedge all sudo.
   SUDO_TMP="$(mktemp)"
   cat >"$SUDO_TMP" <<EOF
-# backup-monitor: allow jmichelsen to run ONLY the read-only SMART probe wrapper as root.
+# cairn: allow jmichelsen to run ONLY the read-only SMART probe wrapper as root.
 Defaults:$U !requiretty
 $U ALL=(root) NOPASSWD: $OPT/smart-probe.sh
 EOF
   if visudo -cf "$SUDO_TMP" >/dev/null; then
-    install -o root -g root -m 0440 "$SUDO_TMP" /etc/sudoers.d/backup-monitor-smart
-    echo "  sudoers installed + validated - now set BM_SMART_DETAIL=1 on the agent + restart it"
+    install -o root -g root -m 0440 "$SUDO_TMP" /etc/sudoers.d/cairn-smart
+    echo "  sudoers installed + validated - now set CAIRN_SMART_DETAIL=1 on the agent + restart it"
   else
     echo "  ERROR: generated sudoers failed validation - NOT installing" >&2
     rm -f "$SUDO_TMP"; exit 1
@@ -99,8 +99,8 @@ EOF
 else
   echo "== smartctl: SKIPPED (default) - disk health comes from smartd's journal, no runtime sudo =="
   echo "   to add the full attribute table later: re-run with --smart-detail, then set"
-  echo "   BM_SMART_DETAIL=1 on the agent and restart it. To REMOVE a previously-installed wrapper:"
-  echo "     rm -f /etc/sudoers.d/backup-monitor-smart $OPT/smart-probe.sh"
+  echo "   CAIRN_SMART_DETAIL=1 on the agent and restart it. To REMOVE a previously-installed wrapper:"
+  echo "     rm -f /etc/sudoers.d/cairn-smart $OPT/smart-probe.sh"
 fi
 
 cat <<EOF

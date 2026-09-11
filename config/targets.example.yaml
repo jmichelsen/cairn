@@ -1,4 +1,4 @@
-# backup-monitor targets - copy to config/targets.yaml and edit for YOUR system.
+# cairn targets - copy to config/targets.yaml and edit for YOUR system.
 # One entry per backup you want tracked. Thresholds are hours unless noted; capacity is percent.
 
 defaults:

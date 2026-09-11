@@ -8,7 +8,7 @@
 # Shared primitive - phase0/check_backups.sh and phase1/collector.py both call this.
 set -uo pipefail
 
-ENV_FILE="${BACKUP_MONITOR_ENV:-/etc/backup-monitor/backup-monitor.env}"
+ENV_FILE="${CAIRN_ENV:-/etc/cairn/cairn.env}"
 [ -r "$ENV_FILE" ] && . "$ENV_FILE"
 
 SEV="${1:?usage: notify.sh SEVERITY TITLE BODY [DEDUP_KEY]}"
@@ -18,8 +18,8 @@ KEY="${4:-}"
 
 MAIL_TO="${NOTIFY_EMAIL:-root}"
 HOSTN="$(hostname -s 2>/dev/null || echo host)"
-LOG="${NOTIFY_LOG:-/var/log/backup-monitor.log}"
-STATE_DIR="${STATE_DIR:-/var/lib/backup-monitor}"
+LOG="${NOTIFY_LOG:-/var/log/cairn.log}"
+STATE_DIR="${STATE_DIR:-/var/lib/cairn}"
 NOW="$(date +%s)"
 
 log() { printf '%s [notify:%s] %s\n' "$(date '+%F %T')" "$SEV" "$*" >>"$LOG" 2>/dev/null; }
@@ -41,10 +41,10 @@ if [ -n "$KEY" ]; then
 fi
 
 send_email() {
-  local subj="[backup-monitor:$SEV] $TITLE"
-  local from="${MAIL_FROM:-backup-monitor@$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo localhost)}"
+  local subj="[cairn:$SEV] $TITLE"
+  local from="${MAIL_FROM:-cairn@$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo localhost)}"
   local msg
-  msg="$(printf 'From: %s\nTo: %s\nSubject: %s\nContent-Type: text/plain; charset=UTF-8\n\n%s - %s\n\n%s\n\n-- backup-monitor @ %s  %s\n' \
+  msg="$(printf 'From: %s\nTo: %s\nSubject: %s\nContent-Type: text/plain; charset=UTF-8\n\n%s - %s\n\n%s\n\n-- cairn @ %s  %s\n' \
       "$from" "$MAIL_TO" "$subj" "$SEV" "$TITLE" "$BODY" "$HOSTN" "$(date '+%F %T %Z')")"
   case "${MAIL_MODE:-smtp}" in
     smtp|relay)

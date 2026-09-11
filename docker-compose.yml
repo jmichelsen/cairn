@@ -1,4 +1,4 @@
-# backup-monitor - control plane (api) + one uniform agent.
+# cairn - control plane (api) + one uniform agent.
 #
 # Architecture: the API is a pure control plane - it stores state, serves the dashboard, routes
 # intents, and dispatches alerts. It NEVER touches ZFS/borg/disks. All host work is done by
@@ -6,25 +6,25 @@
 # runs the SAME agent (agent.py) pointed at this API's public URL + a token - no separate design.
 #
 # Setup (all config lives in ONE file - no hidden .env):
-#   cp config/backup-monitor.env.example config/backup-monitor.env   # set the 3 tokens + SMTP/Gotify
+#   cp config/cairn.env.example config/cairn.env   # set the 3 tokens + SMTP/Gotify
 #   cp config/targets.example.yaml       config/targets.yaml         # list YOUR pools/datasets/repos
 #   # edit the agent's borg/backupninja mounts below to your paths, then:
 #   docker compose up -d --build
 
-name: backup-monitor
+name: cairn
 
 services:
   # ---- control plane: no host access, just serves + stores + alerts ----
   api:
     build: .
-    image: backup-monitor:latest
+    image: cairn:latest
     command: ["api"]
-    env_file: [./config/backup-monitor.env]     # tokens + SMTP + Gotify all come from this one file
+    env_file: [./config/cairn.env]     # tokens + SMTP + Gotify all come from this one file
     environment:
-      BM_DB: /data/backup-monitor.db
+      CAIRN_DB: /data/cairn.db
       STATE_DIR: /data/state
     volumes:
-      - bmdata:/data
+      - data:/data
       - ./config:/config:ro
     ports:
       - "8929:8929"
@@ -39,18 +39,18 @@ services:
   # ---- local agent: reads THIS host's ZFS/borg/backupninja and reports to the API ----
   agent:
     build: .
-    image: backup-monitor:latest
+    image: cairn:latest
     command: ["agent"]
-    env_file: [./config/backup-monitor.env]     # provides BM_API_TOKEN (this agent's token)
+    env_file: [./config/cairn.env]     # provides CAIRN_API_TOKEN (this agent's token)
     environment:
-      BM_API_URL: http://api:8929
-      BM_AGENT_NAME: local
-      BM_TARGETS: /config/targets.yaml
-      BM_INTERVAL: "900"
+      CAIRN_API_URL: http://api:8929
+      CAIRN_AGENT_NAME: local
+      CAIRN_TARGETS: /config/targets.yaml
+      CAIRN_INTERVAL: "900"
       # Report-only by default. To let this agent EXECUTE actions (syncoid/scrub/snapshot) it needs
-      # ZFS WRITE privilege - set BM_CAN_EXECUTE=1 AND add cap_add: [SYS_ADMIN] below (or, safer,
+      # ZFS WRITE privilege - set CAIRN_CAN_EXECUTE=1 AND add cap_add: [SYS_ADMIN] below (or, safer,
       # run agent.py directly on the host as root instead of in this container).
-      BM_CAN_EXECUTE: "0"
+      CAIRN_CAN_EXECUTE: "0"
     devices:
       - /dev/zfs:/dev/zfs                       # ZFS reads (unprivileged)
     volumes:
@@ -71,4 +71,4 @@ services:
     depends_on: [api]
 
 volumes:
-  bmdata:
+  data:

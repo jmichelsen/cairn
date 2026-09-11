@@ -1,4 +1,4 @@
--- backup-monitor Phase 1 schema (SQLite). Collector writes; API reads.
+-- cairn Phase 1 schema (SQLite). Collector writes; API reads.
 PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS targets (

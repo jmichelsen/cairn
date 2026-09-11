@@ -1,5 +1,5 @@
 [Unit]
-Description=backup-monitor Phase 0 check (snapshots, pool health/capacity, scrub age)
+Description=cairn Phase 0 check (snapshots, pool health/capacity, scrub age)
 After=zfs.target network-online.target
 Wants=zfs.target
 
@@ -10,8 +10,8 @@ Type=oneshot
 # (Switch to User=root + MAIL_MODE=sendmail only if you don't want to use the relay.)
 User=jmichelsen
 Group=jmichelsen
-Environment=BACKUP_MONITOR_ENV=/etc/backup-monitor/backup-monitor.env
-ExecStart=/opt/backup-monitor/phase0/check_backups.sh
+Environment=CAIRN_ENV=/etc/cairn/cairn.env
+ExecStart=/opt/cairn/phase0/check_backups.sh
 # Don't let a transient failure mark the unit failed forever; the timer retries.
 SuccessExitStatus=0 1
 Nice=10
