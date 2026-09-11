@@ -218,7 +218,12 @@ EOF
 
   say "HOME setup complete"
   info "Dashboard: http://localhost:8929${API_URL:+  (public: $API_URL)}"
-  info "Log in with the admin token shown above (or in config/cairn.env)."
+  local admin_tok; admin_tok="$(grep -m1 '^CAIRN_ADMIN_TOKEN=' "$ENVF" | cut -d= -f2-)"
+  if [ -n "$admin_tok" ]; then
+    info "Log in with this admin token:"; printf '     \033[1m%s\033[0m\n' "$admin_tok"
+  else
+    warn "couldn't read CAIRN_ADMIN_TOKEN from $ENVF - check that file for your login token"
+  fi
 }
 
 provision_vault() {
