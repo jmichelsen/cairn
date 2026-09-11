@@ -378,6 +378,74 @@ def adapter_kernel_errors(t, defaults, now):
         st["severity"] = "WARN"; st["last_error"] = f"HBA rescan storm: {rescans} target rescans in {win}h"
     return [st]
 
+def adapter_zfs_events(t, defaults, now):
+    """A ZFS event timeline from zed's journal (the all-syslog.sh zedlet). Portable: needs only a
+    default OpenZFS + systemd box, no custom script. Lists recent pool events (scrub/resilver,
+    vdev state changes, checksum/io/data errors) and warns on genuinely bad ones in a recent window.
+    Complements kernel-disk-errors (which sees SCSI/HBA-layer faults zed cannot)."""
+    win = int(t.get("window_h", 168))          # timeline span (default 7d)
+    alert_h = int(t.get("alert_h", 48))         # only recent bad events drive severity
+    days = max(1, win // 24)
+    rc, o, _ = run(["journalctl", "-t", "zed", "--since", f"{win} hours ago",
+                    "-o", "short-unix", "--no-pager", "-q"])
+    events = []
+    for ln in o.splitlines():
+        if "class=" not in ln:
+            continue
+        mt = re.match(r"(\d+)(?:\.\d+)?\s", ln)
+        ts = int(mt.group(1)) if mt else 0
+        def g(pat):
+            m = re.search(pat, ln)
+            return m.group(1) if m else None
+        cls = (g(r"class=(\S+)") or "").split(".")[-1]
+        if not cls or cls == "history_event":
+            continue
+        events.append(dict(ts=ts, cls=cls, pool=g(r"pool='([^']+)'"), vdev=g(r"vdev=(\S+)"),
+                           vstate=g(r"vdev_state=(\S+)"), pstate=g(r"pool_state=(\S+)"),
+                           err=g(r"\berr=(\d+)"), delay=g(r"delay=(\d+)ms")))
+    st = dict(severity="OK", name_suffix="zed", last_error=None)
+    if not events:
+        st["detail_json"] = json.dumps({"label": "ZFS events (zed)", "log_label": "ZFS events",
+                                        "summary": f"no ZFS events in {days}d"})
+        return [st]
+    # Severity reflects CURRENT concern, not historical churn: a vdev that flapped but ended ONLINE
+    # is resolved (and the pool's resilver-WARN already flagged it) - don't re-alert on the history.
+    sev, reasons, recent = "OK", [], now - alert_h * 3600
+    latest_vstate = {}
+    for e in sorted(events, key=lambda x: x["ts"]):
+        if "statechange" in e["cls"] and e.get("vstate"):
+            latest_vstate[(e.get("pool"), e.get("vdev"))] = (e["vstate"].upper(), e["ts"])
+    for (pool, vdev), (vs, ts) in latest_vstate.items():
+        if ts < recent:
+            continue                                   # the net-current state settled outside the window
+        if vs in ("FAULTED", "UNAVAIL", "REMOVED"):
+            sev = worst(sev, "CRIT"); reasons.append(f"{vdev or '?'} {vs} on {pool or '?'}")
+        elif vs == "DEGRADED":
+            sev = worst(sev, "WARN"); reasons.append(f"{vdev or '?'} DEGRADED on {pool or '?'}")
+    for e in events:                                   # corruption / latency signals in the window
+        if e["ts"] >= recent and e["cls"] in ("checksum", "io", "data", "deadman", "delay", "io_failure"):
+            sev = worst(sev, "WARN")
+            t = f"{e['cls']} on {e.get('pool') or '?'}" + (f" vdev={e['vdev']}" if e.get("vdev") else "")
+            reasons.append(t + (f" err={e['err']}" if e.get("err") else ""))
+        if e["ts"] >= recent and (e.get("pstate") or "").upper() in ("SUSPENDED", "FAULTED"):
+            sev = worst(sev, "CRIT"); reasons.append(f"pool {e.get('pool') or '?'} {e['pstate']}")
+    st["severity"] = sev
+    if reasons:
+        st["last_error"] = "; ".join(dict.fromkeys(reasons))[:300]
+    def _fmt(e):
+        when = time.strftime("%m-%d %H:%M", time.localtime(e["ts"])) if e["ts"] else "?"
+        bits = [when, e["cls"]]
+        if e.get("pool"):   bits.append(e["pool"])
+        if e.get("vdev"):   bits.append(f"vdev={e['vdev']}")
+        if e.get("vstate"): bits.append(e["vstate"])
+        if e.get("err"):    bits.append(f"err={e['err']}")
+        if e.get("delay"):  bits.append(f"delay={e['delay']}ms")
+        return "  ".join(bits)
+    timeline = [_fmt(e) for e in sorted(events, key=lambda x: x["ts"], reverse=True)][:40]
+    st["detail_json"] = json.dumps({"label": "ZFS events (zed)", "log_label": "ZFS events",
+                                    "summary": f"{len(events)} event(s) in {days}d", "journal": timeline})
+    return [st]
+
 def _sd_show(unit, props):
     rc, o, _ = run(["systemctl", "show", unit, "-p", ",".join(props)])
     d = {}
@@ -887,6 +955,8 @@ def collect_all(cfg, now=None):
                 sts = adapter_backupninja(t, defaults, now)
             elif typ == "schedules":
                 sts = adapter_schedules(t, defaults, now)
+            elif typ == "zfs-events":
+                sts = adapter_zfs_events(t, defaults, now)
             else:
                 sts = [dict(severity="UNKNOWN", last_error=f"unknown type {typ}")]
         except Exception as e:

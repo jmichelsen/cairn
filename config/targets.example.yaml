@@ -42,6 +42,17 @@ targets:
   #     self-heals (0B resilver, cleared counters). Needs journal read access. ---
   - { name: kernel-disk-errors, type: kernel-errors, window_h: 24, crit_count: 10, rescan_storm: 20 }
 
-  # --- backupninja: one status per handler, parsed from the log + reports (mount them ro) ---
+  # --- ZFS event timeline from zed's journal (the all-syslog.sh zedlet, standard on OpenZFS).
+  #     Lists scrub/resilver + vdev state changes + checksum/io errors; warns only on a currently
+  #     bad vdev or recent checksum/io/data errors (a resolved flap stays in the log as history). ---
+  - { name: zfs-events, type: zfs-events, window_h: 168, alert_h: 48 }
+
+  # --- scheduled ZFS jobs from systemd timers (syncoid replication, sanoid snapshots): surfaces
+  #     what each backs up, its schedule, and next/last run. Read via systemctl, no root. ---
+  - { name: schedules, type: schedules }
+
+  # --- backupninja: one status per handler, parsed from the log + reports (mount them ro). Schedule
+  #     is auto-derived from the log; `jobs` optionally labels what each handler backs up. ---
   - { name: backupninja, type: backupninja-handler, source: /etc/backup.d,
-      log: /var/log/backupninja.log, reports: /var/lib/backupninja/reports }
+      log: /var/log/backupninja.log, reports: /var/lib/backupninja/reports,
+      jobs: { "90.borg": { backs_up: "/var/lib/docker_data → borg" } } }

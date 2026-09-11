@@ -608,7 +608,8 @@ GROUPS = {"zfs-local": (0, "Pools"),
           "backupninja-handler": (4, "Scheduled jobs"),
           "schedules": (4, "Scheduled jobs"),
           "smart": (5, "Disk health (SMART)"),
-          "kernel-errors": (6, "Hardware watch")}
+          "kernel-errors": (6, "Hardware watch"),
+          "zfs-events": (6, "Hardware watch")}
 
 def _group(r):
     if r["type"] == "zfs-repl" and r.get("location") == "offsite":
@@ -1285,7 +1286,8 @@ def _card(r, can_act):
         mr += f'<div><div class="mv">{r["dedup_ratio"]}×</div><div class="ml">dedup</div></div>'
     d = json.loads(r.get("detail_json") or "{}")
     why = _esc(", ".join(d.get("reasons", [])) or (r.get("last_error") or ""))
-    src_html = f'<div class="src">{_esc(src_line)}</div>' if src_line else ""
+    subtitle = src_line or d.get("summary") or ""     # event/health cards use a summary as their subtitle
+    src_html = f'<div class="src">{_esc(subtitle)}</div>' if subtitle else ""
     mr_html = f'<div class="row">{mr}</div>' if mr else ""
     why_html = f'<div class="why">{why}</div>' if why else ""
     # backs-up + schedule + next/last run - for scheduled jobs (backupninja, syncoid/sanoid timers)
@@ -1322,9 +1324,9 @@ def _card(r, can_act):
     log_html = ""
     jr = d.get("journal")
     if jr:
-        n_lines = len(jr)
+        n_lines = len(jr); log_label = _esc(d.get("log_label") or "Job log")
         log_html = (f'<div class=chistrow><button class="histbtn" onclick="toggleSmart(this)">'
-                    f'Job log <span class=logct>{n_lines}</span></button>'
+                    f'{log_label} <span class=logct>{n_lines}</span></button>'
                     f'<div class="smdet" hidden><pre class=jlogpre>{_esc(chr(10).join(jr))}</pre></div></div>')
     acked = r.get("acked")
     card_cls, cs_text = ("ack", "ACK’D") if acked else (sev, r["severity"])
