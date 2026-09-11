@@ -150,7 +150,8 @@ def _init_db():
             for tbl, col, typ in [("targets", "agent", "TEXT"), ("intents", "opts", "TEXT"),
                                   ("auth_tokens", "kind", "TEXT DEFAULT 'access'"),
                                   ("auth_tokens", "parent", "TEXT"),
-                                  ("auth_tokens", "expires_ts", "INTEGER")]:
+                                  ("auth_tokens", "expires_ts", "INTEGER"),
+                                  ("agents", "report_interval", "INTEGER")]:
                 try:
                     c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
                 except sqlite3.OperationalError:
@@ -204,8 +205,25 @@ def health():
         counts[sev] = counts.get(sev, 0) + 1
         if SEV_ORDER.get(sev, 9) < SEV_ORDER.get(worst, 9):
             worst = sev
+    now = int(time.time())
+    with db() as conn:
+        astates = agent_states(conn, now)
+    stale_agents = 0
+    for a in astates:                      # a silent agent is a real alarm (e.g. vault went dark)
+        if a["severity"] != "OK":
+            counts[a["severity"]] = counts.get(a["severity"], 0) + 1
+            stale_agents += 1
+            if SEV_ORDER.get(a["severity"], 9) < SEV_ORDER.get(worst, 9):
+                worst = a["severity"]
     return {"severity": worst, "counts": counts, "acked": acked,
-            "targets": len(rows), "ts": int(time.time())}
+            "targets": len(rows), "agents": len(astates), "stale_agents": stale_agents,
+            "ts": now}
+
+@app.get("/api/v1/backup/agents")
+def agents_view():
+    """Liveness of every enrolled agent (for the dashboard's Agents card + monitoring)."""
+    with db() as conn:
+        return {"agents": agent_states(conn)}
 
 @app.post("/api/v1/backup/acks")
 async def ack_target(request: Request):
@@ -330,6 +348,46 @@ def dispatch_alert(sev, title, body, key, info_email=False):
     except Exception:
         pass
 
+# ---- agent liveness (dead-man's-switch for remote agents e.g. the off-site vault) ----
+AGENT_STALE_FACTOR = int(os.environ.get("BM_AGENT_STALE_FACTOR", "3"))     # missed N cycles -> WARN
+AGENT_MISS_FACTOR = int(os.environ.get("BM_AGENT_MISS_FACTOR", "8"))       # missed N cycles -> CRIT
+AGENT_STALE_FLOOR = int(os.environ.get("BM_AGENT_STALE_FLOOR", "600"))     # min WARN threshold (s)
+
+def _ago_s(s):
+    s = int(s)
+    if s < 90:     return f"{s}s"
+    if s < 5400:   return f"{s//60}m"
+    if s < 172800: return f"{s//3600}h"
+    return f"{s//86400}d"
+
+def agent_states(conn, now=None):
+    """Per-agent liveness: OK / WARN (missed a few report cycles) / CRIT (long silent).
+    Threshold scales off each agent's own reported interval so a slow vault and a 120s
+    local agent are both judged fairly."""
+    now = now or int(time.time())
+    out = []
+    for a in conn.execute(
+            "SELECT name,can_execute,last_report_ts,report_interval FROM agents ORDER BY name").fetchall():
+        due = a["report_interval"] or 120
+        stale_after = max(due * AGENT_STALE_FACTOR, AGENT_STALE_FLOOR)
+        miss_after = max(due * AGENT_MISS_FACTOR, AGENT_STALE_FLOOR * 2)
+        last = a["last_report_ts"] or 0
+        age = now - last
+        sev = "CRIT" if age >= miss_after else "WARN" if age >= stale_after else "OK"
+        out.append(dict(name=a["name"], can_execute=bool(a["can_execute"]), last_report_ts=last,
+                        report_interval=due, age_s=age, severity=sev, stale_after=stale_after))
+    return out
+
+def _reap_agents(conn, now):
+    """Alert on any agent that has gone silent past its threshold. Runs on every report (the live
+    local agent's cadence drives it); dispatch_alert's per-key cooldown prevents repeat spam."""
+    for a in agent_states(conn, now):
+        if a["severity"] in ("WARN", "CRIT"):
+            dispatch_alert(a["severity"], f"agent '{a['name']}' not reporting",
+                           f"last check-in {_ago_s(a['age_s'])} ago "
+                           f"(expects every {_ago_s(a['report_interval'])})",
+                           f"agent-stale-{a['name']}")
+
 @app.post("/api/v1/backup/report")
 async def report(request: Request):
     """An agent reports its host's status. Upserts targets (ownership = reporting agent) +
@@ -338,12 +396,15 @@ async def report(request: Request):
     agent = payload.get("agent", "unknown")
     now = int(payload.get("ts") or time.time())
     can_exec = 1 if payload.get("can_execute") else 0
+    interval = int(payload.get("interval") or 0) or None   # agent's own poll cadence (for staleness)
     statuses = payload.get("statuses", [])
     alerts = []
     with db() as conn:
-        conn.execute("""INSERT INTO agents(name,can_execute,last_report_ts) VALUES(?,?,?)
+        conn.execute("""INSERT INTO agents(name,can_execute,last_report_ts,report_interval) VALUES(?,?,?,?)
             ON CONFLICT(name) DO UPDATE SET can_execute=excluded.can_execute,
-            last_report_ts=excluded.last_report_ts""", (agent, can_exec, now))
+            last_report_ts=excluded.last_report_ts,
+            report_interval=COALESCE(excluded.report_interval, agents.report_interval)""",
+            (agent, can_exec, now, interval))
         for s in statuses:
             name = s.get("name")
             if not name:
@@ -368,6 +429,7 @@ async def report(request: Request):
                 alerts.append((s["severity"], f"{name}: {s['severity']}", f"[{agent}] {why}".strip(), f"bm-{name}"))
         conn.execute("DELETE FROM status WHERE ts < ?", (now - 90 * DAY,))
         conn.commit()
+        _reap_agents(conn, now)   # dead-man's-switch: alert on any OTHER agent gone silent
     for a in alerts:
         dispatch_alert(*a)
     return {"ok": True, "ingested": len(statuses)}
@@ -866,8 +928,13 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .sumverd .vs{color:var(--mut);font-size:12.5px;margin-top:6px}
 .sumverd.ok{color:var(--ok)} .sumverd.warn{color:var(--warn)} .sumverd.crit{color:var(--crit)} .sumverd.unk{color:var(--unk)}
 .sumchips{display:flex;gap:9px;flex-wrap:wrap}
-.sumchip{display:flex;align-items:center;gap:7px;background:var(--surf);border:1px solid var(--line);
-  border-radius:9px;padding:7px 12px;font-size:12px;color:var(--mut)}
+.sumchip{display:inline-flex;align-items:center;gap:7px;background:var(--surf);border:1px solid var(--line);
+  border-radius:9px;padding:7px 12px;font:12px "Red Hat Text",sans-serif;color:var(--mut);cursor:pointer;
+  appearance:none;-webkit-appearance:none}
+.sumchip:hover{border-color:var(--acc2)}
+.sumchip.active{border-color:var(--acc);box-shadow:0 0 0 2px color-mix(in srgb,var(--acc) 28%,transparent);color:var(--ink)}
+.sumchip:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.filtering .pt{opacity:.6}   /* subtle cue that a severity filter is active */
 .sumchip b{font-family:"Roboto Mono";font-size:15px;color:var(--ink)}
 .sumchip i{width:9px;height:9px;border-radius:2px;flex:none}
 .sumasof{margin-left:auto;color:var(--mut);font-size:12px;text-align:right;line-height:1.7}
@@ -1077,6 +1144,7 @@ async function refreshCards(){
     var box=btn.nextElementSibling, target=btn.getAttribute('data-t');       // ([data-t] excludes SMART-detail toggles)
     if(box && !box.hidden && target) loadHist(target, box);
   });
+  if(typeof applyFilter==='function') applyFilter();   // re-honor an active severity filter after re-render
 }
 window.addEventListener('load', refreshCards);
 setInterval(refreshCards, 20000);
@@ -1147,6 +1215,63 @@ async function refreshGaps(){
 }
 window.addEventListener('load', refreshGaps);
 setInterval(refreshGaps, 20000);
+var _AGSTATE={OK:'ONLINE',WARN:'STALE',CRIT:'MISSING'};
+async function refreshAgents(){                          // agent liveness (dead-man's-switch surface)
+  var j; try{ j=await (await fetch('/api/v1/backup/agents')).json(); }catch(e){ return; }
+  var stale=0;
+  (j.agents||[]).forEach(function(a){
+    var c=document.querySelector('.card[data-a="'+String(a.name).replace(/"/g,'')+'"]'); if(!c) return;
+    var cls=_SEVC[(a.severity||'').toUpperCase()]||'unk'; c.className='card '+cls;
+    var cs=c.querySelector('.cs'); if(cs) cs.textContent=_AGSTATE[a.severity]||a.severity;
+    var ls=c.querySelector('[acls=ls]'); if(ls) ls.textContent=a.last_report_ts?relTime(a.last_report_ts):'never';
+    if(a.severity!=='OK') stale++;
+  });
+  var cnt=document.getElementById('agentcount'); if(cnt) cnt.textContent=stale?(stale+' stale'):'';
+  var sec=document.querySelector('.pane[data-pane="grp:agents"]');
+  if(sec && stale>0 && sec.classList.contains('collapsed')) sec.classList.add('alerted');
+  if(typeof applyFilter==='function') applyFilter();
+}
+window.addEventListener('load', refreshAgents);
+setInterval(refreshAgents, 20000);
+// ---- live header (Attention verdict + severity counts) ----
+var _CK={ok:'OK',warn:'WARN',crit:'CRIT',unk:'UNKNOWN'};
+var _VMAP={OK:'All healthy',WARN:'Attention',CRIT:'Critical',UNKNOWN:'Unknown'};
+async function refreshHeader(){
+  var j; try{ j=await (await fetch('/api/v1/backup/health')).json(); }catch(e){ return; }
+  var c=j.counts||{};
+  document.querySelectorAll('.sumchip[data-sev]').forEach(function(ch){
+    var b=ch.querySelector('b'); if(b) b.textContent=c[_CK[ch.getAttribute('data-sev')]]||0;
+  });
+  var vt=_VMAP[j.severity]||j.severity, vcls=_SEVC[j.severity]||'unk';
+  var sv=document.getElementById('sumverd');
+  if(sv){ sv.className='sumverd '+vcls;
+    var e1=sv.querySelector('.vt'); if(e1) e1.textContent=vt;
+    var e2=sv.querySelector('.vs'); if(e2) e2.textContent=(c.WARN||0)+' warning(s) · '+(c.CRIT||0)+' critical · '+(j.targets||0)+' targets';
+  }
+  var hv=document.getElementById('heatverd'); if(hv){ hv.className='verd '+vcls; hv.textContent=vt; }
+  var ht=document.getElementById('heattag'); if(ht) ht.textContent=(j.targets||0)+' targets · '+(c.OK||0)+' ok · '+(c.WARN||0)+' warn · '+(c.CRIT||0)+' crit';
+}
+window.addEventListener('load', refreshHeader);
+setInterval(refreshHeader, 20000);
+// ---- click a header count to filter the fleet to that severity (toggle) ----
+var _filter=null;
+function applyFilter(){
+  var f=_filter;
+  document.querySelectorAll('.card').forEach(function(c){
+    c.style.display = (!f || c.classList.contains(f)) ? '' : 'none';
+  });
+  document.querySelectorAll('.pane.grp').forEach(function(sec){          // hide sections with nothing shown
+    if(!f){ sec.style.display=''; return; }
+    var vis=false, cs=sec.querySelectorAll('.card');
+    for(var i=0;i<cs.length;i++){ if(cs[i].style.display!=='none'){ vis=true; break; } }
+    sec.style.display = vis ? '' : 'none';
+  });
+  document.querySelectorAll('.sumchip[data-sev]').forEach(function(ch){
+    ch.classList.toggle('active', f===ch.getAttribute('data-sev'));
+  });
+  var p=document.querySelector('.panel'); if(p) p.classList.toggle('filtering', !!f);
+}
+function toggleFilter(sev){ _filter=(_filter===sev)?null:sev; applyFilter(); }
 window.addEventListener('load', loadStream);
 </script>"""
 
@@ -1201,6 +1326,21 @@ def _when(ts):
     s = int(ts) - int(time.time()); fut = s >= 0; s = abs(s)
     v = f"{max(1, s//60)}m" if s < 5400 else (f"{s//3600}h" if s < 172800 else f"{s//86400}d")
     return f"in {v}" if fut else f"{v} ago"
+
+def _agent_card(a):
+    """Liveness card for one reporting agent - the dead-man's-switch surface (e.g. the vault)."""
+    sev = SEVCLS.get(a["severity"], "unk")
+    n = _esc(a["name"])
+    cs = {"OK": "ONLINE", "WARN": "STALE", "CRIT": "MISSING"}.get(a["severity"], a["severity"])
+    role = "execute-capable" if a.get("can_execute") else "report-only"
+    last = (_ago(a["last_report_ts"]) if a.get("last_report_ts") else "never")
+    ivl = _ago_s(a["report_interval"]) if a.get("report_interval") else "?"
+    return (f'<div class="card {sev}" data-a="{n}"><div class="ch"><span class="cn">{n}</span>'
+            f'<span class="chr"><span class="cs">{cs}</span></span></div>'
+            f'<div class="src">{_esc(role)}</div>'
+            f'<div class=jsched><div class=jrow><span class=jk>last seen</span>'
+            f'<span class=jv acls="ls">{last}</span></div>'
+            f'<div class=jrow><span class=jk>reports</span><span class=jv>every {ivl}</span></div></div></div>')
 
 def _smart_card(r):
     """A per-drive pill: identity + the stats that matter at a glance, expandable to the full
@@ -1384,8 +1524,9 @@ def _hero_steel(rows, h, gpct, glabel):
     rp_sub = f"{tot_arch} borg archives across {len(arch)} repos" if arch else "no borg repos"
     cap_cls = "crit" if gpct >= 92 else "warn" if gpct >= 85 else "ok"
     c = h["counts"]
-    chips = "".join(f'<div class=sumchip><i style="background:var(--{SEVCLS[k]})"></i>'
-                    f'<b>{c.get(k,0)}</b> {k}</div>' for k in ("OK", "WARN", "CRIT", "UNKNOWN"))
+    chips = "".join(f'<button class=sumchip data-sev={SEVCLS[k]} onclick="toggleFilter(\'{SEVCLS[k]}\')" '
+                    f'title="show only {k} - click again to clear"><i style="background:var(--{SEVCLS[k]})"></i>'
+                    f'<b>{c.get(k,0)}</b> {k}</button>' for k in ("OK", "WARN", "CRIT", "UNKNOWN"))
     vcls = SEVCLS.get(h["severity"], "unk")
     verdict = {"OK": "All healthy", "WARN": "Attention", "CRIT": "Critical",
                "UNKNOWN": "Unknown"}.get(h["severity"], h["severity"])
@@ -1402,7 +1543,7 @@ def _hero_steel(rows, h, gpct, glabel):
              f'background:linear-gradient(90deg,var(--acc),var(--warn))"></i></div>')
     return f"""
     <div class=sumband>
-      <div class="sumverd {vcls}">{shield}<div><div class=vt>{verdict}</div><div class=vs>{vsub}</div></div></div>
+      <div class="sumverd {vcls}" id=sumverd>{shield}<div><div class=vt>{verdict}</div><div class=vs>{vsub}</div></div></div>
       <div class=sumchips>{chips}</div>
       <div class=sumasof>as of<br><b>{ts}</b></div>
     </div>
@@ -1429,6 +1570,7 @@ def index():
         rows = latest_status(conn)
         capable = {x["name"] for x in conn.execute(
             "SELECT name FROM agents WHERE can_execute=1").fetchall()}
+        agents = agent_states(conn)
     h = health()
     if not rows:
         return _shell(
@@ -1489,6 +1631,17 @@ def index():
                "UNKNOWN": "Unknown"}.get(h["severity"], h["severity"])
     vcls = SEVCLS.get(h["severity"], "unk")
     steel_hero = _hero_steel(rows, h, gpct, glabel)
+    # Agents section - reporting liveness (the dead-man's-switch for the vault + local agent)
+    n_stale = sum(1 for a in agents if a["severity"] != "OK")
+    scount = f"{n_stale} stale" if n_stale else ""
+    agents_cards = "".join(_agent_card(a) for a in agents) or \
+        '<div class=why style="padding:4px 2px">No agents enrolled yet.</div>'
+    agents_html = (
+        '<section class="pane grp" data-pane="grp:agents" id=agentsec>'
+        '<button class=paneh onclick="togglePane(\'grp:agents\')">'
+        f'<span class=pt>Agents</span><span class=pcount id=agentcount>{scount}</span>'
+        '<span class=pdot></span><span class=pchev>&#9662;</span></button>'
+        f'<div class=pbody><div class=cards id=agentcards>{agents_cards}</div></div></section>')
     return _shell(f"""
   <div class=topbar2><h2 class=applogo>backup-monitor</h2>
     <div class=seg role=tablist>
@@ -1499,8 +1652,8 @@ def index():
     <a class=signout href=# onclick="lo.submit();return false">sign out</a></div>
   <div id=hero-steel class=herox>{steel_hero}</div>
   <div id=hero-heat class=herox><div class=hero>
-    <div class=hero-top><span class="verd {vcls}">{verdict}</span>
-      <span class=tag>{h['targets']} targets · {c.get('OK',0)} ok · {c.get('WARN',0)} warn · {c.get('CRIT',0)} crit · as of {ts}</span></div>
+    <div class=hero-top><span class="verd {vcls}" id=heatverd>{verdict}</span>
+      <span class=tag id=heattag>{h['targets']} targets · {c.get('OK',0)} ok · {c.get('WARN',0)} warn · {c.get('CRIT',0)} crit · as of {ts}</span></div>
     <div class=heat><div class=heatspan>Last 14 days &nbsp;·&nbsp; {heat_span}</div>
       <table>{heat_rows}</table></div></div></div>
   <div class=split>
@@ -1509,7 +1662,7 @@ def index():
         <div class=gauge-cap>Busiest pool<span>{glabel} · {gpct}% used</span></div></div>
       <div class=railsec><h3>Coverage gaps</h3><div id=gapsbody>{gaps_html}</div></div>
     </div>
-    <div class=main>{cards}
+    <div class=main>{agents_html}{cards}
       <div class="pane actpane" data-pane=acts>
         <button class=paneh onclick="togglePane('acts')"><span class=pt>Activity</span><span class=pcount id=actcount></span><span class=pdot></span><span class=pchev>&#9662;</span></button>
         <div class=pbody><div id=actlog><span class=amsg>idle - actions stream here.</span></div></div></div></div>
