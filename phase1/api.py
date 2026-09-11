@@ -606,6 +606,7 @@ GROUPS = {"zfs-local": (0, "Pools"),
           "zfs-repl": (2, "Replication (ZFS)"),
           "borg-repo": (3, "Archive repos (borg)"),
           "backupninja-handler": (4, "Scheduled jobs"),
+          "schedules": (4, "Scheduled jobs"),
           "smart": (5, "Disk health (SMART)"),
           "kernel-errors": (6, "Hardware watch")}
 
@@ -632,6 +633,8 @@ LEGEND = [
                     "failing disk. Caught even when ZFS silently self-heals them."),
     ("off-site", "The target has ≥ 1 copy on the remote vault - the '1' in the 3-2-1 rule."),
     ("enc", "Dataset is encrypted; an off-site copy is held raw and cannot be read there."),
+    ("ACK’D", "A known warning you've acknowledged - silenced (counts as healthy in the rollup) until "
+              "the condition changes or the acknowledgement lapses. Distinct from UNKNOWN. Click to clear."),
 ]
 
 FONTS = ('<link rel="preconnect" href="https://fonts.googleapis.com">'
@@ -644,17 +647,17 @@ PAGE_STYLE = """<style>
 :root{
   --bg:#eef2f6; --surf:#ffffff; --ink:#1a2733; --mut:#5f7085; --line:#e0e6ec;
   --acc:#1c5fa8; --acc2:#0f3f74; --accsoft:#e7f0f9; --rail:#f5f8fb; --heatbg:#e4e9ee;
-  --ok:#1c8a63; --warn:#c07d21; --crit:#c1443a; --unk:#8090a0;
+  --ok:#1c8a63; --warn:#c07d21; --crit:#c1443a; --unk:#8090a0; --ack:#5b7fa6;
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){
   --bg:#0d1621; --surf:#111e2c; --ink:#dbe6f2; --mut:#8496a8; --line:#213347;
   --acc:#4d9fff; --acc2:#9cc6f5; --accsoft:#16304b; --rail:#0e1a27; --heatbg:#1a2b3c;
-  --ok:#34c98a; --warn:#e0a53a; --crit:#ff5b51; --unk:#7d90a4;
+  --ok:#34c98a; --warn:#e0a53a; --crit:#ff5b51; --unk:#7d90a4; --ack:#6d97c4;
 }}
 :root[data-theme=dark]{
   --bg:#0d1621; --surf:#111e2c; --ink:#dbe6f2; --mut:#8496a8; --line:#213347;
   --acc:#4d9fff; --acc2:#9cc6f5; --accsoft:#16304b; --rail:#0e1a27; --heatbg:#1a2b3c;
-  --ok:#34c98a; --warn:#e0a53a; --crit:#ff5b51; --unk:#7d90a4;
+  --ok:#34c98a; --warn:#e0a53a; --crit:#ff5b51; --unk:#7d90a4; --ack:#6d97c4;
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);
@@ -699,12 +702,12 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .card{background:var(--surf);border:1px solid var(--line);border-radius:13px;padding:15px 16px;
   border-top:3px solid var(--unk);box-shadow:0 1px 2px rgba(20,40,60,.05)}
 .card.ok{border-top-color:var(--ok)} .card.warn{border-top-color:var(--warn)} .card.crit{border-top-color:var(--crit)}
-.card.ack{border-top-color:var(--unk);opacity:.72}
-.card.ack .cs{color:var(--unk)}
+.card.ack{border-top-color:var(--ack);opacity:.86}
+.card.ack .cs{color:var(--ack)}
 .ackbtn{appearance:none;margin-top:11px;font:600 11.5px/1 "Red Hat Text",sans-serif;
   border:1px solid var(--line);background:var(--surf);color:var(--mut);border-radius:7px;padding:7px 10px;cursor:pointer}
 .ackbtn:hover{color:var(--ink)}
-.ackbtn.on{color:var(--ok);border-color:var(--ok)}
+.ackbtn.on{color:var(--ack);border-color:var(--ack)}
 .card .ch{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .card .cn{font-family:"Red Hat Display";font-weight:700;font-size:15px;word-break:break-word}
 .card .chr{display:inline-flex;align-items:center;gap:8px;flex:none}
@@ -713,6 +716,7 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .card.busy .cbusy{display:inline-block}
 .card .cs{font-size:10.5px;font-weight:700;letter-spacing:.05em;flex:none}
 .card.ok .cs{color:var(--ok)} .card.warn .cs{color:var(--warn)} .card.crit .cs{color:var(--crit)} .card.unk .cs{color:var(--unk)}
+.card.ack .cs{color:var(--ack)}
 .card .src{font-family:"Roboto Mono";font-size:11.5px;color:var(--mut);margin-top:3px;word-break:break-all}
 .card .row{display:flex;gap:16px;margin-top:12px;flex-wrap:wrap}
 .card .mv{font-family:"Roboto Mono";font-weight:500;font-size:16px}
@@ -753,7 +757,32 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
   background:var(--rail);border:1px solid var(--line);border-radius:6px;padding:5px 7px;
   white-space:pre-wrap;word-break:break-all}
 .chist .hempty{color:var(--mut);font-size:11.5px;font-style:italic}
-#actlog{margin-top:20px;padding:.6rem;background:var(--rail);border:1px solid var(--line);
+/* scheduled-job card: backs-up + schedule + next/last run */
+.jsched{margin-top:11px;display:flex;flex-direction:column;gap:5px}
+.jrow{display:grid;grid-template-columns:62px 1fr;gap:9px;align-items:baseline}
+.jrow .jk{font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);font-weight:700}
+.jrow .jv{color:var(--ink);font-family:"Roboto Mono",monospace;font-size:11.5px;word-break:break-word;line-height:1.4}
+.jrun{color:var(--mut);font-family:"Roboto Mono",monospace;font-size:11px;margin-top:2px}
+.logct{font-size:9px;font-weight:700;color:var(--mut);background:var(--rail);border:1px solid var(--line);
+  border-radius:20px;padding:1px 6px;margin-left:4px}
+.jlogpre{margin:0;padding:8px 10px;font:10.5px/1.5 "Roboto Mono",monospace;color:var(--ink);
+  white-space:pre-wrap;word-break:break-word}
+/* SMART per-drive card + detail table */
+.smartcard .skpirow{display:grid;grid-template-columns:repeat(auto-fit,minmax(72px,1fr));gap:8px;margin-top:12px}
+.smartcard .skpi{background:var(--rail);border:1px solid var(--line);border-radius:8px;padding:8px 9px}
+.smartcard .skpi b{display:block;font-family:"Roboto Mono",monospace;font-size:14px;color:var(--ink);font-weight:600}
+.smartcard .skpi span{font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:var(--mut);font-weight:700}
+.smartcard .skpi.ok b{color:var(--ok)} .smartcard .skpi.warn b{color:var(--warn)} .smartcard .skpi.crit b{color:var(--crit)}
+.smprobe{font-size:10px;color:var(--mut);margin-left:10px;font-family:"Roboto Mono",monospace}
+.smdet{margin-top:9px;max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:7px}
+.smdet[hidden]{display:none}
+.smt{border-collapse:collapse;width:100%;font-family:"Roboto Mono",monospace;font-size:10.5px}
+.smt th{text-align:left;color:var(--mut);font-weight:700;font-size:9px;letter-spacing:.05em;text-transform:uppercase;
+  padding:5px 7px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--surf)}
+.smt td{padding:3px 7px;border-bottom:1px solid var(--heatbg);color:var(--ink);white-space:nowrap}
+.smt td.aid{color:var(--mut)} .smt td.anm{white-space:normal;color:var(--acc2)} .smt td.araw{color:var(--mut);text-align:right}
+.smt tr.bad td,.smt tr.bad td.anm{color:var(--crit)}
+#actlog{padding:.6rem;background:var(--rail);border:1px solid var(--line);
   border-radius:9px;display:flex;flex-direction:column;gap:7px;min-height:1.4em}
 #actlog .amsg{color:var(--mut);font:12px/1.5 "Roboto Mono",monospace;padding:2px 4px}
 .actrow{display:flex;flex-direction:column;font:12px/1.4 "Roboto Mono",monospace;padding:7px 9px;
@@ -781,6 +810,25 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .lg dt{font-family:"Roboto Mono";font-weight:500;font-size:13px;color:var(--acc2);display:flex;gap:8px;align-items:center}
 .lg dd{margin:3px 0 0;color:var(--mut);font-size:12px;line-height:1.45}
 .lg .sw{width:11px;height:11px;border-radius:3px;flex:none}
+/* collapsible panes - Coverage gaps · Activity · Metric key */
+.paneh{display:flex;align-items:center;gap:9px;width:100%;appearance:none;border:0;background:transparent;
+  text-align:left;cursor:pointer;padding:0;margin:0;color:inherit;font:inherit}
+.paneh .pt{font-family:"Red Hat Display",sans-serif;font-size:11px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--mut);font-weight:700}
+.paneh:hover .pt{color:var(--ink)}
+.paneh:focus-visible{outline:2px solid var(--acc);outline-offset:3px;border-radius:4px}
+.paneh .pchev{margin-left:auto;color:var(--mut);font-size:9px;line-height:1;transition:transform .15s;flex:none}
+.pane.collapsed .paneh .pchev{transform:rotate(-90deg)}
+.paneh .pcount{font:600 10px/1 "Roboto Mono",monospace;color:var(--acc2);background:var(--surf);
+  border:1px solid var(--line);border-radius:20px;padding:3px 8px}
+.paneh .pcount:empty{display:none}
+.paneh .pdot{width:9px;height:9px;border-radius:50%;background:var(--acc);flex:none;display:none;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 22%,transparent);animation:apulse 1.4s ease-in-out infinite}
+.pane.collapsed.alerted .paneh .pdot{display:inline-block}
+.pane .pbody{margin-top:12px}
+.pane.collapsed .pbody{display:none}
+.pane.grp:not(:first-child){margin-top:22px}
+.actpane{margin-top:22px}
 /* top bar + hero toggle */
 .topbar2{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:14px 26px 2px}
 .applogo{font-family:"Red Hat Display";font-weight:900;font-size:19px;letter-spacing:-.01em}
@@ -876,10 +924,11 @@ function setRow(key, o){
     if(txt){ out.textContent=txt; row.classList.add('hasout'); if(o.expand) row.classList.add('open'); }
     else { out.textContent=''; row.classList.remove('hasout','open'); }   // never show an empty box
   }
+  updateActCount();
 }
 async function post(body){
   var key='q'+(++_seq); var dry=!!body.dryrun; var tag=dry?'[dry] ':'';
-  cardBusy(body.target, +1);
+  cardBusy(body.target, +1); panePing('acts');
   setRow(key,{title:tag+body.action+' '+body.target, state:'submitting', cls:'warn', spin:true, dry:dry});
   var r,j;
   try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -936,7 +985,7 @@ async function poll(id, key, dry, target){
     if(!target) target=j.target;
     setRow(key,{title:tag+'#'+id+' '+(j.target||'')+' '+(j.action||''), state:st+(dry?' · dry':''),
                 cls:cls, spin:!done, out: done?(res.output||''):undefined, expand: done&&cls==='crit'});
-    if(done) break;
+    if(done){ panePing('acts'); break; }             // completion is worth surfacing when collapsed
     await new Promise(s=>setTimeout(s,2000));
   }
   cardBusy(target, -1);   // clear the card indicator whether it finished, gave up, or errored
@@ -984,6 +1033,10 @@ async function loadHist(target, box){
     box.innerHTML = a.length ? a.map(renderHist).join('') : '<div class=hempty>no actions yet</div>';
   }catch(e){ box.innerHTML='<div class=hempty>error loading history</div>'; }
 }
+function toggleSmart(btn){   // SMART detail table is server-rendered; just show/hide it
+  var box=btn.parentNode.querySelector('.smdet'); if(!box) return;
+  var open=btn.classList.toggle('open'); box.hidden=!open;
+}
 async function toggleHist(btn, target){
   var box=btn.nextElementSibling; var open=btn.classList.toggle('open');
   if(!open){ box.hidden=true; return; }
@@ -1000,20 +1053,27 @@ function metricRowHtml(r){
   return p;
 }
 var _SEVC={CRIT:'crit',WARN:'warn',UNKNOWN:'unk',OK:'ok'};
+var _cardSev={};
 async function refreshCards(){
   var j; try{ j=await (await fetch('/api/v1/backup/status')).json(); }catch(e){ return; }
   (j.targets||[]).forEach(function(r){
     var c=document.querySelector('.card[data-t="'+String(r.name).replace(/"/g,'')+'"]'); if(!c) return;
     var cls=r.acked?'ack':(_SEVC[(r.severity||'').toUpperCase()]||'unk');
-    c.className='card '+cls+(c.classList.contains('busy')?' busy':'');   // updates the severity stripe
-    var cs=c.querySelector('.cs'); if(cs) cs.textContent=r.acked?'ACK':(r.severity||'').toUpperCase();
+    var prev=_cardSev[r.name]; _cardSev[r.name]=cls;
+    if(prev!==undefined && prev!==cls){          // a card changed state → flag its section if collapsed
+      var sec=c.closest('.pane.grp');
+      if(sec && sec.classList.contains('collapsed')) sec.classList.add('alerted');
+    }
+    var keep=(c.classList.contains('busy')?' busy':'')+(c.classList.contains('smartcard')?' smartcard':'');
+    c.className='card '+cls+keep;   // updates the severity stripe, preserving card variants
+    var cs=c.querySelector('.cs'); if(cs) cs.textContent=r.acked?'ACK\u2019D':(r.severity||'').toUpperCase();
     var mr=metricRowHtml(r), rowEl=c.querySelector('.row');
     if(mr && rowEl) rowEl.innerHTML=mr; else if(!mr && rowEl) rowEl.remove();
     var d=r.detail||{}, why=(d.reasons&&d.reasons.length)?d.reasons.join(', '):(r.last_error||'');
     var whyEl=c.querySelector('.why'); if(whyEl) whyEl.textContent=why;
   });
-  document.querySelectorAll('.histbtn.open').forEach(function(btn){          // keep open History current
-    var box=btn.nextElementSibling, target=btn.getAttribute('data-t');
+  document.querySelectorAll('.histbtn.open[data-t]').forEach(function(btn){   // keep open History current
+    var box=btn.nextElementSibling, target=btn.getAttribute('data-t');       // ([data-t] excludes SMART-detail toggles)
     if(box && !box.hidden && target) loadHist(target, box);
   });
 }
@@ -1030,6 +1090,7 @@ function setDry(v){window.BM_DRY=!!v; var p=document.querySelector('.panel');
   var p=document.querySelector('.panel'); if(p) p.classList.add('drymode'); } }catch(e){}})();
 async function loadStream(){
   var el=document.getElementById('actlog'); if(!el) return;
+  window._bmSeeding=true;
   try{
     var j=await (await fetch('/api/v1/backup/actions?limit=10')).json();
     var a=(j.actions||[]).slice().sort(function(x,y){return (x.created_ts||0)-(y.created_ts||0);});
@@ -1044,7 +1105,47 @@ async function loadStream(){
       if(!done){ cardBusy(x.target, +1); poll(x.id, key, dry, x.target); }   // resume + mark card busy
     }
   }catch(e){}
+  window._bmSeeding=false; updateActCount();
 }
+// ---- collapsible panes + "something changed while collapsed" indicator ----
+function paneKey(id){return 'bm_pane_'+id;}
+function togglePane(id){
+  var p=document.querySelector('.pane[data-pane="'+id+'"]'); if(!p) return;
+  var col=p.classList.toggle('collapsed');
+  if(!col) p.classList.remove('alerted');            // opening it clears the "look here" dot
+  try{localStorage.setItem(paneKey(id), col?'1':'')}catch(e){}
+}
+function panePing(id){                                // flag a collapsed pane; no-op while it's open
+  if(window._bmSeeding) return;                      // don't flash on the initial page seed
+  var p=document.querySelector('.pane[data-pane="'+id+'"]');
+  if(p && p.classList.contains('collapsed')) p.classList.add('alerted');
+}
+(function(){                                          // restore each pane's collapsed state
+  document.querySelectorAll('.pane[data-pane]').forEach(function(p){
+    try{ if(localStorage.getItem(paneKey(p.getAttribute('data-pane')))) p.classList.add('collapsed'); }catch(e){}
+  });
+})();
+function updateActCount(){                            // show in-flight count on the Activity header
+  var el=document.getElementById('actlog'), c=document.getElementById('actcount'); if(!el||!c) return;
+  var n=el.querySelectorAll('.actrow.spin').length; c.textContent = n?(n+' running'):'';
+}
+var _gapsig=null;
+function gapHtml(g){var sev=(_SEVC[(g.severity||'').toUpperCase()]||'unk');
+  return '<div class=gap><span class=d style="background:var(--'+sev+')"></span>'+
+    '<div><b>'+esc(g.name)+'</b><small>'+esc(g.gap)+'</small></div></div>';}
+async function refreshGaps(){
+  var box=document.getElementById('gapsbody'); if(!box) return;
+  var j; try{ j=await (await fetch('/api/v1/backup/coverage-gap')).json(); }catch(e){ return; }
+  var gaps=(j.gaps||[]).slice(0,6);
+  var sig=gaps.map(function(g){return g.name+'|'+g.gap+'|'+g.severity;}).join('~');
+  if(sig===_gapsig) return;                           // unchanged → don't touch DOM or ping
+  var first=(_gapsig===null); _gapsig=sig;
+  box.innerHTML = gaps.length ? gaps.map(gapHtml).join('')
+    : '<div class=gap><span class=d style="background:var(--ok)"></span><div><b>No gaps</b>'+
+      '<small>everything snapshotted &amp; replicating</small></div></div>';
+}
+window.addEventListener('load', refreshGaps);
+setInterval(refreshGaps, 20000);
 window.addEventListener('load', loadStream);
 </script>"""
 
@@ -1075,6 +1176,95 @@ def _acts(r, can_act):
         return ""
     return f'<div class="cact">{main}</div>{rec}'
 
+def _cap(b):
+    if not b:
+        return "-"
+    b = float(b)
+    if b >= 1e12: return f"{b/1e12:.1f} TB"
+    if b >= 1e9:  return f"{b/1e9:.0f} GB"
+    return f"{b/1e6:.0f} MB"
+
+def _ago(ts):
+    if not ts:
+        return ""
+    s = max(0, int(time.time()) - int(ts))
+    if s < 90:     return f"{s}s ago"
+    if s < 5400:   return f"{s//60}m ago"
+    if s < 172800: return f"{s//3600}h ago"
+    return f"{s//86400}d ago"
+
+def _when(ts):
+    """Relative time that also handles the future (next scheduled run)."""
+    if not ts:
+        return ""
+    s = int(ts) - int(time.time()); fut = s >= 0; s = abs(s)
+    v = f"{max(1, s//60)}m" if s < 5400 else (f"{s//3600}h" if s < 172800 else f"{s//86400}d")
+    return f"in {v}" if fut else f"{v} ago"
+
+def _smart_card(r):
+    """A per-drive pill: identity + the stats that matter at a glance, expandable to the full
+    SMART attribute table (Scrutiny-style). Data is served from the collector's TTL cache."""
+    d = json.loads(r.get("detail_json") or "{}")
+    nm = r["name"]; n = _esc(nm)
+    sev = SEVCLS.get(r["severity"], "unk")
+    acked = r.get("acked")
+    card_cls, cs_text = ("ack", "ACK’D") if acked else (sev, r["severity"])
+    devname = _esc((d.get("dev") or "").split("/")[-1] or nm.split(":")[-1])
+    proto = (d.get("proto") or "").upper()
+    kind = ("NVMe SSD" if proto == "NVME"
+            else "SSD" if d.get("is_ssd")
+            else f'{d.get("rotation")} rpm HDD' if d.get("rotation") else "HDD")
+    ident = " · ".join(x for x in [_esc(d.get("model") or "unknown model"),
+                                    (f'SN {_esc(d.get("serial"))}' if d.get("serial") else ""),
+                                    _esc(kind)] if x)
+    tiles = []
+    hs = "PASSED" if d.get("passed") is True else ("FAILED" if d.get("passed") is False else "-")
+    tiles.append(("health", hs, "ok" if d.get("passed") is True else ("crit" if d.get("passed") is False else "")))
+    if d.get("capacity"):            tiles.append(("capacity", _cap(d["capacity"]), ""))
+    if d.get("temp") is not None:    tiles.append(("temp", f'{d["temp"]}°C', "warn" if d["temp"] >= 50 else ""))
+    if d.get("power_on_hours") is not None:
+        poh = d["power_on_hours"];   tiles.append(("power-on", f"{poh/8760:.1f} y", ""))
+    if d.get("power_cycles") is not None:
+        tiles.append(("cycles", f'{d["power_cycles"]:,}', ""))
+    if d.get("pct_used") is not None:
+        pu = d["pct_used"];          tiles.append(("life used", f"{pu}%", "warn" if pu >= 80 else ""))
+    for lbl, key in (("reallocated", "realloc"), ("pending", "pending"),
+                     ("offline unc", "offline_unc"), ("CRC/link", "crc")):
+        v = d.get(key)
+        if v:                        tiles.append((lbl, str(v), "warn"))
+    kpi = "".join(f'<div class="skpi {c}"><b>{_esc(v)}</b><span>{_esc(l)}</span></div>' for l, v, c in tiles)
+    rows = ""
+    for a in d.get("attrs", []):
+        aid = "" if a.get("id") is None else a["id"]
+        raw = a.get("raw")
+        crit = (a.get("id") in (5, 197, 198, 199) and raw not in (None, 0, "0")) \
+            or (a.get("when_failed") not in (None, "", "-"))
+        def _c(x): return "-" if x is None else _esc(x)
+        rows += (f'<tr class="{"bad" if crit else ""}"><td class=aid>{_c(aid)}</td>'
+                 f'<td class=anm>{_esc(a.get("name") or "")}</td><td>{_c(a.get("value"))}</td>'
+                 f'<td>{_c(a.get("worst"))}</td><td>{_c(a.get("thresh"))}</td>'
+                 f'<td class=araw>{_c(raw)}</td></tr>')
+    tbl = (f'<table class=smt><thead><tr><th>#</th><th>Attribute</th><th>Val</th><th>Wst</th>'
+           f'<th>Thr</th><th>Raw</th></tr></thead><tbody>{rows}</tbody></table>' if rows
+           else '<div class=hempty>no attribute table - re-run grant-access.sh to deploy the '
+                'full-info probe (<code>-a</code>), then restart the agent</div>')
+    why = _esc(", ".join(d.get("reasons", [])) or (r.get("last_error") or ""))
+    why_html = f'<div class="why">{why}</div>' if why else ""
+    if acked:
+        ack_html = (f'<button class="ackbtn on" onclick="unackTarget(\'{nm}\')" '
+                    f'title="acknowledged - click to clear">✓ acknowledged</button>')
+    elif r["severity"] in ("WARN", "CRIT"):
+        ack_html = f'<button class=ackbtn onclick="ackTarget(\'{nm}\')">Acknowledge</button>'
+    else:
+        ack_html = ""
+    probed = f'<span class=smprobe title="SMART is cached and refreshed periodically, not on every poll">read {_ago(d.get("probed_ts"))}</span>' if d.get("probed_ts") else ""
+    return (f'<div class="card smartcard {card_cls}" data-t="{n}"><div class="ch">'
+            f'<span class="cn">{devname}</span><span class="chr">'
+            f'<span class="cbusy" title="action running"></span><span class="cs">{cs_text}</span></span></div>'
+            f'<div class="src">{ident}</div><div class="skpirow">{kpi}</div>{why_html}{ack_html}'
+            f'<div class=chistrow><button class="histbtn" onclick="toggleSmart(this)">SMART details</button>'
+            f'{probed}<div class="smdet" hidden>{tbl}</div></div></div>')
+
 def _card(r, can_act):
     nm = r["name"]; n = _esc(nm); sev = SEVCLS.get(r["severity"], "unk")
     src = r.get("source") or ""
@@ -1098,6 +1288,19 @@ def _card(r, can_act):
     src_html = f'<div class="src">{_esc(src_line)}</div>' if src_line else ""
     mr_html = f'<div class="row">{mr}</div>' if mr else ""
     why_html = f'<div class="why">{why}</div>' if why else ""
+    # backs-up + schedule + next/last run - for scheduled jobs (backupninja, syncoid/sanoid timers)
+    bu, sc = d.get("backs_up"), d.get("schedule")
+    lt, nt = (d.get("last_ts") or r.get("last_run_ts")), d.get("next_ts")
+    sched_html = ""
+    if bu or sc or lt or nt:
+        js = ""
+        if bu: js += f'<div class=jrow><span class=jk>backs up</span><span class=jv>{_esc(bu)}</span></div>'
+        if sc: js += f'<div class=jrow><span class=jk>schedule</span><span class=jv>{_esc(sc)}</span></div>'
+        runbits = []
+        if lt: runbits.append(f"last {_when(lt)}")
+        if nt: runbits.append(f"next {_when(nt)}")
+        if runbits: js += f'<div class=jrun>{" · ".join(runbits)}</div>'
+        sched_html = f'<div class=jsched>{js}</div>'
     # per-dataset 3-2-1 badge (replication sets only): each digit green if that leg is met.
     c321_html = ""
     if r["type"] == "zfs-repl" and r.get("source") and r.get("dest"):
@@ -1115,8 +1318,16 @@ def _card(r, can_act):
     if r["type"] in ("zfs-repl", "zfs-local"):   # the target types that receive action intents
         hist_html = (f'<div class=chistrow><button class=histbtn data-t="{n}" onclick="toggleHist(this,\'{nm}\')">'
                      f'History</button><div class=chist hidden></div></div>')
+    # collapsible job log - the real failure/warning lines captured from the journal (or backupninja log)
+    log_html = ""
+    jr = d.get("journal")
+    if jr:
+        n_lines = len(jr)
+        log_html = (f'<div class=chistrow><button class="histbtn" onclick="toggleSmart(this)">'
+                    f'Job log <span class=logct>{n_lines}</span></button>'
+                    f'<div class="smdet" hidden><pre class=jlogpre>{_esc(chr(10).join(jr))}</pre></div></div>')
     acked = r.get("acked")
-    card_cls, cs_text = ("ack", "ACK") if acked else (sev, r["severity"])
+    card_cls, cs_text = ("ack", "ACK’D") if acked else (sev, r["severity"])
     if acked:
         ack_html = (f'<button class="ackbtn on" onclick="unackTarget(\'{nm}\')" '
                     f'title="acknowledged - click to clear">✓ acknowledged</button>')
@@ -1124,10 +1335,11 @@ def _card(r, can_act):
         ack_html = f'<button class=ackbtn onclick="ackTarget(\'{nm}\')">Acknowledge</button>'
     else:
         ack_html = ""
-    return (f'<div class="card {card_cls}" data-t="{n}"><div class="ch"><span class="cn">{n}</span>'
+    title = _esc(d["label"]) if d.get("label") else n     # schedule cards carry a friendly label
+    return (f'<div class="card {card_cls}" data-t="{n}"><div class="ch"><span class="cn">{title}</span>'
             f'<span class="chr"><span class="cbusy" title="action running"></span>'
-            f'<span class="cs">{cs_text}</span></span></div>{src_html}{c321_html}{mr_html}{why_html}'
-            f'{ack_html}{_acts(r, can_act)}{hist_html}</div>')
+            f'<span class="cs">{cs_text}</span></span></div>{src_html}{sched_html}{c321_html}{mr_html}{why_html}'
+            f'{ack_html}{_acts(r, can_act)}{hist_html}{log_html}</div>')
 
 def _heatmap(order_names):
     """14-day worst-severity-per-day grid, aligned to the card order."""
@@ -1245,17 +1457,24 @@ def index():
 
     heat_rows, heat_span = _heatmap(order_names)
 
+    # Each group (Pools, Replication, Disk health, Archive repos, …) is a collapsible section:
+    # header + chevron, and a dot on the header if a card inside changes while it's collapsed.
     cards, cur = "", None
     for r in rows:
         g = _group(r)[1]
         if g != cur:
             if cur is not None:
-                cards += "</div>"
-            cards += f'<div class=gtitle>{_esc(g)}</div><div class=cards>'
+                cards += "</div></div></section>"
+            pid = "grp:" + re.sub(r"[^a-z0-9]+", "-", g.lower()).strip("-")
+            cards += (f'<section class="pane grp" data-pane="{_esc(pid)}">'
+                      f'<button class="paneh" onclick="togglePane(\'{_esc(pid)}\')">'
+                      f'<span class=pt>{_esc(g)}</span><span class=pdot></span>'
+                      f'<span class=pchev>&#9662;</span></button>'
+                      f'<div class=pbody><div class=cards>')
             cur = g
-        cards += _card(r, r.get("agent") in capable)
+        cards += _smart_card(r) if r["type"] == "smart" else _card(r, r.get("agent") in capable)
     if cur is not None:
-        cards += "</div>"
+        cards += "</div></div></section>"
 
     leg = ""
     for term, desc in LEGEND:
@@ -1286,9 +1505,12 @@ def index():
     <div class=rail>
       <div class=gauge-wrap><canvas id=gauge width=300 height=300></canvas>
         <div class=gauge-cap>Busiest pool<span>{glabel} · {gpct}% used</span></div></div>
-      <div class=railsec><h3>Coverage gaps</h3>{gaps_html}</div>
+      <div class=railsec><h3>Coverage gaps</h3><div id=gapsbody>{gaps_html}</div></div>
     </div>
-    <div class=main>{cards}<div id=actlog><span class=amsg>idle - actions stream here.</span></div></div>
+    <div class=main>{cards}
+      <div class="pane actpane" data-pane=acts>
+        <button class=paneh onclick="togglePane('acts')"><span class=pt>Activity</span><span class=pcount id=actcount></span><span class=pdot></span><span class=pchev>&#9662;</span></button>
+        <div class=pbody><div id=actlog><span class=amsg>idle - actions stream here.</span></div></div></div></div>
     <div class=legend><h3>Metric key</h3><dl class=lg>{leg}</dl></div>
   </div>
   <script>var GP={{pct:{gpct},label:"{glabel}"}};</script>""")
