@@ -22,22 +22,36 @@ for r in "${BORG_REPOS[@]}"; do
   echo "  opened: $r"
 done
 
-echo "== backupninja cron: umask 0027 so NEW nightly segments are group-readable, not root-only =="
-# The setgid dirs above fix the GROUP of new files, but root's default umask (0077) still writes
-# them mode 0600 -> the non-root agent can't read them and every borg repo goes UNKNOWN after the
-# next run. Set umask 0027 on the invocation so root creates 0640 (group-readable) files.
-CRON=/etc/cron.d/backupninja
-if [ -f "$CRON" ]; then
-  if grep -q 'umask' "$CRON"; then
-    echo "  already sets umask: $CRON"
-  else
-    cp -a "$CRON" "$CRON.bm-bak"
-    sed -i -E '/backupninja/ s#(^[0-9*/, ]+root )#\1umask 0027; #' "$CRON"
-    grep -q 'umask 0027' "$CRON" && echo "  applied umask 0027 (backup: $CRON.bm-bak)" \
-      || { echo "  WARN: could not patch $CRON automatically - add 'umask 0027;' after 'root' by hand"; cp -a "$CRON.bm-bak" "$CRON"; }
+echo "== borg handlers: 'create_options = --umask 0027' so nightly segments are group-readable =="
+# WHY a shell/cron umask does NOT work here: /usr/sbin/backupninja hard-sets 'umask 077', and borg's
+# own default is --umask 0077 -> segment files land 0600 (no group read) regardless of the shell umask,
+# so every repo goes UNKNOWN after the next run. The real, one-time fix is borg's OWN --umask, set once
+# per handler. Then every future run (root's EXISTING backupninja cron) writes 0640 group-readable files
+# and the unprivileged agent reads them with NO runtime sudo, forever. Install-time only; sudoless after.
+shopt -s nullglob
+for h in /etc/backup.d/*.borg; do
+  if grep -Eq '^[[:space:]]*create_options[[:space:]]*=.*--umask' "$h"; then
+    echo "  already sets --umask: $h"; continue
   fi
-else
-  echo "  no $CRON - if backupninja runs via systemd, add 'UMask=0027' to its unit instead"
+  cp -a "$h" "$h.bm-bak"
+  if grep -Eq '^[[:space:]]*create_options[[:space:]]*=' "$h"; then
+    sed -i -E 's#^([[:space:]]*create_options[[:space:]]*=[[:space:]]*)#\1--umask 0027 #' "$h"
+  else
+    printf '\n# backup-monitor: group-readable repo files so the unprivileged monitor can read them\ncreate_options = --umask 0027\n' >> "$h"
+  fi
+  if grep -Eq '^[[:space:]]*create_options[[:space:]]*=.*--umask 0027' "$h"; then
+    echo "  patched: $h (backup: $h.bm-bak)"
+  else
+    echo "  WARN: could not patch $h - add 'create_options = --umask 0027' by hand"; cp -a "$h.bm-bak" "$h"
+  fi
+done
+shopt -u nullglob
+# undo the old, INEFFECTIVE cron-umask patch a prior version of this script may have added
+CRON=/etc/cron.d/backupninja
+if [ -f "$CRON" ] && grep -q 'umask 0027; ' "$CRON"; then
+  cp -a "$CRON" "$CRON.bm-bak"
+  sed -i -E 's#umask 0027; ##' "$CRON"
+  echo "  removed the old no-op cron umask patch from $CRON (backup: $CRON.bm-bak)"
 fi
 
 echo "== backupninja reports/log: adm-readable =="
@@ -72,9 +86,12 @@ cat <<EOF
 DONE. Notes:
   * Log out/in (or 'exec su - $U') for group membership to take effect in your shell.
   * Mail: uses a local SMTP relay on 127.0.0.1:2500 (MAIL_MODE=relay) - no msmtprc widening.
-  * borg repos: this run chmod'd EXISTING files group-readable and set 'umask 0027' in
-    /etc/cron.d/backupninja so FUTURE nightly segments stay group-readable. Verify after the
-    next run (restore-points should be non-zero on the dashboard):
+  * borg repos: this run chmod'd EXISTING files group-readable AND set 'create_options = --umask
+    0027' in each /etc/backup.d/*.borg so FUTURE nightly segments are written 0640 (group-readable).
+    That's a ONE-TIME setup change - the agent then reads borg with NO runtime sudo, and it won't
+    regress every night. Verify after the next backupninja run (restore-points non-zero on the
+    dashboard):
       sudo -u $U borg info --bypass-lock /mnt/backups/home | head
-  * Re-run this script any time the borg repos show UNKNOWN - it re-opens new root-only files.
+  * No cron and no per-night chmod: the --umask fix is permanent once set. If a repo ever still
+    shows UNKNOWN, it's leftover 0600 files from before the fix - re-run this once to chmod them.
 EOF
