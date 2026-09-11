@@ -34,10 +34,15 @@ for h in /etc/backup.d/*.borg; do
     echo "  already sets --umask: $h"; continue
   fi
   cp -a "$h" "$h.bm-bak"
+  # NB: the backupninja borg handler reads create_options from the [source] section
+  # (setsection source -> getconf create_options), so it MUST live under [source], not EOF.
   if grep -Eq '^[[:space:]]*create_options[[:space:]]*=' "$h"; then
     sed -i -E 's#^([[:space:]]*create_options[[:space:]]*=[[:space:]]*)#\1--umask 0027 #' "$h"
+  elif grep -Eq '^[[:space:]]*\[source\]' "$h"; then
+    sed -i -E '/^[[:space:]]*\[source\]/a create_options = --umask 0027   # backup-monitor: group-readable segments' "$h"
   else
-    printf '\n# backup-monitor: group-readable repo files so the unprivileged monitor can read them\ncreate_options = --umask 0027\n' >> "$h"
+    echo "  WARN: no [source] section in $h - add 'create_options = --umask 0027' under [source] by hand"
+    rm -f "$h.bm-bak"; continue
   fi
   if grep -Eq '^[[:space:]]*create_options[[:space:]]*=.*--umask 0027' "$h"; then
     echo "  patched: $h (backup: $h.bm-bak)"
