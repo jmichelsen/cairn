@@ -1,4 +1,6 @@
-# backup-monitor
+# Cairn
+
+*A cairn marks the safe path and endures the weather - so you always know your way back to your data.*
 
 One dashboard for the health of every backup on a ZFS host - **ZFS replication lag, pool
 health/capacity/scrub, borg repos, backupninja handlers, and SMART** - with email + Gotify

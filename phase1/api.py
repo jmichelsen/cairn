@@ -20,7 +20,7 @@ import sys as _sys
 _sys.path.insert(0, str(HERE))
 import collector as _cmd   # PURE build_command, for action PREVIEWS only; the API never executes it
 DAY = 86400
-app = FastAPI(title="backup-monitor", version="1.0")
+app = FastAPI(title="Cairn", version="1.0")
 
 SEV_ORDER = {"CRIT": 0, "WARN": 1, "UNKNOWN": 2, "OK": 3}
 SEVCLS = {"CRIT": "crit", "WARN": "warn", "UNKNOWN": "unk", "OK": "ok"}  # severity -> css class
@@ -104,10 +104,10 @@ async def auth_gate(request: Request, call_next):
         return RedirectResponse("/login", status_code=302)
     return JSONResponse({"detail": "unauthorized"}, status_code=401)
 
-LOGIN_HTML = """<!doctype html><meta charset=utf-8><title>backup-monitor login</title>
+LOGIN_HTML = """<!doctype html><meta charset=utf-8><title>Cairn login</title>
 <style>body{font:15px system-ui,sans-serif;display:grid;place-items:center;height:90vh}
 form{display:grid;gap:.6rem;width:280px} input,button{padding:.5rem;font-size:1rem}</style>
-<form method=post action=/login><h2>backup-monitor</h2>
+<form method=post action=/login><h2>Cairn</h2>
 <input type=password name=token placeholder="admin token" autofocus>
 <button>Sign in</button>{err}</form>"""
 
@@ -1563,7 +1563,7 @@ def _hero_steel(rows, h, gpct, glabel):
 def _shell(inner):
     return (f"<!doctype html><html lang=en><head><meta charset=utf-8>"
             f"<meta name=viewport content=\"width=device-width,initial-scale=1\">"
-            f"<title>backup-monitor</title>{FONTS}{PAGE_STYLE}</head><body>"
+            f"<title>Cairn</title>{FONTS}{PAGE_STYLE}</head><body>"
             f"<div class=panel>{inner}"
             f"<form id=lo method=post action=/logout hidden></form></div>{PAGE_SCRIPT}</body></html>")
 
@@ -1577,7 +1577,7 @@ def index():
     h = health()
     if not rows:
         return _shell(
-            '<div class=hero><div class=hero-top><h2>backup-monitor</h2>'
+            '<div class=hero><div class=hero-top><h2>Cairn</h2>'
             '<span class="verd unk">No data yet</span></div>'
             '<p class=why style="margin-top:14px;max-width:60ch">No agent has reported yet. Start an '
             'agent (see AGENT.md) - it enrolls, reads this host\'s ZFS / borg / backupninja, and '
@@ -1646,7 +1646,7 @@ def index():
         '<span class=pdot></span><span class=pchev>&#9662;</span></button>'
         f'<div class=pbody><div class=cards id=agentcards>{agents_cards}</div></div></section>')
     return _shell(f"""
-  <div class=topbar2><h2 class=applogo>backup-monitor</h2>
+  <div class=topbar2><h2 class=applogo>Cairn</h2>
     <div class=seg role=tablist>
       <button data-h=steel onclick="setHero('steel')">Summary</button>
       <button data-h=heat onclick="setHero('heat')">14-day fleet</button></div>
