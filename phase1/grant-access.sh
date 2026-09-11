@@ -14,9 +14,24 @@ U="${CAIRN_USER:-${SUDO_USER:-$(id -un)}}"
 # --smart-detail (or SMART_DETAIL=1) to also install the scoped read-only smartctl sudo wrapper.
 SMART_DETAIL="${SMART_DETAIL:-0}"
 for a in "$@"; do [ "$a" = "--smart-detail" ] && SMART_DETAIL=1; done
-BORG_REPOS=(/mnt/backups/docker_data /mnt/backups/home /mnt/backups/var /srv/borg-pre)
 BN_REPORTS=/var/lib/backupninja/reports
 OPT=/opt/cairn/phase1
+
+# Borg repos to open for group-read. Set CAIRN_BORG_REPOS="<path> <path> ..." to list them
+# explicitly; otherwise we auto-discover local repo paths from the backupninja handlers in
+# /etc/backup.d/*.borg (the 'repository'/'BORG_REPO'/'directory' lines). Remote (ssh://) repos and
+# any path that doesn't exist locally are skipped.
+if [ -n "${CAIRN_BORG_REPOS:-}" ]; then
+  read -r -a BORG_REPOS <<< "$CAIRN_BORG_REPOS"
+else
+  BORG_REPOS=()
+  shopt -s nullglob
+  for h in /etc/backup.d/*.borg; do
+    while IFS= read -r p; do
+      [ -n "$p" ] && [ "${p#ssh://}" = "$p" ] && BORG_REPOS+=("$p")
+    done < <(sed -nE 's/^[[:space:]]*(repository|BORG_REPO|directory)[[:space:]]*=[[:space:]]*//p' "$h" | tr -d '"'"'"'')
+  done
+fi
 
 echo "== groups (already members here, but idempotent) =="
 getent group backup >/dev/null || groupadd -f backup
@@ -107,13 +122,13 @@ cat <<EOF
 
 DONE. Notes:
   * Log out/in (or 'exec su - $U') for group membership to take effect in your shell.
-  * Mail: uses a local SMTP relay on 127.0.0.1:2500 (MAIL_MODE=relay) - no msmtprc widening.
+  * Mail: uses a local SMTP relay (e.g. msmtpd on 127.0.0.1:2500, MAIL_MODE=relay) - no msmtprc widening.
   * borg repos: this run chmod'd EXISTING files group-readable AND set 'create_options = --umask
     0027' in each /etc/backup.d/*.borg so FUTURE nightly segments are written 0640 (group-readable).
     That's a ONE-TIME setup change - the agent then reads borg with NO runtime sudo, and it won't
     regress every night. Verify after the next backupninja run (restore-points non-zero on the
     dashboard):
-      sudo -u $U borg info --bypass-lock /mnt/backups/home | head
+      sudo -u $U borg info --bypass-lock <one-of-your-borg-repos> | head
   * No cron and no per-night chmod: the --umask fix is permanent once set. If a repo ever still
     shows UNKNOWN, it's leftover 0600 files from before the fix - re-run this once to chmod them.
 EOF

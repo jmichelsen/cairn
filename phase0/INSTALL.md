@@ -7,13 +7,13 @@ All commands are run **by you** (need root). One command per block.
 
 ## 1. Create the Gotify application token
 
-Create an application token, either:
+Skip this section if you aren't using Gotify. Otherwise create an application token, either:
 
 **UI:** Gotify → Apps → Create Application → name `cairn` → copy the token.
 
-**or CLI:**
+**or CLI** (replace `<gotify-host>` and the admin credentials with your own):
 ```
-curl -s -u admin:admin -H 'Content-Type: application/json' -d '{"name":"cairn","description":"backup alerts"}' http://gotify.example.com/application
+curl -s -u admin:admin -H 'Content-Type: application/json' -d '{"name":"cairn","description":"backup alerts"}' http://<gotify-host>/application
 ```
 Copy the `"token"` value from the JSON response. (Change the admin password afterward if it's still `admin`.)
 
@@ -35,13 +35,15 @@ Put the Gotify token in the env file (and confirm the email/URL):
 ```
 sudo vi /etc/cairn/cairn.env
 ```
-Set `GOTIFY_TOKEN=` to the token from step 1. `NOTIFY_EMAIL=root` routes root via `/etc/aliases`.
+Set `GOTIFY_TOKEN=` to the token from step 1 (or leave it blank to skip Gotify). If you set
+`NOTIFY_EMAIL=root`, mail routes wherever your system's `/etc/aliases` points `root` (use a real
+address if you have no such alias, or if you send through a relay that doesn't resolve aliases).
 
 ## 4. Test the notification path itself (before trusting it)
 
-Mail defaults to `MAIL_MODE=relay` - through a local SMTP relay (`127.0.0.1:2500`), which
-needs no creds or root, so this works as your user. `NOTIFY_EMAIL` must be a **real address**
-(the relay doesn't resolve `/etc/aliases`).
+With `MAIL_MODE=relay` (mail through a local SMTP relay such as an `msmtpd` sidecar on
+`127.0.0.1:2500`) no creds or root are needed, so this works as your user. When using a plain
+relay, `NOTIFY_EMAIL` must be a **real address** (a relay doesn't resolve `/etc/aliases`).
 
 ```
 CAIRN_ENV=/etc/cairn/cairn.env /opt/cairn/phase0/notify.sh CRIT "cairn test" "If you got this by email AND Gotify, the alert path works."
@@ -54,8 +56,8 @@ You should get an email **and** a Gotify push. If only email arrives, re-check `
 ```
 sudo CAIRN_ENV=/etc/cairn/cairn.env /opt/cairn/phase0/check_backups.sh; echo "exit=$?"
 ```
-Review `/var/log/cairn.log`. It may flag a pool that is nearly full
-or overdue for a scrub.
+Review `/var/log/cairn.log`. Expect it to flag any real problems it finds - a pool that's
+nearly full, or one that's overdue for a scrub - and stay quiet otherwise.
 
 ## 6. Install the timer
 

@@ -183,7 +183,7 @@ EOF
   else ok "targets.yaml present"; fi
 
   # ---- public URL (for a future vault to reach this home) ----
-  [ -z "$API_URL" ] && ask API_URL "public/Tailscale URL a remote vault would use to reach this home (blank = LAN only)" ""
+  [ -z "$API_URL" ] && ask API_URL "public/VPN URL a remote vault would use to reach this home (blank = LAN only)" ""
 
   # ---- control plane ----
   say "Building + starting the control plane (docker compose up -d api)"
@@ -229,7 +229,7 @@ EOF
 provision_vault() {
   local NAME SECRET BUNDLE="$HERE/vault-install.conf"
   ask NAME "a name for the vault agent" "vault"
-  [ -z "$API_URL" ] && ask API_URL "URL the vault will use to reach THIS home (e.g. https://backups.example.com or the Tailscale addr)" ""
+  [ -z "$API_URL" ] && ask API_URL "URL the vault will use to reach THIS home (e.g. https://backups.example.com or a VPN address)" ""
   [ -z "$API_URL" ] && { warn "no reachable URL for home - skipping vault provisioning (set one and re-run)"; return; }
   say "Minting a per-vault enrollment secret (hash-at-rest; shown once)"
   SECRET="$(dc exec -T api python3 /app/phase1/cairn-token.py mint --role agent --label "$NAME" 2>/dev/null | awk '/^SECRET:/{print $2}')"

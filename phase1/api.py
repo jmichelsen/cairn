@@ -270,7 +270,7 @@ def scorecard():
         src_pool = (r["source"] or "").split("/")[0]
         dst_pool = (r["dest"] or "").split("/")[0]
         pools = {p for p in (src_pool, dst_pool) if p}
-        # location of dest: backup today = onsite-secondary; a real vault would be 'offsite'
+        # location of dest: a same-site secondary counts as onsite; an off-site vault = 'offsite'
         offsite = 1 if (r.get("location") == "offsite") else 0
         onsite = len(pools) - offsite
         copies = len(pools)
@@ -283,8 +283,8 @@ def scorecard():
         cards.append(card)
     overall = all(c["pass_321"] for c in cards) if cards else False
     return {"pass": overall, "cards": cards,
-            "explain": "3-2-1 = >=3 copies, >=2 media, >=1 off-site. backup is same-site today; "
-                       "off-site column stays 0 until the vault is added as a dataset target."}
+            "explain": "3-2-1 = >=3 copies, >=2 media, >=1 off-site. A same-site secondary doesn't "
+                       "count; the off-site column stays 0 until an off-site vault is a dataset target."}
 
 @app.get("/api/v1/backup/coverage-gap")
 def coverage_gap():

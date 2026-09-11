@@ -2,8 +2,8 @@
 
 The collector runs as **`youruser`**, not root. A one-time grant script opens *read* access to
 the root-owned bits (borg repos, backupninja reports) and installs a scoped `smartctl` sudoers
-rule. Backups themselves keep running as root (unchanged). Mail goes through the existing
-a local SMTP relay (`127.0.0.1:2500`) - no credentials, no root, no widening `/etc/msmtprc`.
+rule. Backups themselves keep running as root (unchanged). Mail goes through a local SMTP relay
+(e.g. an `msmtpd` sidecar on `127.0.0.1:2500`) - no credentials, no root, no widening `/etc/msmtprc`.
 
 Do Phase 0 (`../phase0/INSTALL.md`) first - Phase 1 reuses its `notify.sh` + env file.
 
@@ -18,13 +18,13 @@ This: confirms you're in `backup`+`adm` (you already are), group-reads the borg 
 
 Then log out/in (or `exec su - youruser`) so the groups apply, and sanity-check:
 ```
-sudo -u youruser borg info --bypass-lock /mnt/backups/home | head
+sudo -u youruser borg info --bypass-lock <one-of-your-borg-repos> | head
 ```
 
 ## 2. Install the collector
 
 ```
-sudo mkdir -p /opt/cairn/phase1 && sudo cp ~/cairn/phase1/{collector.py,schema.sql,smart-probe.sh} /opt/cairn/phase1/ && sudo cp ~/cairn/targets.yaml /opt/cairn/ && sudo chmod 755 /opt/cairn/phase1/*.py /opt/cairn/phase1/*.sh
+sudo mkdir -p /opt/cairn/phase1 && sudo cp ~/cairn/phase1/{collector.py,schema.sql,smart-probe.sh} /opt/cairn/phase1/ && sudo cp ~/cairn/config/targets.yaml /opt/cairn/ && sudo chmod 755 /opt/cairn/phase1/*.py /opt/cairn/phase1/*.sh
 ```
 
 Point `CAIRN_TARGETS` at the installed copy in the env file, then test once as your user:
@@ -54,9 +54,9 @@ Phase 0's `check_backups.sh` and the collector both alert via `notify.sh`. Choos
 
 ## 5. The API / dashboard
 
-Containerize under `docker/` (behind your own reverse proxy) - ships its own deps
-(`requirements.txt`), so nothing lands on the host Python. Quick host smoke-test needs FastAPI in a
-venv:
+Run it as a container (front it with your own reverse proxy if you expose it) - it ships its own
+deps (`requirements.txt`), so nothing lands on the host Python. Quick host smoke-test needs FastAPI
+in a venv:
 ```
 python3 -m venv /tmp/bmvenv && /tmp/bmvenv/bin/pip install -r ~/cairn/phase1/requirements.txt
 ```
@@ -65,8 +65,9 @@ CAIRN_DB=/var/lib/cairn/cairn.db CAIRN_API_TOKEN=$(openssl rand -hex 32) /tmp/bm
 ```
 Open `http://localhost:8929/` (HTML dashboard) and `curl -s localhost:8929/api/v1/backup/health | jq`.
 
-Public control path (Phase 3): expose only `/api/v1/backup/{report,intents}` at
-`your-host/api/v1/backup` with the per-vault token; keep the read-only views private.
+Public control path (Phase 3): expose only `/api/v1/backup/{report,intents}` at your public
+hostname (e.g. `backups.example.com/api/v1/backup`) with the per-vault token; keep the read-only
+views private.
 
 ---
 

@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS targets (
   source        TEXT,
   dest          TEXT,
   tier          TEXT,                   -- A = irreplaceable
-  transport     TEXT,                   -- local | tailscale-pull | n/a
+  transport     TEXT,                   -- local | vpn-pull | n/a
   location      TEXT,                   -- onsite | onsite-secondary | offsite
   cadence       TEXT,
   encrypted     INTEGER DEFAULT 0,

@@ -334,8 +334,8 @@ def adapter_borg(t, defaults, now):
 
 def adapter_kernel_errors(t, defaults, now):
     """Scan the recent kernel log for disk I/O / link-reset / HBA-storm errors. This is the ONLY
-    durable evidence when ZFS self-heals a transient (0B resilver, counters cleared) - exactly the
-    2026-09-08 sdi/tank event. Source: `journalctl -k` if available (host agent), else a plain-text
+    durable evidence when ZFS self-heals a transient (0B resilver, counters cleared) - e.g. a brief
+    disk link reset that leaves the pool ONLINE. Source: `journalctl -k` if available (host agent), else a plain-text
     kernel log (rsyslog /var/log/kern.log or /var/log/syslog) - mount it ro into a container."""
     win = int(t.get("window_h", 24))
     lines, source = None, None

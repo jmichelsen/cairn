@@ -55,9 +55,8 @@ services:
       - /dev/zfs:/dev/zfs                       # ZFS reads (unprivileged)
     volumes:
       - ./config:/config:ro
-      # borg repos + backupninja, read-only (edit to your paths; omit if unused):
-      - /mnt/backups:/mnt/backups:ro
-      - /srv/borg-pre:/srv/borg-pre:ro
+      # borg repos + backupninja, read-only (EDIT these to your own repo paths; omit if unused):
+      - /path/to/your/borg/repos:/path/to/your/borg/repos:ro
       - /var/log/backupninja.log:/var/log/backupninja.log:ro
       - /var/lib/backupninja/reports:/var/lib/backupninja/reports:ro
       # kernel disk/link error watch (rsyslog plain-text log): mount it ro so the RO container

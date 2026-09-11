@@ -3,11 +3,12 @@
 #   - snapshot freshness  : sanoid --monitor-snapshots (policy-driven)
 #   - pool health         : zpool health != ONLINE  -> CRIT
 #   - pool capacity        : >= cap_crit -> CRIT, >= cap_warn -> WARN
-#   - scrub age            : per-pool cadence (tank weekly, others monthly)
+#   - scrub age            : per-pool cadence (weekly for pools in SCRUB_WEEKLY_POOLS, else monthly)
 # Emits via notify.sh (email always for WARN/CRIT, Gotify on CRIT), with per-finding
 # cooldown. Pings a uptime-kuma push URL when the run completes with no CRIT (dead-man).
 #
-# Note: 'otherpool' appears in sanoid.conf but is not imported on this host; its noise is filtered.
+# SANOID_IGNORE: extra regex of sanoid --monitor lines to filter (e.g. a dataset that lives in
+# sanoid.conf but isn't imported on this host). Combined with the built-in "does not exist" filter.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -29,9 +30,10 @@ emit(){ # emit SEV KEY TITLE BODY
   "$NOTIFY" "$sev" "$title" "$body" "$key" || true
 }
 
-# --- 1. snapshot freshness via sanoid (filter otherpool-not-here noise) ---
+# --- 1. snapshot freshness via sanoid (filter not-imported-here noise) ---
 if command -v sanoid >/dev/null 2>&1; then
-  snap_out="$(sanoid --monitor-snapshots 2>&1 | grep -viE "otherpool|does not exist")"
+  snap_filter="does not exist${SANOID_IGNORE:+|$SANOID_IGNORE}"
+  snap_out="$(sanoid --monitor-snapshots 2>&1 | grep -viE "$snap_filter")"
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     case "$line" in
@@ -61,12 +63,15 @@ while IFS=$'\t' read -r name health cap size alloc free; do
 done < <(zpool list -Hp -o name,health,capacity,size,alloc,free 2>/dev/null)
 
 # --- 4. scrub age ---
+# SCRUB_WEEKLY_POOLS: space/comma-separated pools you scrub weekly (WARN>10d/CRIT>24d);
+# everything else is treated as monthly (WARN>40d/CRIT>70d).
 now=$(date +%s)
+WEEKLY=" ${SCRUB_WEEKLY_POOLS:-} "; WEEKLY="${WEEKLY//,/ }"
 for pool in $(zpool list -H -o name 2>/dev/null); do
   excluded "$pool" && continue
-  case "$pool" in
-    tank)  sw=10; sc=24 ;;              # weekly
-    *)    sw=40; sc=70 ;;              # monthly
+  case "$WEEKLY" in
+    *" $pool "*) sw=10; sc=24 ;;       # weekly
+    *)           sw=40; sc=70 ;;       # monthly
   esac
   scan="$(zpool status "$pool" 2>/dev/null | grep -E 'scan:')"
   case "$scan" in

@@ -117,15 +117,15 @@ phase1/  schema.sql             SQLite schema (targets, status, intents)
 - **Runs as `youruser` (least-privilege, default).** `grant-access.sh` opens *read* access to
   the root-owned bits: `backup` group for the borg repos (backups keep running as root;
   `encryption=none`), `adm` for backupninja log/reports, and a **scoped `smartctl` sudoers**
-  wrapper for SMART. Backups themselves are unchanged. (You're already in `backup`+`adm`.) Root
-  mode is a documented fallback.
+  wrapper for SMART. Backups themselves are unchanged. (The grant script adds you to `backup`+`adm`
+  if needed.) Root mode is a documented fallback.
 - **Do NOT add your user to the `disk` group** for SMART - it grants raw read/write to every
   block device (read any FS bypassing perms, wipe pools). The scoped `smartctl` wrapper is the
   safe equivalent.
-- **Mail via a local SMTP relay** (`127.0.0.1:2500`, `MAIL_MODE=relay`) - no creds, no
-  root, no widening `/etc/msmtprc`. `NOTIFY_EMAIL` must be a real address (relay ignores
-  `/etc/aliases`).
+- **Mail via a local SMTP relay** (e.g. an `msmtpd` sidecar on `127.0.0.1:2500`, `MAIL_MODE=relay`)
+  - no creds, no root, no widening `/etc/msmtprc`. With a plain relay, `NOTIFY_EMAIL` must be a real
+  address (the relay ignores `/etc/aliases`).
 - **Read-only against all backups.** No prune/scrub/restore here; those are Phase-3 actions
-  behind the intent queue. tank stays read-only (design §3). Every unreadable signal degrades to
+  behind the intent queue. Your source pool stays read-only. Every unreadable signal degrades to
   `UNKNOWN`, never crashes.
 - Phase 1 reuses phase0's `notify.sh` + env file - nothing in Phase 0 is throwaway.

@@ -289,12 +289,12 @@ body[data-view=panel]   #panel{display:block}
 <div class="frame">
   <div class="frame-head">
     <h1><span class="dot"></span>cairn - design directions</h1>
-    <p>seed 4070831425505989125 · sample data, three treatments</p>
+    <p>sample data, three treatments</p>
   </div>
-  <p class="frame-note">All three render a sample fleet - the <b>example resilver</b>,
-    the borg repos, and the off-site vault - so you're comparing look, not content. Every direction
-    carries the <b>metric legend</b> at the bottom. Semantic status color (OK / WARN / CRIT) is kept
-    separate from the steel-blue accent so trouble reads at a glance.</p>
+  <p class="frame-note">All three render the same <b>sample fleet</b> - a handful of pools, some ZFS
+    replication, borg repos, backupninja jobs, and an off-site vault - so you're comparing look, not
+    content. Every direction carries the <b>metric legend</b> at the bottom. Semantic status color
+    (OK / WARN / CRIT) is kept separate from the steel-blue accent so trouble reads at a glance.</p>
 
   <div class="tabs" role="tablist">
     <button data-t="steel"   onclick="view('steel')">Steel<span>light · recommended</span></button>
@@ -314,32 +314,32 @@ body[data-view=panel]   #panel{display:block}
 // hist = last 14 days worst-severity per day: 0 ok / 1 warn / 2 crit / 3 unknown
 const H_OK=Array(14).fill(0);
 const T = [
-  {g:"Primary pools",n:"tank",k:"pool",src:"mirror · 4×disk",sev:"warn",m:{cap:78},why:"resilvered 16h ago after sdi replaced · 0 data errors",hist:[0,0,0,0,0,0,0,0,0,0,0,3,2,1]},
+  {g:"Primary pools",n:"tank",k:"pool",src:"mirror · 4 disk",sev:"warn",m:{cap:78},why:"resilvered 16h ago after a disk replaced · 0 data errors",hist:[0,0,0,0,0,0,0,0,0,0,0,3,2,1]},
   {g:"Primary pools",n:"media",k:"pool",src:"raidz1 · 3 disk",sev:"ok",m:{cap:61},why:"scrub clean · 0 errors · 3d ago",hist:H_OK},
   {g:"Primary pools",n:"crypt",k:"pool",src:"encrypted",sev:"ok",m:{cap:44},why:"scrub clean · key loaded",hist:H_OK,enc:1},
   {g:"Primary pools",n:"backup",k:"pool",src:"on-site secondary",sev:"ok",m:{cap:82},why:"replication destination · scrub clean",hist:H_OK},
 
-  {g:"Replication (ZFS)",n:"tank/Pics",k:"repl",src:"→ backup/Pics",sev:"ok",m:{lag:6},why:"snapshots current · 6h behind source",hist:H_OK,tier:"A"},
-  {g:"Replication (ZFS)",n:"tank/docs",k:"repl",src:"→ backup/docs",sev:"ok",m:{lag:6},why:"client archive · in sync",hist:H_OK,tier:"A"},
-  {g:"Replication (ZFS)",n:"tank/photos",k:"repl",src:"→ backup/photos",sev:"warn",m:{lag:41},why:"no snapshot in 41h · not yet on off-site vault",hist:[0,0,0,0,0,0,0,0,0,1,1,1,1,1],tier:"A"},
+  {g:"Replication (ZFS)",n:"tank/photos",k:"repl",src:"→ backup/photos",sev:"ok",m:{lag:6},why:"snapshots current · 6h behind source",hist:H_OK,tier:"A"},
+  {g:"Replication (ZFS)",n:"tank/docs",k:"repl",src:"→ backup/docs",sev:"ok",m:{lag:6},why:"in sync",hist:H_OK,tier:"A"},
+  {g:"Replication (ZFS)",n:"tank/media",k:"repl",src:"→ backup/media",sev:"warn",m:{lag:41},why:"no snapshot in 41h · not yet on off-site vault",hist:[0,0,0,0,0,0,0,0,0,1,1,1,1,1],tier:"A"},
   {g:"Replication (ZFS)",n:"laptop",k:"repl",src:"→ vault (offsite)",sev:"ok",m:{lag:11},why:"raw-send encrypted · vault can't decrypt",hist:H_OK,tier:"A",enc:1,off:1},
 
-  {g:"Off-site vault",n:"vault",k:"pool",src:"remote host · Tailscale",sev:"ok",m:{cap:39},why:"pull replica · last contact 11m ago",hist:H_OK,enc:1,off:1},
+  {g:"Off-site vault",n:"vault",k:"pool",src:"remote · VPN pull",sev:"ok",m:{cap:39},why:"pull replica · last contact 11m ago",hist:H_OK,enc:1,off:1},
 
-  {g:"Archive repos (borg)",n:"docker_data",k:"borg",src:"/mnt/backups",sev:"ok",m:{arch:31,ratio:2.1},why:"nightly · newest archive 4h ago",hist:H_OK},
-  {g:"Archive repos (borg)",n:"borg-pre",k:"borg",src:"/srv/borg-pre",sev:"ok",m:{arch:216,ratio:1.8},why:"pre-prune safety net · verified",hist:H_OK},
+  {g:"Archive repos (borg)",n:"docker_data",k:"borg",src:"borg repo",sev:"ok",m:{arch:31,ratio:2.1},why:"nightly · newest archive 4h ago",hist:H_OK},
+  {g:"Archive repos (borg)",n:"system",k:"borg",src:"borg repo",sev:"ok",m:{arch:216,ratio:1.8},why:"pre-prune safety net · verified",hist:H_OK},
 
   {g:"Scheduled jobs (backupninja)",n:"mariadb dump",k:"ninja",src:"mysql handler",sev:"ok",m:{},why:"dump ok 02:14 · 1.2 GB",hist:H_OK},
   {g:"Scheduled jobs (backupninja)",n:"/etc + /var",k:"ninja",src:"rsync handler",sev:"ok",m:{},why:"completed 02:31",hist:H_OK},
 
-  {g:"Hardware watch",n:"disk sdi",k:"kernel",src:"disk · tank",sev:"warn",m:{},why:"2 link/CRC errors since 09-08 · check HBA lane / cable",hist:[0,0,0,0,0,0,0,0,0,0,0,0,1,1]},
+  {g:"Hardware watch",n:"disk sdb",k:"kernel",src:"member of tank",sev:"warn",m:{},why:"2 link/CRC errors today · check HBA lane / cable",hist:[0,0,0,0,0,0,0,0,0,0,0,0,1,1]},
 ];
 const COUNTS={ok:0,warn:0,crit:0,unk:0};
 T.forEach(t=>COUNTS[t.sev]++);
 const WORST = COUNTS.crit?"crit":COUNTS.warn?"warn":COUNTS.unk?"unk":"ok";
 const SEVNAME={ok:"OK",warn:"WARN",crit:"CRIT",unk:"UNKNOWN"};
 const KINDLABEL={pool:"pool",repl:"repl",borg:"borg",ninja:"job",kernel:"disk"};
-const NOW="2026-09-09 14:32";
+const NOW="2026-01-15 14:32";
 
 /* metric legend definitions (shared) */
 const LEG=[
@@ -371,8 +371,8 @@ function renderSteel(){
   const chips=['ok','warn','crit','unk'].map(s=>`<div class="chip"><i style="background:${s==='unk'?'var(--unk)':SEVSW[s]}"></i><b>${COUNTS[s]}</b> ${SEVNAME[s]}</div>`).join('');
   // tiles
   const cap=`<div class="tile warnt"><div class="lbl">Capacity - busiest pool</div><div class="big num">82%</div><div class="sub">backup · tank 78% · headroom tightening</div><div class="meter"><i style="width:82%;background:linear-gradient(90deg,#23608f,#bd7a1e)"></i></div></div>`;
-  const rp=`<div class="tile good"><div class="lbl">Restore points</div><div class="big num">247</div><div class="sub">31 borg + 216 borg-pre archives · newest 4h ago</div></div>`;
-  const s321=`<div class="tile"><div class="lbl">3-2-1 coverage</div><div class="big" style="color:var(--warn)">3 / 4</div><div class="sub">Tier-A datasets fully protected</div><div class="pill321"><s></s><s></s><s></s><s class="off" title="tank/photos not yet off-site"></s></div></div>`;
+  const rp=`<div class="tile good"><div class="lbl">Restore points</div><div class="big num">247</div><div class="sub">31 + 216 borg archives · newest 4h ago</div></div>`;
+  const s321=`<div class="tile"><div class="lbl">3-2-1 coverage</div><div class="big" style="color:var(--warn)">3 / 4</div><div class="sub">Tier-A datasets fully protected</div><div class="pill321"><s></s><s></s><s></s><s class="off" title="tank/media not yet off-site"></s></div></div>`;
   // grouped rows
   let groups={},order=[];
   T.forEach(t=>{if(!groups[t.g]){groups[t.g]=[];order.push(t.g)}groups[t.g].push(t)});
@@ -412,10 +412,10 @@ function renderConsole(){
       <div class="cbar"><i style="width:81%;background:var(--ok)"></i><i style="width:19%;background:var(--warn)"></i></div>
       <div class="vs">19 ok · 2 warn</div></div>
     <div class="stat"><div class="micro">Restore points</div><div class="v ok">247</div><div class="vs">borg + zfs snapshots</div></div>
-    <div class="stat"><div class="micro">Off-site (3-2-1)</div><div class="v warn">3/4</div><div class="vs">tank/photos pending</div></div>
+    <div class="stat"><div class="micro">Off-site (3-2-1)</div><div class="v warn">3/4</div><div class="vs">tank/media pending</div></div>
     <div class="railgap"><div class="micro">Coverage gaps</div>
-      <div class="gaprow"><span class="d" style="background:var(--warn)"></span><div>tank/photos<small>no off-site copy yet</small></div></div>
-      <div class="gaprow"><span class="d" style="background:var(--warn)"></span><div>disk sdi<small>link/CRC errors 09-08</small></div></div>
+      <div class="gaprow"><span class="d" style="background:var(--warn)"></span><div>tank/media<small>no off-site copy yet</small></div></div>
+      <div class="gaprow"><span class="d" style="background:var(--warn)"></span><div>disk sdb<small>link/CRC errors today</small></div></div>
     </div>`;
   let rows='';
   T.forEach(t=>{
@@ -493,8 +493,8 @@ function renderPanel(){
           <div class="gauge-wrap"><canvas id="gauge" width="300" height="300"></canvas>
             <div class="gauge-cap">Busiest pool<span>backup · 82% used</span></div></div>
           <div class="railsec"><h3>Coverage gaps</h3>
-            <div class="gap"><span class="d" style="background:var(--warn)"></span><div><b>tank/photos</b><small>Tier-A, but no off-site copy yet</small></div></div>
-            <div class="gap"><span class="d" style="background:var(--warn)"></span><div><b>disk sdi</b><small>2 link/CRC errors since 09-08</small></div></div>
+            <div class="gap"><span class="d" style="background:var(--warn)"></span><div><b>tank/media</b><small>Tier-A, but no off-site copy yet</small></div></div>
+            <div class="gap"><span class="d" style="background:var(--warn)"></span><div><b>disk sdb</b><small>2 link/CRC errors today</small></div></div>
             <div class="gap"><span class="d" style="background:var(--ok)"></span><div><b>everything else</b><small>snapshotted &amp; replicating</small></div></div>
           </div>
         </div>

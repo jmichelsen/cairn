@@ -170,15 +170,16 @@ timeout; use **Points** (instant) for the common browse and reserve search/delet
 actually need file-level history. The vault contributes recovery-point *timestamps* only
 (ciphertext at rest; file-level recovery from it means pulling a snapshot home).
 
-## Testing safely - the photos example
+## Testing safely - dry-run first
 
-photos is in sync with backup but stopped being snapshotted 2025-12-05 (not in sanoid.conf), so its
-"lag" is a snapshotting gap. To exercise the button end to end:
-1. Run the owning agent with `CAIRN_DRYRUN=1 CAIRN_CAN_EXECUTE=1` and click **photos → Replicate +snap** -
-   the result shows `[DRYRUN] would run: syncoid --no-privilege-elevation --no-stream
-   tank/yourhost/photos backup/photos` (verified).
-2. Drop `CAIRN_DRYRUN`, click again - syncoid takes a fresh snapshot, sends it to backup, lag resets.
-3. Real fix for the gap: add photos (+ laptop) to `sanoid.conf` + `syncoid.service`.
+To exercise an action button end to end without touching data:
+1. Run the owning agent with `CAIRN_DRYRUN=1 CAIRN_CAN_EXECUTE=1` and click a dataset's
+   **Replicate +snap** - the result shows the exact command it *would* run, e.g.
+   `[DRYRUN] would run: syncoid --no-privilege-elevation --no-stream pool/dataset backup/dataset`.
+2. Drop `CAIRN_DRYRUN` and click again - syncoid takes a fresh snapshot, sends it, and the lag resets.
+
+(A common cause of "lag" is a dataset that replicates fine but stopped being snapshotted - i.e. it
+isn't in `sanoid.conf` - so the real fix is to add it there and to `syncoid.service`.)
 
 ## Troubleshooting
 
@@ -186,7 +187,7 @@ photos is in sync with backup but stopped being snapshotted 2025-12-05 (not in s
 `/etc/cron.d/backupninja`); with root's default umask it writes new repo segment files mode `0600`,
 unreadable by the non-root agent - so every borg repo degrades to UNKNOWN and the restore-point
 count drops to 0 (the card's reason says so). **Fix: re-run `sudo phase1/grant-access.sh`** - it
-chmod's the existing files group-readable *and* sets `umask 0027` on the backupninja cron so future
+chmod's the existing files group-readable *and* sets `create_options = --umask 0027` in each borg handler so future
 segments stay readable. (Running the agent as root avoids this but gives up least privilege.)
 
 **Borg still UNKNOWN after grant-access.sh, yet `borg info` works in your shell.** The
@@ -198,7 +199,7 @@ user@$(id -u).service` (or reboot) - after which the `sg` wrapper is redundant.
 
 **Replicate warns `cannot destroy snapshots: permission denied`.** The replication still succeeds;
 syncoid just can't prune its old sync-snapshots on the source because the agent user lacks `destroy`
-on that pool (intentional - see the tank read-only rule). Either use **no-snap** replication (sends
+on that pool (e.g. you deliberately keep the source pool read-only). Either use **no-snap** replication (sends
 existing sanoid snapshots, creates none to prune), or delegate `destroy` *scoped to the replicated
 datasets only* (`zfs allow -u <user> destroy pool/dataset`), never pool-wide.
 
