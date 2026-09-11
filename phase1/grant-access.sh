@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# grant-access.sh - one-time setup so the collector can run as jmichelsen with NO runtime sudo.
+# grant-access.sh - one-time setup so the collector can run as youruser with NO runtime sudo.
 # Run with sudo. Idempotent. Makes NO backups run as the user (they stay root); it only grants
 # durable READ access (group membership + group-readable borg segments via borg's own --umask), so
 # the agent afterwards elevates nothing. SMART attribute-table detail is OPT-IN (--smart-detail),
@@ -84,7 +84,7 @@ if [ "$SMART_DETAIL" = 1 ]; then
   # Validate a TEMP copy first - a broken file in /etc/sudoers.d can wedge all sudo.
   SUDO_TMP="$(mktemp)"
   cat >"$SUDO_TMP" <<EOF
-# cairn: allow jmichelsen to run ONLY the read-only SMART probe wrapper as root.
+# cairn: allow youruser to run ONLY the read-only SMART probe wrapper as root.
 Defaults:$U !requiretty
 $U ALL=(root) NOPASSWD: $OPT/smart-probe.sh
 EOF

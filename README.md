@@ -21,7 +21,7 @@ the execute-capable local agent. Re-running is idempotent (your tokens/config ar
 
 ```bash
 # one-liner - self-clones, then installs:
-curl -fsSL https://raw.githubusercontent.com/jmichelsen/cairn/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/youruser/cairn/main/install.sh | bash
 ```
 or clone first:
 ```bash
@@ -105,7 +105,6 @@ Dockerfile  docker-compose.yml  entrypoint.sh   container build (api + agent)
 agent.py                        the ONE uniform agent (report + execute over HTTP)
 AGENT.md                        how to run it: local, vault, execute mode
 config/  *.example              generic env + targets templates (copy to real, edit)
-targets.yaml                    the maintainer's live target list (yourhost reference)
 phase0/  notify.sh              notifier: email (SMTP) + Gotify on CRIT, per-key cooldown
          check_backups.sh + units    standalone host alerting (Phase 0, optional)
 phase1/  schema.sql             SQLite schema (targets, status, intents)
@@ -113,18 +112,9 @@ phase1/  schema.sql             SQLite schema (targets, status, intents)
          api.py                 control plane: report ingest, intent routing, views, dashboard
 ```
 
-## Example findings
-
-- **CRIT `photos`** - a snapshot may be stale; its off-site copy is
-  also stale (not in `syncoid.service`). **Real problem.**
-- **WARN `Pics` / `docs`** - some replication lag under the current *weekly* cadence;
-  clears once cadence → nightly.
-- **3-2-1 scorecard**: Tier-A datasets can FAIL (too few copies, no off-site) - the vault isn't
-  built yet. Exactly the signal the scorecard exists to give.
-
 ## Notes
 
-- **Runs as `jmichelsen` (least-privilege, default).** `grant-access.sh` opens *read* access to
+- **Runs as `youruser` (least-privilege, default).** `grant-access.sh` opens *read* access to
   the root-owned bits: `backup` group for the borg repos (backups keep running as root;
   `encryption=none`), `adm` for backupninja log/reports, and a **scoped `smartctl` sudoers**
   wrapper for SMART. Backups themselves are unchanged. (You're already in `backup`+`adm`.) Root

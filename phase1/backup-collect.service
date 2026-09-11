@@ -1,12 +1,12 @@
 [Unit]
-Description=cairn Phase 1 collector (least-privilege, runs as jmichelsen)
+Description=cairn Phase 1 collector (least-privilege, runs as youruser)
 After=zfs.target network-online.target
 Wants=zfs.target
 
 [Service]
 Type=oneshot
-User=jmichelsen
-Group=jmichelsen
+User=youruser
+Group=youruser
 # Needs 'backup' (borg repos) + 'adm' (backupninja log/reports). smartctl via scoped sudoers.
 SupplementaryGroups=backup adm
 Environment=CAIRN_ENV=/etc/cairn/cairn.env

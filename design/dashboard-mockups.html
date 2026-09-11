@@ -326,8 +326,8 @@ const T = [
 
   {g:"Off-site vault",n:"vault",k:"pool",src:"remote host · Tailscale",sev:"ok",m:{cap:39},why:"pull replica · last contact 11m ago",hist:H_OK,enc:1,off:1},
 
-  {g:"Archive repos (borg)",n:"backups",k:"borg",src:"/mnt/backups",sev:"ok",m:{arch:31,ratio:2.1},why:"nightly · newest archive 4h ago",hist:H_OK},
-  {g:"Archive repos (borg)",n:"crypt/borg-pre",k:"borg",src:"/srv/borg-pre",sev:"ok",m:{arch:216,ratio:1.8},why:"pre-prune safety net · verified",hist:H_OK},
+  {g:"Archive repos (borg)",n:"docker_data",k:"borg",src:"/mnt/backups",sev:"ok",m:{arch:31,ratio:2.1},why:"nightly · newest archive 4h ago",hist:H_OK},
+  {g:"Archive repos (borg)",n:"borg-pre",k:"borg",src:"/srv/borg-pre",sev:"ok",m:{arch:216,ratio:1.8},why:"pre-prune safety net · verified",hist:H_OK},
 
   {g:"Scheduled jobs (backupninja)",n:"mariadb dump",k:"ninja",src:"mysql handler",sev:"ok",m:{},why:"dump ok 02:14 · 1.2 GB",hist:H_OK},
   {g:"Scheduled jobs (backupninja)",n:"/etc + /var",k:"ninja",src:"rsync handler",sev:"ok",m:{},why:"completed 02:31",hist:H_OK},

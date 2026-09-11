@@ -23,10 +23,10 @@ Copy the `"token"` value from the JSON response. (Change the admin password afte
 sudo mkdir -p /opt/cairn/phase0 /etc/cairn /var/lib/cairn
 ```
 ```
-sudo cp /home/jmichelsen/cairn/phase0/{notify.sh,check_backups.sh} /opt/cairn/phase0/ && sudo chmod 755 /opt/cairn/phase0/*.sh
+sudo cp ~/cairn/phase0/{notify.sh,check_backups.sh} /opt/cairn/phase0/ && sudo chmod 755 /opt/cairn/phase0/*.sh
 ```
 ```
-sudo cp /home/jmichelsen/cairn/cairn.env.example /etc/cairn/cairn.env && sudo chmod 640 /etc/cairn/cairn.env
+sudo cp ~/cairn/cairn.env.example /etc/cairn/cairn.env && sudo chmod 640 /etc/cairn/cairn.env
 ```
 
 ## 3. Configure
@@ -47,7 +47,7 @@ needs no creds or root, so this works as your user. `NOTIFY_EMAIL` must be a **r
 CAIRN_ENV=/etc/cairn/cairn.env /opt/cairn/phase0/notify.sh CRIT "cairn test" "If you got this by email AND Gotify, the alert path works."
 ```
 You should get an email **and** a Gotify push. If only email arrives, re-check `GOTIFY_URL`/`GOTIFY_TOKEN`.
-(The service runs as `jmichelsen`; mail via relay, snapshot/pool checks are user-readable.)
+(The service runs as `youruser`; mail via relay, snapshot/pool checks are user-readable.)
 
 ## 5. Run the check once, manually
 
@@ -60,7 +60,7 @@ or overdue for a scrub.
 ## 6. Install the timer
 
 ```
-sudo cp /home/jmichelsen/cairn/phase0/backup-check.{service,timer} /etc/systemd/system/
+sudo cp ~/cairn/phase0/backup-check.{service,timer} /etc/systemd/system/
 ```
 ```
 sudo systemctl daemon-reload && sudo systemctl enable --now backup-check.timer

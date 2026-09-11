@@ -5,11 +5,11 @@ Wants=zfs.target
 
 [Service]
 Type=oneshot
-# Least-privilege: runs as jmichelsen. zpool/zfs/sanoid --monitor-snapshots are user-readable,
+# Least-privilege: runs as youruser. zpool/zfs/sanoid --monitor-snapshots are user-readable,
 # and mail goes through a local SMTP relay (MAIL_MODE=relay) - no root needed.
 # (Switch to User=root + MAIL_MODE=sendmail only if you don't want to use the relay.)
-User=jmichelsen
-Group=jmichelsen
+User=youruser
+Group=youruser
 Environment=CAIRN_ENV=/etc/cairn/cairn.env
 ExecStart=/opt/cairn/phase0/check_backups.sh
 # Don't let a transient failure mark the unit failed forever; the timer retries.
