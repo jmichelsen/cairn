@@ -32,6 +32,49 @@ askyn(){ local __p="$1" __d="${2:-y}" __a; if [ "$YES" = 1 ]; then [ "$__d" = y 
          __a="${__a:-$__d}"; [[ "$__a" =~ ^[Yy] ]]; }
 gen()  { openssl rand -hex 32 2>/dev/null || { head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n'; }; }
 
+# ---------------- packages / prerequisites ----------------
+PKG=""  # detected package manager
+detect_pkg() { for m in apt-get dnf yum pacman zypper; do command -v "$m" >/dev/null && { PKG="$m"; return; }; done; }
+_sudo_primed=0
+prime_sudo() { [ "$_sudo_primed" = 1 ] && return; sudo -v || die "sudo required to install packages / grant access"; _sudo_primed=1; }
+pkg_install() {  # pkg_install pkg...
+  [ $# -gt 0 ] || return 0
+  [ -n "$PKG" ] || die "no supported package manager found - install manually: $*"
+  prime_sudo
+  say "Installing missing packages: $*"
+  case "$PKG" in
+    apt-get) sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
+    dnf|yum) sudo "$PKG" install -y "$@" ;;
+    pacman)  sudo pacman -Sy --noconfirm "$@" ;;
+    zypper)  sudo zypper -n install "$@" ;;
+  esac || die "package install failed ($PKG install $*)"
+}
+# cmd->package name differs per distro; we target apt/Debian primarily (as requested) with fallbacks.
+pkgname() { case "$1:$PKG" in
+    yaml:apt-get) echo python3-yaml;;  yaml:*) echo python3-pyyaml;;
+    docker:apt-get) echo docker.io;;   docker:*) echo docker;;
+    compose:apt-get) echo docker-compose-v2;; compose:*) echo docker-compose;;
+    *) echo "$1";; esac; }
+ensure() {  # ensure "check-cmd" pkgkey "human hint" -> installs pkg if the check fails
+  local chk="$1" key="$2"; eval "$chk" 2>/dev/null && return 0
+  local p; p="$(pkgname "$key")"
+  if [ "$YES" = 1 ] || askyn "install missing prerequisite '$p'?" y; then pkg_install "$p"; eval "$chk" 2>/dev/null || die "'$key' still unavailable after installing $p"; else die "prerequisite '$key' missing"; fi
+}
+# docker CLI access: daemon is root; if this user isn't in the docker group, install-time docker runs
+# via sudo (and we add the user to the group for future sudoless use - takes effect next login).
+DOCKER_SUDO=0
+dc() { if [ "$DOCKER_SUDO" = 1 ]; then sudo docker compose "$@"; else docker compose "$@"; fi; }
+ensure_docker_access() {
+  docker info >/dev/null 2>&1 && return 0
+  sudo -n true 2>/dev/null || prime_sudo
+  sudo systemctl enable --now docker 2>/dev/null || true
+  if sudo docker info >/dev/null 2>&1; then
+    DOCKER_SUDO=1
+    getent group docker >/dev/null && ! id -nG "$USER" | tr ' ' '\n' | grep -qx docker \
+      && { sudo usermod -aG docker "$USER"; warn "added $USER to the 'docker' group - log out/in for sudoless docker later"; }
+  else die "docker installed but the daemon isn't reachable even via sudo - check 'systemctl status docker'"; fi
+}
+
 # ---------------- args ----------------
 ROLE=""; CONFIG_IN=""; YES=0; SMART_DETAIL=0; CHECK=0; API_URL=""; VAULT_SSH=""
 while [ $# -gt 0 ]; do case "$1" in
@@ -47,10 +90,24 @@ while [ $# -gt 0 ]; do case "$1" in
   *) die "unknown arg: $1 (try --help)";;
 esac; shift; done
 [ -n "$CONFIG_IN" ] && [ -z "$ROLE" ] && ROLE=vault
+detect_pkg
 
-# ---------------- preflight ----------------
+# ---------------- self-bootstrap (so `curl … | bash` works without a manual clone) ----------------
+# When piped from curl, the repo files aren't beside us - fetch them, then re-exec from the clone.
+BM_REPO="${BM_REPO:-https://gitlab.com/yourhost-hosted/backup-monitor.git}"
+BM_DIR="${BM_DIR:-$HOME/backup-monitor}"
+if [ ! -f "$HERE/agent.py" ] || [ ! -f "$HERE/docker-compose.yml" ]; then
+  say "Bootstrap - fetching backup-monitor ($BM_REPO)"
+  ensure "command -v git >/dev/null" git "git"
+  if [ -d "$BM_DIR/.git" ]; then info "updating existing $BM_DIR"; git -C "$BM_DIR" pull --ff-only || warn "git pull failed - using what's there";
+  else git clone --depth 1 "$BM_REPO" "$BM_DIR" || die "clone failed - is the repo public? for a private repo set BM_REPO to an SSH/token URL"; fi
+  ok "fetched to $BM_DIR - continuing there"
+  exec bash "$BM_DIR/install.sh" "$@"
+fi
+
+# ---------------- preflight (auto-installs missing prerequisites) ----------------
 say "Preflight"
-command -v openssl >/dev/null || warn "openssl missing - falling back to /dev/urandom for tokens"
+[ -n "$PKG" ] && info "package manager: $PKG" || warn "no known package manager - prerequisites must be present already"
 if [ -z "$ROLE" ]; then
   info "Which role is THIS machine?"
   info "  home  - control plane + dashboard + local agent (the main server)"
@@ -59,14 +116,20 @@ if [ -z "$ROLE" ]; then
 fi
 [ "$ROLE" = home ] || [ "$ROLE" = vault ] || die "role must be 'home' or 'vault'"
 
-need_docker() { command -v docker >/dev/null || die "docker not found - install Docker Engine first";
-  docker compose version >/dev/null 2>&1 || die "docker compose v2 plugin not found";
-  docker info >/dev/null 2>&1 || die "can't talk to docker - add your user to the 'docker' group (then re-login), or fix the daemon"; }
-need_python() { command -v python3 >/dev/null || die "python3 not found (needed to run the agent)";
-  python3 -c 'import yaml' 2>/dev/null || die "python3 'yaml' module missing - install python3-yaml (apt) or 'pip install pyyaml'"; }
-
-if [ "$ROLE" = home ]; then need_docker; need_python; ok "docker: $(docker --version | cut -d, -f1)"; ok "python3 + yaml"; fi
-if [ "$ROLE" = vault ]; then need_python; command -v systemctl >/dev/null || die "systemd needed for the vault agent"; ok "python3 + yaml + systemd"; fi
+ensure "command -v curl >/dev/null"    curl   "curl"
+command -v openssl >/dev/null || warn "openssl missing - tokens will use /dev/urandom"
+ensure "command -v python3 >/dev/null" python3 "python3"
+ensure "python3 -c 'import yaml'"      yaml    "python3 yaml"
+if [ "$ROLE" = home ]; then
+  ensure "command -v docker >/dev/null"          docker  "docker"
+  ensure "docker compose version >/dev/null 2>&1" compose "docker compose plugin"
+  command -v rsync >/dev/null || ensure "command -v rsync >/dev/null" rsync "rsync"   # for SSH vault push
+  ensure_docker_access
+  ok "docker + compose + python/yaml ready"
+else
+  command -v systemctl >/dev/null || die "systemd needed for the vault agent"
+  ok "python/yaml + systemd ready"
+fi
 [ "$CHECK" = 1 ] && { ok "preflight passed - nothing changed (--check)"; exit 0; }
 
 # ============================================================ HOME ============================================================
@@ -124,7 +187,7 @@ EOF
 
   # ---- control plane ----
   say "Building + starting the control plane (docker compose up -d api)"
-  docker compose up -d --build api
+  dc up -d --build api
   info "waiting for the API to become healthy…"
   for i in $(seq 1 30); do curl -fs -o /dev/null "http://localhost:8929/login" && { ok "API up at http://localhost:8929"; break; }; sleep 2; done
 
@@ -164,7 +227,7 @@ provision_vault() {
   [ -z "$API_URL" ] && ask API_URL "URL the vault will use to reach THIS home (e.g. https://backups.example.com or the Tailscale addr)" ""
   [ -z "$API_URL" ] && { warn "no reachable URL for home - skipping vault provisioning (set one and re-run)"; return; }
   say "Minting a per-vault enrollment secret (hash-at-rest; shown once)"
-  SECRET="$(docker compose exec -T api python3 /app/phase1/bmtoken.py mint --role agent --label "$NAME" 2>/dev/null | awk '/^SECRET:/{print $2}')"
+  SECRET="$(dc exec -T api python3 /app/phase1/bmtoken.py mint --role agent --label "$NAME" 2>/dev/null | awk '/^SECRET:/{print $2}')"
   [ -n "$SECRET" ] || { warn "could not mint a token (is a label '$NAME' already used? try another name)"; return; }
   cat > "$BUNDLE" <<EOF
 # backup-monitor vault bundle - generated on $(hostname) $(date -u +%Y-%m-%dT%H:%M:%SZ).

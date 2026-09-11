@@ -12,16 +12,24 @@ respects zero-knowledge encrypted replicas (flags a destination whose key unexpe
 
 ## Quick start (`./install.sh`)
 
-One entry point. It asks a few questions, elevates **once** (a single sudo for borg/backupninja
-read access + linger), then builds, configures, and starts everything - control plane, dashboard,
-and the execute-capable local agent. Re-running is idempotent (your tokens/config are kept).
+One entry point. It **installs any missing prerequisites** (docker, compose, python3-yaml, …),
+asks a few questions, elevates **once** (a single sudo for prerequisites + borg/backupninja read
+access + linger), then builds, configures, and starts everything - control plane, dashboard, and
+the execute-capable local agent. Re-running is idempotent (your tokens/config are kept).
 
 ```bash
-git clone https://github.com/jmichelsen/backup-monitor && cd backup-monitor
+# one-liner - self-clones, then installs (public repo):
+curl -fsSL https://gitlab.com/yourhost-hosted/backup-monitor/-/raw/main/install.sh | bash
+```
+or clone first:
+```bash
+git clone https://gitlab.com/yourhost-hosted/backup-monitor && cd backup-monitor
 ./install.sh            # answer: role=home, alert email, (optional) Gotify, (optional) add a vault
 ```
 Open `http://<host>:8929/` and log in with the `BM_ADMIN_TOKEN` it prints. `./install.sh --check`
-runs preflight only (changes nothing).
+runs preflight only (changes nothing). Prompts read from your terminal even under `curl … | bash`.
+The bootstrap clones to `~/backup-monitor` (override with `BM_DIR=`); for a private repo, set
+`BM_REPO=` to an SSH/token URL or just clone by hand first.
 
 **Remote off-site vault.** When `install.sh` (on home) asks *"add a remote vault?"*, it mints a
 per-vault enrollment secret and either writes a `vault-install.conf` bundle to copy over, **or** -
