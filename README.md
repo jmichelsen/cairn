@@ -18,18 +18,17 @@ access + linger), then builds, configures, and starts everything - control plane
 the execute-capable local agent. Re-running is idempotent (your tokens/config are kept).
 
 ```bash
-# one-liner - self-clones, then installs (public repo):
-curl -fsSL https://gitlab.com/yourhost-hosted/backup-monitor/-/raw/main/install.sh | bash
+# one-liner - self-clones, then installs:
+curl -fsSL https://raw.githubusercontent.com/jmichelsen/backup-monitor/main/install.sh | bash
 ```
 or clone first:
 ```bash
-git clone https://gitlab.com/yourhost-hosted/backup-monitor && cd backup-monitor
+git clone https://github.com/jmichelsen/backup-monitor && cd backup-monitor
 ./install.sh            # answer: role=home, alert email, (optional) Gotify, (optional) add a vault
 ```
 Open `http://<host>:8929/` and log in with the `BM_ADMIN_TOKEN` it prints. `./install.sh --check`
 runs preflight only (changes nothing). Prompts read from your terminal even under `curl … | bash`.
-The bootstrap clones to `~/backup-monitor` (override with `BM_DIR=`); for a private repo, set
-`BM_REPO=` to an SSH/token URL or just clone by hand first.
+The bootstrap clones to `~/backup-monitor` (override with `BM_DIR=` / `BM_REPO=`).
 
 **Remote off-site vault.** When `install.sh` (on home) asks *"add a remote vault?"*, it mints a
 per-vault enrollment secret and either writes a `vault-install.conf` bundle to copy over, **or** -

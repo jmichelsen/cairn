@@ -94,7 +94,7 @@ detect_pkg
 
 # ---------------- self-bootstrap (so `curl … | bash` works without a manual clone) ----------------
 # When piped from curl, the repo files aren't beside us - fetch them, then re-exec from the clone.
-BM_REPO="${BM_REPO:-https://gitlab.com/yourhost-hosted/backup-monitor.git}"
+BM_REPO="${BM_REPO:-https://github.com/jmichelsen/backup-monitor.git}"   # public mirror; GitLab origin is private
 BM_DIR="${BM_DIR:-$HOME/backup-monitor}"
 if [ ! -f "$HERE/agent.py" ] || [ ! -f "$HERE/docker-compose.yml" ]; then
   say "Bootstrap - fetching backup-monitor ($BM_REPO)"
