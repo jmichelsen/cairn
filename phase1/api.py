@@ -275,6 +275,59 @@ def unack_target(target: str):
         conn.commit()
     return {"ok": True, "target": target, "removed": n}
 
+# ---------------- reconciliation of cross-agent target overlaps ----------------
+def find_overlaps(conn):
+    """A replication whose dest another agent now monitors directly = two views of one relationship
+    (e.g. home `zfs-repl -> iwolf/Pics` + a vault `zfs-local iwolf/Pics`). Surface them so the user can
+    reconcile instead of cairn silently hiding one. Excludes pairs the user chose to keep."""
+    dismissed = {r[0] for r in conn.execute("SELECT pair FROM reconcile_dismissed")}
+    q = """
+      SELECT r.id r_id, r.name r_name, IFNULL(r.agent,'') r_agent, r.dest ds,
+             l.id l_id, l.name l_name, IFNULL(l.agent,'') l_agent
+      FROM targets r JOIN targets l ON r.dest = l.source
+      WHERE r.type='zfs-repl' AND l.type='zfs-local' AND IFNULL(r.agent,'')<>IFNULL(l.agent,'')
+        AND r.enabled=1 AND l.enabled=1 AND r.dest IS NOT NULL AND r.dest<>''
+    """
+    out = []
+    for x in conn.execute(q).fetchall():
+        pair = f"{x['r_agent']}:{x['r_name']}|{x['l_agent']}:{x['l_name']}"
+        if pair in dismissed:
+            continue
+        out.append({"pair": pair, "dataset": x["ds"],
+                    "replication": {"id": x["r_id"], "name": x["r_name"], "agent": x["r_agent"]},
+                    "monitor": {"id": x["l_id"], "name": x["l_name"], "agent": x["l_agent"]}})
+    return out
+
+@app.get("/api/v1/backup/reconcile")
+def reconcile_list():
+    with db() as conn:
+        return {"overlaps": find_overlaps(conn)}
+
+@app.post("/api/v1/backup/reconcile")
+async def reconcile_act(request: Request):
+    b = await request.json()
+    action = b.get("action")
+    with db() as conn:
+        if action == "retire":                       # persistently drop one side (survives re-ingest)
+            tid = int(b.get("target_id", 0))
+            row = conn.execute("SELECT agent,name FROM targets WHERE id=?", (tid,)).fetchone()
+            if not row:
+                raise HTTPException(404, "unknown target")
+            conn.execute("INSERT OR IGNORE INTO target_retired(agent,name,ts) VALUES(?,?,?)",
+                         (row["agent"], row["name"], int(time.time())))
+            conn.execute("UPDATE targets SET enabled=0 WHERE id=?", (tid,))
+            conn.commit()
+            return {"ok": True, "retired": {"agent": row["agent"], "name": row["name"]}}
+        if action == "dismiss":                      # "keep both": stop warning about this pair
+            pair = b.get("pair", "")
+            if not pair:
+                raise HTTPException(400, "dismiss needs a pair")
+            conn.execute("INSERT OR IGNORE INTO reconcile_dismissed(pair,ts) VALUES(?,?)",
+                         (pair, int(time.time())))
+            conn.commit()
+            return {"ok": True, "dismissed": pair}
+    raise HTTPException(400, "action must be 'retire' or 'dismiss'")
+
 @app.get("/api/v1/backup/status")
 def status():
     with db() as conn:
@@ -462,6 +515,10 @@ async def report(request: Request):
             ph = ",".join("?" * len(reported))
             conn.execute(f"UPDATE targets SET enabled=0 WHERE agent=? AND enabled=1 AND name NOT IN ({ph})",
                          [agent, *reported])
+        # user-retired targets (reconciled away on the dashboard) stay disabled even though their agent
+        # still reports them - otherwise the upsert above would re-enable them every cycle.
+        conn.execute("UPDATE targets SET enabled=0 WHERE id IN "
+                     "(SELECT t.id FROM targets t JOIN target_retired r ON t.agent=r.agent AND t.name=r.name)")
         conn.execute("DELETE FROM status WHERE ts < ?", (now - 90 * DAY,))
         conn.commit()
         _reap_agents(conn, now)   # dead-man's-switch: alert on any OTHER agent gone silent
@@ -773,6 +830,22 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .agenthdr{margin:18px 2px 7px;font-size:12px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--mut);display:flex;align-items:center;gap:8px}
 .agenthdr:first-child{margin-top:4px}
 .agdot{width:7px;height:7px;border-radius:50%;background:var(--ack);flex:none}
+.reconbanner{margin:12px 16px 0;padding:9px 13px;border-radius:9px;font-size:12.5px;line-height:1.45;color:var(--ink);background:color-mix(in srgb,var(--warn) 16%,var(--surf));border:1px solid color-mix(in srgb,var(--warn) 50%,var(--line));display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.reconbtn{margin-left:auto;border:1px solid var(--line);background:var(--surf);color:var(--ink);border-radius:7px;padding:5px 12px;font-size:12px;cursor:pointer}
+.reconbtn:hover{border-color:var(--warn)}
+[hidden]{display:none!important}
+.modalwrap{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px}
+.modalbox{background:var(--surf);border:1px solid var(--line);border-radius:12px;max-width:640px;width:100%;max-height:80vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.4)}
+.modalhd{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--line);font-weight:600}
+.modalx{border:0;background:none;color:var(--mut);font-size:22px;line-height:1;cursor:pointer}
+.modalbody{padding:14px 18px}
+.reconrow{padding:11px 0;border-bottom:1px solid var(--line)}
+.reconrow:last-child{border-bottom:0}
+.recondesc small{display:block;color:var(--mut);margin-top:4px;font-size:11.5px}
+.reconacts{margin-top:9px;display:flex;gap:8px;flex-wrap:wrap}
+.reconacts button{border:1px solid var(--line);background:var(--surf);color:var(--ink);border-radius:7px;padding:5px 11px;font-size:12px;cursor:pointer}
+.reconacts button:hover{border-color:var(--ack)}
+.reconacts button:disabled{opacity:.5;cursor:default}
 .hero-top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .hero-top h2{font-weight:900;font-size:20px;letter-spacing:-.01em}
 .verd{font-weight:700;font-size:12.5px;padding:4px 12px;border-radius:20px;border:1px solid currentColor;letter-spacing:.02em}
@@ -1315,6 +1388,38 @@ function applyFilter(){
 }
 function toggleFilter(sev){ _filter=(_filter===sev)?null:sev; applyFilter(); }
 window.addEventListener('load', loadStream);
+// ---- reconciliation modal: cross-agent target overlaps ----
+async function openReconcile(){
+  var m=document.getElementById('reconmodal'), b=document.getElementById('reconbody');
+  b.innerHTML='<div class=hempty>loading…</div>'; m.hidden=false;
+  try{ var j=await (await fetch('/api/v1/backup/reconcile')).json(); renderReconcile(j.overlaps||[]); }
+  catch(e){ b.innerHTML='<div class=hempty>error loading overlaps</div>'; }
+}
+function closeReconcile(){ document.getElementById('reconmodal').hidden=true; }
+function renderReconcile(ov){
+  var b=document.getElementById('reconbody');
+  if(!ov.length){ b.innerHTML='<div class=hempty>Nothing to reconcile.</div>'; return; }
+  b.innerHTML='<p class=why style="margin:0 0 12px">Each row is one dataset tracked from two sides. '
+    +'Retire the view you no longer want, or keep both.</p>'+ov.map(function(o){
+    return '<div class=reconrow><div class=recondesc><b>'+esc(o.dataset)+'</b><small>'
+      +'replication view: <b>'+esc(o.replication.agent)+'</b> / '+esc(o.replication.name)
+      +' &nbsp;&harr;&nbsp; monitored by: <b>'+esc(o.monitor.agent)+'</b> / '+esc(o.monitor.name)
+      +'</small></div><div class=reconacts>'
+      +'<button onclick="reconAct(this,\'retire\','+o.replication.id+')">Retire '+esc(o.replication.agent)+' view</button>'
+      +'<button onclick="reconAct(this,\'retire\','+o.monitor.id+')">Retire '+esc(o.monitor.agent)+' view</button>'
+      +'<button onclick="reconAct(this,\'dismiss\',0,\''+esc(o.pair)+'\')">Keep both</button>'
+      +'</div></div>';
+  }).join('');
+}
+async function reconAct(btn, action, tid, pair){
+  var body = action==='retire' ? {action:'retire',target_id:tid} : {action:'dismiss',pair:pair};
+  var btns=btn.parentNode.querySelectorAll('button'); btns.forEach(function(x){x.disabled=true;});
+  try{
+    await fetch('/api/v1/backup/reconcile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    var j=await (await fetch('/api/v1/backup/reconcile')).json(); var left=j.overlaps||[]; renderReconcile(left);
+    if(!left.length){ closeReconcile(); location.reload(); }
+  }catch(e){ btns.forEach(function(x){x.disabled=false;}); }
+}
 </script>"""
 
 def _acts(r, can_act):
@@ -1616,6 +1721,7 @@ def index():
         capable = {x["name"] for x in conn.execute(
             "SELECT name FROM agents WHERE can_execute=1").fetchall()}
         agents = agent_states(conn)
+        overlaps = find_overlaps(conn)
     h = health()
     if not rows:
         return _shell(
@@ -1696,6 +1802,15 @@ def index():
             'until an execute-capable agent reports. If Cairn just started or restarted this clears '
             'within a poll interval; if it persists, check the Agents section for a stale agent.</div>')
 
+    recon_banner = ""
+    if overlaps:
+        n = len(overlaps)
+        recon_banner = (
+            '<div class=reconbanner>&#9878; '
+            f'{n} target overlap{"s" if n != 1 else ""} to reconcile - a replication and a direct '
+            'monitor point at the same dataset (e.g. an off-site copy that moved to a vault). '
+            '<button class=reconbtn onclick="openReconcile()">Reconcile</button></div>')
+
     c = h["counts"]; ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(h["ts"]))
     verdict = {"OK": "All healthy", "WARN": "Attention", "CRIT": "Critical",
                "UNKNOWN": "Unknown"}.get(h["severity"], h["severity"])
@@ -1720,7 +1835,7 @@ def index():
     <label class=drysw title="When on, every action runs a safe dry-run probe (native -n / read-only) instead of executing">
       <input type=checkbox id=drychk onchange="setDry(this.checked)"><span>Dry-run</span></label>
     <a class=signout href=# onclick="lo.submit();return false">sign out</a></div>
-  {warm_banner}
+  {warm_banner}{recon_banner}
   <div id=hero-steel class=herox>{steel_hero}</div>
   <div id=hero-heat class=herox><div class=hero>
     <div class=hero-top><span class="verd {vcls}" id=heatverd>{verdict}</span>
@@ -1739,4 +1854,9 @@ def index():
         <div class=pbody><div id=actlog><span class=amsg>idle - actions stream here.</span></div></div></div></div>
     <div class=legend><h3>Metric key</h3><dl class=lg>{leg}</dl></div>
   </div>
+  <div id=reconmodal class=modalwrap hidden onclick="if(event.target===this)closeReconcile()">
+    <div class=modalbox>
+      <div class=modalhd>Reconcile target overlaps<button class=modalx onclick="closeReconcile()">&times;</button></div>
+      <div id=reconbody class=modalbody></div>
+    </div></div>
   <script>var GP={{pct:{gpct},label:"{glabel}"}};</script>""")
