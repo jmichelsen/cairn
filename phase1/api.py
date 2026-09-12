@@ -742,6 +742,9 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 /* hero + heatmap */
 .hero{padding:22px 26px 18px;background:linear-gradient(180deg,var(--rail),var(--surf));border-bottom:1px solid var(--line)}
 .warmbanner{margin:12px 16px 0;padding:9px 13px;border-radius:9px;font-size:12.5px;line-height:1.45;color:var(--ink);background:color-mix(in srgb,var(--warn) 14%,var(--surf));border:1px solid color-mix(in srgb,var(--warn) 45%,var(--line))}
+.agenthdr{margin:18px 2px 7px;font-size:12px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--mut);display:flex;align-items:center;gap:8px}
+.agenthdr:first-child{margin-top:4px}
+.agdot{width:7px;height:7px;border-radius:50%;background:var(--ack);flex:none}
 .hero-top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .hero-top h2{font-weight:900;font-size:20px;letter-spacing:-.01em}
 .verd{font-weight:700;font-size:12.5px;padding:4px 12px;border-radius:20px;border:1px solid currentColor;letter-spacing:.02em}
@@ -1594,7 +1597,8 @@ def index():
             'agent enrolls (see AGENT.md) it reads this host\'s ZFS / borg / backupninja and fills in '
             'the dashboard within one poll interval - nothing is wrong, it is just starting up.</p></div>')
 
-    rows.sort(key=lambda r: (_group(r)[0], r["name"]))
+    multi_agent = len({r.get("agent") for r in rows}) > 1
+    rows.sort(key=lambda r: ((r.get("agent") or "~") if multi_agent else "", _group(r)[0], r["name"]))
     order_names = [r["name"] for r in rows]
 
     pools = [r for r in rows if r["type"] == "zfs-local" and r.get("pool_cap_pct") is not None]
@@ -1615,15 +1619,23 @@ def index():
 
     heat_rows, heat_span = _heatmap(order_names)
 
-    # Each group (Pools, Replication, Disk health, Archive repos, …) is a collapsible section:
-    # header + chevron, and a dot on the header if a card inside changes while it's collapsed.
-    cards, cur = "", None
+    # Cards group by type into collapsible sections; when more than one agent reports, those sections
+    # are nested under a per-agent heading, so home's fleet and a remote vault read as distinct blocks
+    # (and same-named targets from different agents no longer look like one flapping row).
+    def _slug(s): return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
+    cards, cur, cur_agent = "", None, None
     for r in rows:
+        ag = r.get("agent") or "?"
+        if multi_agent and ag != cur_agent:
+            if cur is not None:
+                cards += "</div></div></section>"; cur = None
+            cards += f'<div class=agenthdr><span class=agdot></span>{_esc(ag)}</div>'
+            cur_agent = ag
         g = _group(r)[1]
         if g != cur:
             if cur is not None:
                 cards += "</div></div></section>"
-            pid = "grp:" + re.sub(r"[^a-z0-9]+", "-", g.lower()).strip("-")
+            pid = "grp:" + ((_slug(ag) + ":") if multi_agent else "") + _slug(g)
             cards += (f'<section class="pane grp" data-pane="{_esc(pid)}">'
                       f'<button class="paneh" onclick="togglePane(\'{_esc(pid)}\')">'
                       f'<span class=pt>{_esc(g)}</span><span class=pdot></span>'
