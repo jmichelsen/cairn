@@ -890,6 +890,19 @@ def _smart_parse(dev, typ, o, err, now):
         dev=dev, typ=typ, attrs=attrs, probed_ts=now))
     return st
 
+def _smart_bare(st):
+    """True if a probe didn't decode the drive's full ATA identity + attribute table - so we should
+    try another device type. UNKNOWN (JSON failed), or a parsed blob missing the model or the
+    attribute table (what `-d scsi` yields for a SATA disk behind an HBA: at best a bare health bit,
+    no model and no attributes)."""
+    if st.get("severity") == "UNKNOWN":
+        return True
+    try:
+        d = json.loads(st.get("detail_json") or "{}")
+    except ValueError:
+        return True
+    return not d.get("model") or not d.get("attrs")
+
 def _smart_probe_all(now):
     rc, out, _ = run(["smartctl", "--scan"])
     devs = []
@@ -904,12 +917,23 @@ def _smart_probe_all(now):
     # user-writable repo copy (sudo-ing an editable script would be an escalation hole). grant-access.sh
     # deploys it to /opt; override with CAIRN_SMART_WRAPPER if you installed elsewhere.
     wrapper = os.environ.get("CAIRN_SMART_WRAPPER", "/opt/cairn/phase1/smart-probe.sh")
-    results = []
-    for dev, typ in devs:
+
+    def _read(dev, typ):
         cmd = (["smartctl", "-j", "-a", "-d", typ, dev] if is_root
                else ["sudo", "-n", wrapper, dev, typ])
         rc, o, err = run(cmd, timeout=30)
-        results.append(_smart_parse(dev, typ, o, err, now))
+        return _smart_parse(dev, typ, o, err, now)
+
+    results = []
+    for dev, typ in devs:
+        st = _read(dev, typ)
+        # SATA disks behind a SAS/HBA controller enumerate as `-d scsi`, which can't decode ATA SMART
+        # (no model, no health, no attributes). Retry once through SAT translation, which does.
+        if typ not in ("sat", "nvme") and _smart_bare(st):
+            st2 = _read(dev, "sat")
+            if not _smart_bare(st2):
+                st = st2
+        results.append(st)
     return results
 
 def _smartd_alerts(window_h=72):
