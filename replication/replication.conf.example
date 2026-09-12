@@ -1,0 +1,14 @@
+# cairn vault pull config - copy to ~/.config/cairn/replication.conf and edit.
+# Whitespace-separated; '#' starts a comment.
+
+# How the vault reaches home (SSH). On-LAN seed: user@home-ip. Off-site: a VPN address (Tailscale)
+# or a public host. The pull uses the dedicated restricted key below, NOT your login key.
+HOME_SSH  jmichelsen@192.168.1.5
+KEY       /home/jmichelsen/.ssh/cairn-pull
+
+# One SET per replicated dataset:  SET <name> <source-on-home> <dest-on-vault> [raw]
+# 'raw' does an encrypted raw send (-w) so the vault stores ciphertext it cannot read (zero-knowledge).
+SET  Pics     mcz/mclife/Pics     iwolf/Pics
+SET  karly    mcz/mclife/karly    iwolf/karly
+SET  lyla     mcz/mclife/lyla     iwolf/lyla
+SET  michxps  mcz/mclife/michxps  iwolf/michxps  raw

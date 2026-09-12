@@ -1,0 +1,11 @@
+[Unit]
+Description=cairn replication pull (vault <- home)
+Documentation=file://%h/cairn/replication/vault-pull.sh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as a systemd --user unit (needs `loginctl enable-linger <user>` to run without a login session,
+# same as the cairn agent). Delegation-only, so no root.
+ExecStart=%h/cairn/replication/vault-pull.sh
