@@ -894,6 +894,7 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .reconacts button:hover{border-color:var(--ack)}
 .reconacts button:disabled{opacity:.5;cursor:default}
 .card.pair .pbadge{font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);border:1px solid var(--line);border-radius:5px;padding:1px 6px;margin-right:8px}
+.picn{width:15px;height:15px;vertical-align:-2px;margin-right:7px;color:var(--mut)}
 .phalves{display:flex;flex-direction:column;gap:10px;margin-top:11px}
 .phalf{display:flex;gap:9px;align-items:flex-start}
 .phalf .pd{width:8px;height:8px;border-radius:50%;margin-top:4px;flex:none}
@@ -1610,6 +1611,12 @@ def _smart_card(r):
             f'<div class=chistrow><button class="histbtn" onclick="toggleSmart(this)">SMART details</button>'
             f'{probed}<div class="smdet" hidden>{tbl}</div></div></div>')
 
+PAIR_ICON = (  # two linked nodes with an arrow: source -> off-site copy (data replication)
+    '<svg class=picn viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<circle cx="5" cy="12" r="2.6"/><circle cx="19" cy="12" r="2.6"/>'
+    '<path d="M7.6 12h8.8"/><path d="M14 9.2l2.6 2.8-2.6 2.8"/></svg>')
+
 def _pair_card(v):
     """One merged card for a guaranteed replication pair: the source->dest relationship up top, then
     each half (the sending agent + the off-site copy) with its own severity and snapshot freshness."""
@@ -1629,7 +1636,7 @@ def _pair_card(v):
                 f'<span class=psev>{_esc(row["severity"])}</span> <span class=prole>{role}</span>'
                 f'<small>{_esc(row.get("source") or "")}<br>newest snapshot {age}{ks}</small></div></div>')
     return (f'<div class="card pair {sev}" data-t="{name}"><div class=ch>'
-            f'<span class=cn>{name}</span><span class=chr>'
+            f'<span class=cn>{PAIR_ICON}{name}</span><span class=chr>'
             f'<span class=pbadge>replication pair</span><span class=cs>{_esc(v["severity"])}</span></span></div>'
             f'<div class=src>{subtitle}</div>'
             f'<div class=phalves>{half(R, "source")}{half(L, "off-site copy")}</div></div>')
