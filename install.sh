@@ -5,6 +5,7 @@
 #   ./install.sh home            # this box = control plane + dashboard + local agent
 #   ./install.sh vault [--config vault-install.conf]   # this box = remote reporting agent
 #   ./install.sh home --add-vault  # add a remote vault to an ALREADY-set-up home (skips home setup)
+#   ./install.sh home --replication [--vault-ssh user@host]  # set up the nightly vault-pull replication
 #   ./install.sh home --configure  # re-run config on an existing install (DESTRUCTIVE: regenerates tokens)
 #   ./install.sh --check         # preflight only, change nothing
 #
@@ -104,7 +105,7 @@ ensure_docker_access() {
 }
 
 # ---------------- args ----------------
-ROLE=""; CONFIG_IN=""; YES=0; SMART_DETAIL=0; CHECK=0; API_URL=""; VAULT_SSH=""; ADD_VAULT=0; RECONFIGURE=0
+ROLE=""; CONFIG_IN=""; YES=0; SMART_DETAIL=0; CHECK=0; API_URL=""; VAULT_SSH=""; ADD_VAULT=0; RECONFIGURE=0; REPLICATION=0
 while [ $# -gt 0 ]; do case "$1" in
   home|vault) ROLE="$1";;
   --role) ROLE="$2"; shift;;
@@ -112,15 +113,16 @@ while [ $# -gt 0 ]; do case "$1" in
   --api-url) API_URL="$2"; shift;;
   --vault-ssh) VAULT_SSH="$2"; shift;;
   --add-vault) ADD_VAULT=1;;
+  --replication) REPLICATION=1;;
   --configure|--reconfigure) RECONFIGURE=1;;
   --smart-detail) SMART_DETAIL=1;;
   --yes|-y) YES=1;;
   --check) CHECK=1;;
-  -h|--help) sed -n '2,19p' "$0"; exit 0;;
+  -h|--help) sed -n '2,20p' "$0"; exit 0;;
   *) die "unknown arg: $1 (try --help)";;
 esac; shift; done
 [ -n "$CONFIG_IN" ] && [ -z "$ROLE" ] && ROLE=vault
-{ [ "$ADD_VAULT" = 1 ] || [ "$RECONFIGURE" = 1 ]; } && [ -z "$ROLE" ] && ROLE=home
+{ [ "$ADD_VAULT" = 1 ] || [ "$RECONFIGURE" = 1 ] || [ "$REPLICATION" = 1 ]; } && [ -z "$ROLE" ] && ROLE=home
 detect_pkg
 
 # ---------------- self-bootstrap (so `curl … | bash` works without a manual clone) ----------------
@@ -383,6 +385,89 @@ EOF
   else
     info "Copy $BUNDLE to the vault, then run there:  ./install.sh vault --config vault-install.conf"
   fi
+  [ -n "$VAULT_SSH" ] && askyn "set up replication now (vault pulls home's ZFS datasets nightly)?" y \
+    && provision_replication "$VAULT_SSH"
+}
+
+# detect home's replication sets from targets.yaml -> "name source dest raw" per line
+_repl_sets() {
+  [ -f "$HERE/config/targets.yaml" ] || return 0
+  python3 - "$HERE/config/targets.yaml" <<'PY' 2>/dev/null
+import sys, yaml
+try: d = yaml.safe_load(open(sys.argv[1])) or {}
+except Exception: sys.exit(0)
+for t in (d.get("targets") or []):
+    if isinstance(t, dict) and t.get("type") == "zfs-repl" and t.get("source") and t.get("dest"):
+        print(t.get("name",""), t["source"], t["dest"], "raw" if t.get("encrypted") else "")
+PY
+}
+
+# Configure the vault to PULL home's ZFS datasets nightly, over a dedicated restricted key.
+# Idempotent: it checks what's already delegated / authorized and only fills gaps. Delegation-only
+# (no run-time sudo); the one-time zfs allow on each side may prompt for a password.
+provision_replication() {
+  local ssh_t="${1:-$VAULT_SSH}"
+  say "Replication (vault pulls home's ZFS datasets, nightly)"
+  local sets; sets="$(_repl_sets)"
+  [ -n "$sets" ] || { warn "no zfs-repl targets in config/targets.yaml - nothing to replicate"; return; }
+  info "replication sets:"; while read -r n s d r; do [ -n "$n" ] && info "  $n: $s -> $d ${r:+(raw)}"; done <<<"$sets"
+  [ -n "$ssh_t" ] || ask ssh_t "vault ssh target (user@host)" "$VAULT_SSH"
+  [ -n "$ssh_t" ] || { warn "no vault ssh target - skipping replication"; return; }
+  ssh -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new "$ssh_t" true 2>/dev/null \
+    || { warn "cannot ssh to $ssh_t by key - run --add-vault first, or fix access"; return; }
+  ensure_opt "command -v rsync >/dev/null" rsync "copying the runner to the vault"
+
+  local vuser="${ssh_t%@*}"; [ "$vuser" = "$ssh_t" ] && vuser="$USER"
+  local huser="$USER" wrapper="$HERE/replication/pull-command.sh"
+  local home_addr; ask home_addr "address the VAULT uses to reach THIS home (LAN ip / VPN / host)" \
+    "$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.)' | head -1)"
+  [ -n "$home_addr" ] || { warn "no home address - skipping replication"; return; }
+  local HOME_SSH="$huser@$home_addr"
+  local src_pools dst_pools p
+  src_pools="$(echo "$sets" | awk 'NF{print $2}' | cut -d/ -f1 | sort -u)"
+  dst_pools="$(echo "$sets" | awk 'NF{print $3}' | cut -d/ -f1 | sort -u)"
+
+  # 1. HOME: delegate send/snapshot/hold on each SOURCE pool (skip if already present)
+  for p in $src_pools; do
+    if zfs allow "$p" 2>/dev/null | grep -qE "user $huser .*\bsend\b"; then ok "home: send already delegated on $p"
+    else warn "home: delegating send,snapshot,hold on $p (one-time sudo)"
+      prime_sudo && sudo zfs allow "$huser" send,snapshot,hold "$p" && ok "delegated on $p" || warn "could not delegate on $p"; fi
+  done
+  chmod +x "$wrapper" 2>/dev/null || true
+
+  # 2. VAULT: dedicated no-passphrase pull key (idempotent); fetch its pubkey
+  local pub; pub="$(ssh "$ssh_t" '[ -f ~/.ssh/cairn-pull ] || ssh-keygen -t ed25519 -f ~/.ssh/cairn-pull -N "" -C "cairn-pull -> home" >/dev/null 2>&1; chmod 600 ~/.ssh/cairn-pull; cat ~/.ssh/cairn-pull.pub' 2>/dev/null)"
+  [ -n "$pub" ] || { warn "could not create/read the vault pull key"; return; }
+
+  # 3. HOME: authorize the pull key, locked to the forced-command wrapper (idempotent)
+  local ak="$HOME/.ssh/authorized_keys" keyfield; mkdir -p "$HOME/.ssh"; touch "$ak"; chmod 600 "$ak"
+  keyfield="$(echo "$pub" | awk '{print $2}')"
+  if grep -qF "$keyfield" "$ak"; then ok "home: pull key already authorized"
+  else printf 'restrict,command="%s" %s\n' "$wrapper" "$pub" >> "$ak"; ok "home: authorized the pull key (restrict + forced-command)"; fi
+
+  # 4. VAULT: delegate receive on each DEST pool (skip if present)
+  for p in $dst_pools; do
+    if ssh "$ssh_t" "zfs allow $p 2>/dev/null | grep -qE 'user $vuser .*\\breceive\\b'"; then ok "vault: receive already delegated on $p"
+    else printf '   \033[1;35m>>> vault sudo (delegate receive on %s) <<<\033[0m\n' "$p"
+      ssh -t "$ssh_t" "sudo zfs allow $vuser create,mount,receive,mountpoint $p" <"$TTY" && ok "vault: delegated receive on $p" || warn "vault: could not delegate receive on $p"; fi
+  done
+
+  # 5. VAULT: push the runner + units, write the conf, enable the nightly timer
+  ssh "$ssh_t" 'mkdir -p ~/cairn/replication ~/.config/cairn ~/.config/systemd/user' 2>/dev/null
+  rsync -a "$HERE/replication/vault-pull.sh" "$ssh_t:cairn/replication/vault-pull.sh" 2>/dev/null
+  rsync -a "$HERE/replication/cairn-pull.service" "$HERE/replication/cairn-pull.timer" "$ssh_t:.config/systemd/user/" 2>/dev/null
+  local cf; cf="$(mktemp)"
+  { printf 'HOME_SSH  %s\nKEY  /home/%s/.ssh/cairn-pull\n' "$HOME_SSH" "$vuser"
+    while read -r n s d r; do [ -n "$n" ] && printf 'SET  %s  %s  %s  %s\n' "$n" "$s" "$d" "$r"; done <<<"$sets"; } > "$cf"
+  rsync -a "$cf" "$ssh_t:.config/cairn/replication.conf" 2>/dev/null; rm -f "$cf"
+  ssh "$ssh_t" 'chmod 600 ~/.config/cairn/replication.conf; chmod +x ~/cairn/replication/vault-pull.sh; systemctl --user daemon-reload && systemctl --user enable --now cairn-pull.timer' 2>&1 | sed 's/^/   /' \
+    && ok "vault: nightly pull timer enabled" || warn "vault: timer setup returned non-zero"
+
+  if askyn "run the first pull now?" y; then
+    printf '   \033[1;35m>>> first pull on the vault <<<\033[0m\n'
+    ssh "$ssh_t" '~/cairn/replication/vault-pull.sh' 2>&1 | sed 's/^/   /' || warn "first pull returned non-zero (check on the vault)"
+  fi
+  ok "Replication configured. Add the replica datasets to the VAULT's targets.yaml (zfs-local) to see their freshness on the dashboard."
 }
 
 # add a vault to an already-running home (no home rebuild). Needs the api container up to mint a token.
@@ -392,6 +477,12 @@ add_vault_only() {
     || die "no api container running - set up home first (./install.sh home), then re-run with --add-vault"
   say "Add a remote vault to this home"
   provision_vault
+}
+
+# set up (or re-sync) replication pull for an already-configured home + vault
+add_replication_only() {
+  [ -f "$HERE/config/targets.yaml" ] || die "no config/targets.yaml - set up home first (./install.sh home)"
+  provision_replication "$VAULT_SSH"
 }
 
 # ============================================================ VAULT ============================================================
@@ -477,6 +568,8 @@ EOF
 }
 
 case "$ROLE" in
-  home)  [ "$ADD_VAULT" = 1 ] && add_vault_only || install_home ;;
+  home)  if [ "$ADD_VAULT" = 1 ]; then add_vault_only
+         elif [ "$REPLICATION" = 1 ]; then add_replication_only
+         else install_home; fi ;;
   vault) install_vault ;;
 esac

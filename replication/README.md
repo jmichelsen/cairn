@@ -27,20 +27,16 @@ friend's house - only makes outbound connections; home never needs an inbound pa
   control char; every other metacharacter is rejected, so eval can run a zfs-send pipeline and nothing
   else. No `--compress=none` needed.
 
-## Setup (manual, until folded into install.sh)
+## Setup: `./install.sh home --replication`
 
-1. **Home:** `zfs allow <user> send,snapshot,hold <each source>` (skip if already delegated).
-2. **Vault:** `zfs allow <user> create,mount,receive <pool>` (skip if already delegated); import the
-   data pool; `apt install sanoid`.
-3. **Vault:** `ssh-keygen -t ed25519 -f ~/.ssh/cairn-pull -N ""`; copy the `.pub` to home.
-4. **Home:** add it to `authorized_keys` as `restrict,command="/home/<user>/cairn/replication/pull-command.sh" <pubkey>`.
-5. **Vault:** drop `vault-pull.sh` + the systemd units, write `~/.config/cairn/replication.conf`,
-   `systemctl --user enable --now cairn-pull.timer`.
-6. **Monitoring:** add the replica datasets to the vault's `targets.yaml` as `zfs-local` so their
-   snapshot freshness (is the off-site copy current?) shows on the dashboard.
+The installer automates it (also offered at the end of vault provisioning), and is idempotent - re-run
+any time to re-sync. It: (1) detects home's `zfs-repl` sets from `config/targets.yaml`; (2) **home:**
+`zfs allow send,snapshot,hold` on each source pool, only where missing; (3) **vault:** generates the
+dedicated `~/.ssh/cairn-pull` key; (4) **home:** authorizes it as
+`restrict,command="…/pull-command.sh" <pubkey>`; (5) **vault:** `zfs allow create,mount,receive` on the
+dest pool, only where missing; (6) **vault:** pushes `vault-pull.sh` + the units, writes
+`~/.config/cairn/replication.conf`, enables the nightly timer; (7) optionally runs the first pull.
 
-## TODO: fold into install.sh
-
-A `--replication` / vault-provisioning step should automate 1-6: detect home's `zfs-repl` sets from
-its targets.yaml, run the `zfs allow` on both sides (the delegation is NOT set up by the installer
-today), exchange the key, and write the runner/timer/conf. Tracked as the next replication feature.
+It does NOT: import the vault's data pool, `apt install sanoid` on the vault (the installer's optional
+toolchain step offers that), or add the replica datasets to the **vault's** `targets.yaml` as
+`zfs-local` (do that so their freshness - is the off-site copy current? - shows on the dashboard).
