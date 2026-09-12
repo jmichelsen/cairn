@@ -308,7 +308,12 @@ def pairing(conn, rows):
     for p in _pair_rows(conn):
         R = by.get((p["r_agent"], p["r_name"])); L = by.get((p["l_agent"], p["l_name"]))
         if R and L:
-            views.append({"r": R, "l": L, "dataset": p["ds"], "severity": _worst(R["severity"], L["severity"])})
+            # The repl half (home) can't compute repl-lag once the dest lives on the other agent, so it
+            # reports UNKNOWN structurally - defer the pair's severity to the off-site copy (L), which is
+            # the meaningful end-to-end 3-2-1 signal (it goes stale if the source stops snapshotting OR
+            # the pull stalls). Only when the home half has a REAL severity do we take the worse of the two.
+            sev = L["severity"] if R["severity"] == "UNKNOWN" else _worst(R["severity"], L["severity"])
+            views.append({"r": R, "l": L, "dataset": p["ds"], "severity": sev})
             keys.add((p["r_agent"], p["r_name"])); keys.add((p["l_agent"], p["l_name"]))
     return views, keys
 
