@@ -304,6 +304,18 @@ EOF
   sudo env CAIRN_USER="$USER" bash -c "'$HERE/phase1/grant-access.sh' $sd && loginctl enable-linger '$USER'"
   ok "privileged setup done"
 
+  # ---- SMART attribute-table detail: grant-access installs the scoped wrapper but only the agent's
+  #      CAIRN_SMART_DETAIL flag turns detail ON. Set it in the unit whenever the wrapper is present, so
+  #      the attribute table survives a unit regeneration (e.g. a rename) instead of silently reverting
+  #      to sudoless scan-only. ----
+  local unit="$HOME/.config/systemd/user/cairn-agent.service"
+  if { [ -n "$sd" ] || [ -x /opt/cairn/phase1/smart-probe.sh ]; } \
+     && ! grep -q '^Environment=CAIRN_SMART_DETAIL=' "$unit" 2>/dev/null; then
+    sed -i '/^Environment=CAIRN_DRYRUN=/a Environment=CAIRN_SMART_DETAIL=1' "$unit"
+    systemctl --user daemon-reload
+    ok "SMART attribute-table detail enabled on the agent (CAIRN_SMART_DETAIL=1)"
+  fi
+
   # ---- start the agent (sg re-reads the new group at exec) ----
   systemctl --user restart cairn-agent.service || warn "agent start failed - check: systemctl --user status cairn-agent"
   sleep 3
