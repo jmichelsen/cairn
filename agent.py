@@ -42,6 +42,9 @@ CAN_EXEC = _e("CAIRN_CAN_EXECUTE", "0") == "1"
 INTERVAL = int(_e("CAIRN_INTERVAL", "900"))
 DRYRUN   = _e("CAIRN_DRYRUN", "0") == "1"
 TIMEOUT  = int(_e("CAIRN_ACTION_TIMEOUT", "7200"))
+# Identify with a real User-Agent. urllib's default ("Python-urllib/X.Y") is a known-bot signature
+# that CDNs/WAFs in front of the API (e.g. Cloudflare) reject with 403, so always send our own.
+UA       = _e("CAIRN_USER_AGENT", "cairn-agent/1.0")
 
 META_KEYS = ["type", "source", "dest", "tier", "location", "encrypted", "cadence"]
 
@@ -50,7 +53,7 @@ def enroll():
     if not ENROLL_SECRET:
         raise RuntimeError("got 401 and no CAIRN_ENROLL_SECRET to re-enroll with")
     req = urllib.request.Request(f"{API}/api/v1/backup/enroll", data=b"{}", method="POST",
-          headers={"Content-Type": "application/json", "X-Backup-Enroll": ENROLL_SECRET})
+          headers={"Content-Type": "application/json", "X-Backup-Enroll": ENROLL_SECRET, "User-Agent": UA})
     with urllib.request.urlopen(req, timeout=30) as r:
         j = json.loads(r.read())
     _access["token"] = j["access_token"]
@@ -59,7 +62,7 @@ def enroll():
 def api_call(method, path, body=None, _retry=True):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(f"{API}{path}", data=data, method=method,
-          headers={"Content-Type": "application/json", "X-Backup-Token": _access["token"]})
+          headers={"Content-Type": "application/json", "X-Backup-Token": _access["token"], "User-Agent": UA})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.loads(r.read() or "null")
