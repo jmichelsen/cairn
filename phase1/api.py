@@ -1538,9 +1538,9 @@ function renderReconcile(ov){
       +'replication view: <b>'+esc(o.replication.agent)+'</b> / '+esc(o.replication.name)
       +' &nbsp;&harr;&nbsp; monitored by: <b>'+esc(o.monitor.agent)+'</b> / '+esc(o.monitor.name)
       +'</small></div><div class=reconacts>'
-      +'<button onclick="reconAct(this,\'retire\','+o.replication.id+')">Retire '+esc(o.replication.agent)+' view</button>'
-      +'<button onclick="reconAct(this,\'retire\','+o.monitor.id+')">Retire '+esc(o.monitor.agent)+' view</button>'
-      +'<button onclick="reconAct(this,\'dismiss\',0,\''+esc(o.pair)+'\')">Keep both</button>'
+      +'<button onclick="reconAct(this,\\'retire\\','+o.replication.id+')">Retire '+esc(o.replication.agent)+' view</button>'
+      +'<button onclick="reconAct(this,\\'retire\\','+o.monitor.id+')">Retire '+esc(o.monitor.agent)+' view</button>'
+      +'<button onclick="reconAct(this,\\'dismiss\\',0,\\''+esc(o.pair)+'\\')">Keep both</button>'
       +'</div></div>';
   }).join('');
 }
