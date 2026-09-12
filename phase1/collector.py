@@ -11,7 +11,7 @@ Usage:
   collector.py [--once] [--db PATH] [--targets PATH] [--alert]
 Env (or /etc/cairn/cairn.env): CAIRN_DB, CAIRN_TARGETS, BORG_PASSPHRASE_*
 """
-import argparse, json, os, re, sqlite3, subprocess, sys, time
+import argparse, json, os, re, shutil, sqlite3, subprocess, sys, time
 from pathlib import Path
 
 try:
@@ -343,9 +343,8 @@ def adapter_borg(t, defaults, now):
     return [st]
 
 def _have(cmd):
-    """True if `cmd` is an executable on PATH (no shutil dependency)."""
-    return any(os.access(os.path.join(p, cmd), os.X_OK)
-               for p in os.environ.get("PATH", "").split(os.pathsep) if p)
+    """True if `cmd` is an executable on PATH."""
+    return shutil.which(cmd) is not None
 
 def _epoch(s):
     """Parse a date string to unix epoch via `date -d` (handles ISO + snapper's 'YYYY-MM-DD HH:MM:SS')."""
