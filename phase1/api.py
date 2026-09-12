@@ -221,12 +221,20 @@ def latest_status(conn):
 def health():
     with db() as conn:
         rows = latest_status(conn)
+        pair_views, paired_keys = pairing(conn, rows)
     counts = {"CRIT": 0, "WARN": 0, "UNKNOWN": 0, "OK": 0}
     worst = "OK"; acked = 0
     for r in rows:
+        if (r["agent"], r["name"]) in paired_keys:   # a paired half is counted once, via its pair below
+            continue
         if r.get("acked"):                 # acknowledged -> excluded from the alarm rollup
             acked += 1; counts["OK"] += 1; continue
         sev = r["severity"]
+        counts[sev] = counts.get(sev, 0) + 1
+        if SEV_ORDER.get(sev, 9) < SEV_ORDER.get(worst, 9):
+            worst = sev
+    for v in pair_views:                   # each guaranteed replication pair counts once, at its worst half
+        sev = v["severity"]
         counts[sev] = counts.get(sev, 0) + 1
         if SEV_ORDER.get(sev, 9) < SEV_ORDER.get(worst, 9):
             worst = sev
@@ -241,8 +249,8 @@ def health():
             if SEV_ORDER.get(a["severity"], 9) < SEV_ORDER.get(worst, 9):
                 worst = a["severity"]
     return {"severity": worst, "counts": counts, "acked": acked,
-            "targets": len(rows), "agents": len(astates), "stale_agents": stale_agents,
-            "ts": now}
+            "targets": sum(1 for r in rows if (r["agent"], r["name"]) not in paired_keys) + len(pair_views),
+            "agents": len(astates), "stale_agents": stale_agents, "ts": now}
 
 @app.get("/api/v1/backup/agents")
 def agents_view():
@@ -275,27 +283,61 @@ def unack_target(target: str):
         conn.commit()
     return {"ok": True, "target": target, "removed": n}
 
-# ---------------- reconciliation of cross-agent target overlaps ----------------
-def find_overlaps(conn):
-    """A replication whose dest another agent now monitors directly = two views of one relationship
-    (e.g. home `zfs-repl -> iwolf/Pics` + a vault `zfs-local iwolf/Pics`). Surface them so the user can
-    reconcile instead of cairn silently hiding one. Excludes pairs the user chose to keep."""
-    dismissed = {r[0] for r in conn.execute("SELECT pair FROM reconcile_dismissed")}
+# ---------------- replication pairing + reconciliation of cross-agent overlaps ----------------
+def _worst(*sevs):
+    return min(sevs, key=lambda s: SEV_ORDER.get(s, 9))   # SEV_ORDER: lower = worse
+
+def _pair_rows(conn):
+    """GUARANTEED replication pairs: a zfs-repl whose dest is EXACTLY another agent's zfs-local source.
+    Provably the two halves of one set (home sends source -> dest; the other agent monitors dest), so
+    they auto-merge into a single card rather than needing the user to reconcile."""
     q = """
-      SELECT r.id r_id, r.name r_name, IFNULL(r.agent,'') r_agent, r.dest ds,
+      SELECT r.id r_id, r.name r_name, IFNULL(r.agent,'') r_agent, r.source r_src, r.dest ds,
              l.id l_id, l.name l_name, IFNULL(l.agent,'') l_agent
       FROM targets r JOIN targets l ON r.dest = l.source
       WHERE r.type='zfs-repl' AND l.type='zfs-local' AND IFNULL(r.agent,'')<>IFNULL(l.agent,'')
         AND r.enabled=1 AND l.enabled=1 AND r.dest IS NOT NULL AND r.dest<>''
     """
+    return [dict(x) for x in conn.execute(q).fetchall()]
+
+def pairing(conn, rows):
+    """Match guaranteed pairs to their two latest-status rows. Returns (views, paired_keys): a view is
+    {'r':R_row,'l':L_row,'dataset':ds,'severity':worst}; paired_keys is the (agent,name) set in a pair."""
+    by = {(r["agent"], r["name"]): r for r in rows}
+    views = []; keys = set()
+    for p in _pair_rows(conn):
+        R = by.get((p["r_agent"], p["r_name"])); L = by.get((p["l_agent"], p["l_name"]))
+        if R and L:
+            views.append({"r": R, "l": L, "dataset": p["ds"], "severity": _worst(R["severity"], L["severity"])})
+            keys.add((p["r_agent"], p["r_name"])); keys.add((p["l_agent"], p["l_name"]))
+    return views, keys
+
+def find_overlaps(conn):
+    """AMBIGUOUS overlaps for the reconcile modal: the same target NAME reported by two different agents
+    that are NOT a guaranteed pair (guaranteed pairs auto-merge, so they are excluded here). Excludes
+    pairs the user chose to keep."""
+    paired = set()
+    for p in _pair_rows(conn):
+        paired.add((p["r_agent"], p["r_name"])); paired.add((p["l_agent"], p["l_name"]))
+    dismissed = {r[0] for r in conn.execute("SELECT pair FROM reconcile_dismissed")}
+    byname = {}
+    for r in conn.execute("SELECT id,name,IFNULL(agent,'') agent,type,source,dest FROM targets WHERE enabled=1"):
+        byname.setdefault(r["name"], []).append(dict(r))
     out = []
-    for x in conn.execute(q).fetchall():
-        pair = f"{x['r_agent']}:{x['r_name']}|{x['l_agent']}:{x['l_name']}"
+    for name, ts in byname.items():
+        if len({t["agent"] for t in ts}) < 2:
+            continue
+        if all((t["agent"], t["name"]) in paired for t in ts):   # fully handled by auto-pairing
+            continue
+        a = ts[0]; b = next((t for t in ts if t["agent"] != a["agent"]), None)
+        if not b:
+            continue
+        pair = f"{a['agent']}:{a['name']}|{b['agent']}:{b['name']}"
         if pair in dismissed:
             continue
-        out.append({"pair": pair, "dataset": x["ds"],
-                    "replication": {"id": x["r_id"], "name": x["r_name"], "agent": x["r_agent"]},
-                    "monitor": {"id": x["l_id"], "name": x["l_name"], "agent": x["l_agent"]}})
+        out.append({"pair": pair, "dataset": a.get("source") or a.get("dest") or name,
+                    "replication": {"id": a["id"], "name": a["name"], "agent": a["agent"]},
+                    "monitor": {"id": b["id"], "name": b["name"], "agent": b["agent"]}})
     return out
 
 @app.get("/api/v1/backup/reconcile")
@@ -846,6 +888,13 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .reconacts button{border:1px solid var(--line);background:var(--surf);color:var(--ink);border-radius:7px;padding:5px 11px;font-size:12px;cursor:pointer}
 .reconacts button:hover{border-color:var(--ack)}
 .reconacts button:disabled{opacity:.5;cursor:default}
+.card.pair .pbadge{font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);border:1px solid var(--line);border-radius:5px;padding:1px 6px;margin-right:8px}
+.phalves{display:flex;flex-direction:column;gap:10px;margin-top:11px}
+.phalf{display:flex;gap:9px;align-items:flex-start}
+.phalf .pd{width:8px;height:8px;border-radius:50%;margin-top:4px;flex:none}
+.phinfo{font-size:12px}
+.phinfo .psev,.phinfo .prole{font-size:10.5px;color:var(--mut)}
+.phinfo small{display:block;color:var(--mut);margin-top:2px;font-size:11px;line-height:1.35}
 .hero-top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .hero-top h2{font-weight:900;font-size:20px;letter-spacing:-.01em}
 .verd{font-weight:700;font-size:12.5px;padding:4px 12px;border-radius:20px;border:1px solid currentColor;letter-spacing:.02em}
@@ -1556,6 +1605,30 @@ def _smart_card(r):
             f'<div class=chistrow><button class="histbtn" onclick="toggleSmart(this)">SMART details</button>'
             f'{probed}<div class="smdet" hidden>{tbl}</div></div></div>')
 
+def _pair_card(v):
+    """One merged card for a guaranteed replication pair: the source->dest relationship up top, then
+    each half (the sending agent + the off-site copy) with its own severity and snapshot freshness."""
+    R = v["r"]; L = v["l"]; sev = SEVCLS.get(v["severity"], "unk")
+    name = _esc(R["name"])
+    subtitle = f'{_esc(R.get("source") or "")} &rarr; {_esc(v["dataset"])}'
+    meta = []
+    if R.get("tier"): meta.append(f'tier {R["tier"]}')
+    if R.get("encrypted") or L.get("encrypted"): meta.append("enc")
+    if meta: subtitle += " &middot; " + " &middot; ".join(_esc(m) for m in meta)
+    def half(row, role):
+        hs = SEVCLS.get(row["severity"], "unk")
+        age = (_ago_s(row["snap_age_src_s"]) + " old") if row.get("snap_age_src_s") is not None else "no snapshot"
+        ks = f' &middot; key {_esc(row["key_status"])}' if row.get("key_status") else ""
+        return (f'<div class=phalf><span class=pd style="background:var(--{hs})"></span>'
+                f'<div class=phinfo><b>{_esc(row.get("agent") or "?")}</b> '
+                f'<span class=psev>{_esc(row["severity"])}</span> <span class=prole>{role}</span>'
+                f'<small>{_esc(row.get("source") or "")}<br>newest snapshot {age}{ks}</small></div></div>')
+    return (f'<div class="card pair {sev}" data-t="{name}"><div class=ch>'
+            f'<span class=cn>{name}</span><span class=chr>'
+            f'<span class=pbadge>replication pair</span><span class=cs>{_esc(v["severity"])}</span></span></div>'
+            f'<div class=src>{subtitle}</div>'
+            f'<div class=phalves>{half(R, "source")}{half(L, "off-site copy")}</div></div>')
+
 def _card(r, can_act):
     nm = r["name"]; n = _esc(nm); sev = SEVCLS.get(r["severity"], "unk")
     src = r.get("source") or ""
@@ -1722,6 +1795,8 @@ def index():
             "SELECT name FROM agents WHERE can_execute=1").fetchall()}
         agents = agent_states(conn)
         overlaps = find_overlaps(conn)
+        pair_views, paired_keys = pairing(conn, rows)
+    rows = [r for r in rows if (r["agent"], r["name"]) not in paired_keys]  # halves render as one pair card
     h = health()
     if not rows:
         return _shell(
@@ -1827,6 +1902,17 @@ def index():
         f'<span class=pt>Agents</span><span class=pcount id=agentcount>{scount}</span>'
         '<span class=pdot></span><span class=pchev>&#9662;</span></button>'
         f'<div class=pbody><div class=cards id=agentcards>{agents_cards}</div></div></section>')
+
+    # Guaranteed replication pairs render as ONE merged card (source + off-site copy) in their own group.
+    pairs_html = ""
+    if pair_views:
+        pv = sorted(pair_views, key=lambda v: (SEV_ORDER.get(v["severity"], 9), v["r"]["name"]))
+        inner = "".join(_pair_card(v) for v in pv)
+        pairs_html = ('<section class="pane grp" data-pane="grp:replication">'
+                      '<button class=paneh onclick="togglePane(\'grp:replication\')">'
+                      '<span class=pt>Replication</span><span class=pdot></span>'
+                      '<span class=pchev>&#9662;</span></button>'
+                      f'<div class=pbody><div class=cards>{inner}</div></div></section>')
     return _shell(f"""
   <div class=topbar2><h2 class=applogo>Cairn</h2>
     <div class=seg role=tablist>
@@ -1848,7 +1934,7 @@ def index():
         <div class=gauge-cap>Busiest pool<span>{glabel} · {gpct}% used</span></div></div>
       <div class=railsec><h3>Coverage gaps</h3><div id=gapsbody>{gaps_html}</div></div>
     </div>
-    <div class=main>{agents_html}{cards}
+    <div class=main>{agents_html}{pairs_html}{cards}
       <div class="pane actpane" data-pane=acts>
         <button class=paneh onclick="togglePane('acts')"><span class=pt>Activity</span><span class=pcount id=actcount></span><span class=pdot></span><span class=pchev>&#9662;</span></button>
         <div class=pbody><div id=actlog><span class=amsg>idle - actions stream here.</span></div></div></div></div>
