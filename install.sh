@@ -401,12 +401,14 @@ EOF
       if command -v zpool >/dev/null 2>&1; then
         for p in $(zpool list -H -o name 2>/dev/null); do echo "  - { name: $p, type: zfs-local, source: $p }"; done
       fi
-      echo "  - { name: smart, type: smart }"
-      echo "  - { name: kernel-disk-errors, type: kernel-errors }"
-      echo "  - { name: zfs-events, type: zfs-events }"
+      echo "  # These need extra access (smartctl wrapper / log + zed read). Uncomment after granting it,"
+      echo "  # or they will report UNKNOWN on a plain vault:"
+      echo "  # - { name: smart, type: smart }"
+      echo "  # - { name: kernel-disk-errors, type: kernel-errors }"
+      echo "  # - { name: zfs-events, type: zfs-events }"
     } > "$TGT"
     chmod 644 "$TGT"
-    ok "wrote $TGT (this host's pools + SMART / kernel / zfs-events)"
+    ok "wrote $TGT (this host's pools; smart/kernel/zfs-events left commented so the vault stays clean)"
     askyn "review/edit it now?" n && { "${EDITOR:-vi}" "$TGT" <"$TTY" >/dev/tty 2>&1 || true; }
   fi
 
