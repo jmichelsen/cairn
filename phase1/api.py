@@ -138,6 +138,30 @@ def db():
     c.row_factory = sqlite3.Row
     return c
 
+def _migrate_targets_identity(c):
+    """Re-key the targets table from a global UNIQUE(name) to UNIQUE(agent, name), so two agents (e.g.
+    home + an off-site vault) may report a same-named target without clobbering each other's row.
+    Idempotent and id-preserving (status.target_id / intents.target_id reference targets.id): runs once
+    on a pre-existing DB, and is a no-op once migrated or on a fresh DB created from the new schema."""
+    row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='targets'").fetchone()
+    if not row or not row[0]:
+        return
+    if "unique(agent,name)" in re.sub(r"\s+", "", row[0]).lower():
+        return  # already (agent,name)-keyed
+    # Old rows had a globally-unique name, so no (agent,name) pair can collide - a straight copy is safe.
+    c.execute("PRAGMA foreign_keys=OFF")
+    c.execute("ALTER TABLE targets RENAME TO _targets_pre_agentkey")
+    c.execute("""CREATE TABLE targets (
+        id INTEGER PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, source TEXT, dest TEXT,
+        tier TEXT, transport TEXT, location TEXT, cadence TEXT, encrypted INTEGER DEFAULT 0,
+        agent TEXT, meta_json TEXT, enabled INTEGER DEFAULT 1, UNIQUE(agent, name))""")
+    c.execute("""INSERT INTO targets
+        (id,name,type,source,dest,tier,transport,location,cadence,encrypted,agent,meta_json,enabled)
+        SELECT id,name,type,source,dest,tier,transport,location,cadence,encrypted,agent,meta_json,enabled
+        FROM _targets_pre_agentkey""")
+    c.execute("DROP TABLE _targets_pre_agentkey")
+    c.commit()
+
 def _init_db():
     """Ensure the DB + schema exist so the API can start before the collector's first run
     (e.g. as a standalone container service)."""
@@ -156,6 +180,7 @@ def _init_db():
                     c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
                 except sqlite3.OperationalError:
                     pass  # already exists
+            _migrate_targets_identity(c)   # re-key targets: UNIQUE(name) -> UNIQUE(agent,name)
 _init_db()
 HAS_ADMIN = _seed_tokens() > 0   # false => middleware returns 503 until CAIRN_ADMIN_TOKEN is set
 
@@ -411,7 +436,7 @@ async def report(request: Request):
                 continue
             tid = conn.execute("""INSERT INTO targets(name,type,source,dest,tier,location,encrypted,agent,enabled)
                 VALUES(?,?,?,?,?,?,?,?,1)
-                ON CONFLICT(name) DO UPDATE SET type=excluded.type,source=excluded.source,dest=excluded.dest,
+                ON CONFLICT(agent,name) DO UPDATE SET type=excluded.type,source=excluded.source,dest=excluded.dest,
                   tier=excluded.tier,location=excluded.location,encrypted=excluded.encrypted,agent=excluded.agent,
                   enabled=1
                 RETURNING id""",
@@ -509,8 +534,11 @@ async def create_action(request: Request):
         if body.get(k) is not None:
             opts[k] = str(body[k])
     with db() as conn:
-        r = conn.execute("SELECT id,type,source,dest,enabled,agent FROM targets WHERE name=?",
-                         (target,)).fetchone()
+        # Targets are identified per (agent, name); this by-name lookup assumes no two agents report an
+        # ACTIONABLE target with the same name (true for normal fleets). If that ever happens, add an
+        # agent selector to this endpoint and scope the lookup by (agent, name). Same caveat for acks.
+        r = conn.execute("SELECT id,type,source,dest,enabled,agent FROM targets WHERE name=? "
+                         "ORDER BY (agent IS NULL), id LIMIT 1", (target,)).fetchone()
         if not r or not r["enabled"]:
             raise HTTPException(404, f"unknown/disabled target '{target}'")
         if action == "sync" and r["type"] != "zfs-repl":

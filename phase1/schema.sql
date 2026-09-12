@@ -3,7 +3,7 @@ PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS targets (
   id            INTEGER PRIMARY KEY,
-  name          TEXT UNIQUE NOT NULL,
+  name          TEXT NOT NULL,
   type          TEXT NOT NULL,          -- zfs-repl | zfs-local | borg-repo | backupninja-handler
   source        TEXT,
   dest          TEXT,
@@ -14,7 +14,10 @@ CREATE TABLE IF NOT EXISTS targets (
   encrypted     INTEGER DEFAULT 0,
   agent         TEXT,                   -- which agent reported/owns this target (routes intents)
   meta_json     TEXT,                   -- full target dict (thresholds, notes)
-  enabled       INTEGER DEFAULT 1
+  enabled       INTEGER DEFAULT 1,
+  -- identity is per-AGENT: two agents (e.g. home + an off-site vault) may legitimately report a
+  -- target with the same name without clobbering each other's row. Ingest upserts ON CONFLICT(agent,name).
+  UNIQUE(agent, name)
 );
 
 CREATE TABLE IF NOT EXISTS status (
