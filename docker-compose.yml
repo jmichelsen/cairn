@@ -8,8 +8,12 @@
 # Setup (all config lives in ONE file - no hidden .env):
 #   cp config/cairn.env.example config/cairn.env   # set the 3 tokens + SMTP/Gotify
 #   cp config/targets.example.yaml       config/targets.yaml         # list YOUR pools/datasets/repos
-#   # edit the agent's borg/backupninja mounts below to your paths, then:
-#   docker compose up -d --build
+#   # edit the agent's borg/backupninja mounts below to your paths, then pick ONE deploy mode:
+#   docker compose up -d --build          # CONTAINER mode: api + the report-only container agent
+#   docker compose up -d --build api      # HOST mode: api only - pair with the execute-capable
+#                                         #   host agent from AGENT.md / install.sh (install.sh home
+#                                         #   already does exactly this). Do NOT run both modes, or
+#                                         #   you get TWO agents reporting for the same host.
 
 name: cairn
 
@@ -37,6 +41,9 @@ services:
     restart: unless-stopped
 
   # ---- local agent: reads THIS host's ZFS/borg/backupninja and reports to the API ----
+  # HOST-mode deploys skip this service (bring up `api` only) and run the execute-capable host
+  # agent instead - see AGENT.md. Running this container AND the host agent = two agents for one
+  # host. `docker compose up -d api` starts just the api; `docker compose rm -sf agent` drops this.
   agent:
     build: .
     image: cairn:latest

@@ -45,8 +45,10 @@ cp config/cairn.env.example config/cairn.env   # 3 tokens (openssl rand -hex 32)
 cp config/targets.example.yaml config/targets.yaml               # list YOUR pools / datasets / repos
 docker compose up -d --build                                     # api + report-only container agent
 ```
-Then `phase1/grant-access.sh` (borg/backupninja read access) and the host agent unit for actions -
-see `AGENT.md`.
+For **actions** you run the execute-capable host agent (`phase1/grant-access.sh` + the host agent
+unit, see `AGENT.md`) - and in that case bring up **`docker compose up -d --build api`** (api only),
+NOT the whole stack, or you end up with two agents reporting for the same host. `install.sh home`
+does this for you (api-only container + host agent).
 </details>
 
 **Read-only first (recommended).** The default compose runs an **unprivileged, report-only**
