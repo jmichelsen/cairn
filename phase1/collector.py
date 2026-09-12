@@ -147,6 +147,16 @@ def worst(*sevs):
     order = {"OK": 0, "UNKNOWN": 1, "WARN": 2, "CRIT": 3}
     return max((s for s in sevs if s), key=lambda s: order.get(s, 0), default="OK")
 
+# Built-in thresholds so a minimal targets.yaml (no `defaults:` block, e.g. a fresh vault) still
+# works. A user's `defaults:` overrides these key-by-key.
+DEFAULT_THRESHOLDS = {
+    "repl_warn_h": 28, "repl_crit_h": 50,
+    "cap_warn_pct": 85, "cap_crit_pct": 92,
+    "scrub_warn_d": 40, "scrub_crit_d": 70,
+    "resilver_warn_h": 48,
+    "fresh_warn_h": 28, "fresh_crit_h": 50,
+}
+
 def th(t, defaults, key):
     return t.get(key, defaults.get(key))
 
@@ -957,7 +967,7 @@ def collect_all(cfg, now=None):
     Sub-status targets (borg/backupninja/smart yield several) get 'name:suffix' names."""
     if now is None:
         now = int(time.time())
-    defaults = cfg["defaults"]; scrub_cad = cfg.get("scrub_cadence", {})
+    defaults = {**DEFAULT_THRESHOLDS, **cfg.get("defaults", {})}; scrub_cad = cfg.get("scrub_cadence", {})
     pools = zpool_list()
     out = []
     for t in cfg["targets"]:
@@ -1137,7 +1147,7 @@ def main():
     db = a.db or os.environ.get("CAIRN_DB", "/var/lib/cairn/cairn.db")
     tf = a.targets or os.environ.get("CAIRN_TARGETS", str(HERE.parent / "targets.yaml"))
     cfg = yaml.safe_load(Path(tf).read_text())
-    defaults = cfg["defaults"]; scrub_cad = cfg.get("scrub_cadence", {})
+    defaults = {**DEFAULT_THRESHOLDS, **cfg.get("defaults", {})}; scrub_cad = cfg.get("scrub_cadence", {})
     now = int(time.time())
 
     Path(db).parent.mkdir(parents=True, exist_ok=True)
