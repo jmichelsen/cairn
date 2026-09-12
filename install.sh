@@ -332,7 +332,12 @@ EOF
     fi
     say "Pushing cairn to $VAULT_SSH"
     command -v rsync >/dev/null || die "rsync needed to push to the vault"
-    rsync -a --delete --exclude '.git' --exclude 'config/cairn.env' --exclude '*.db*' --exclude 'vault-install.conf' \
+    # Exclude HOST-SPECIFIC config so the vault gets its OWN: cairn.env (tokens) AND targets.yaml
+    # (the vault must monitor ITS pools/replicas, not home's - a copied home targets.yaml makes the
+    # vault report home's fleet as UNKNOWN). The *.example.yaml files are still copied so the vault
+    # can seed a starter targets.yaml.
+    rsync -a --delete --exclude '.git' --exclude 'config/cairn.env' --exclude 'config/targets.yaml' \
+      --exclude '*.db*' --exclude 'vault-install.conf' --exclude '.cairn-pull.log' \
       "$HERE/" "$VAULT_SSH:cairn/" || die "rsync to $VAULT_SSH failed"
     scp "$BUNDLE" "$VAULT_SSH:cairn/vault-install.conf" >/dev/null || die "copying the bundle failed"
     printf '\n   \033[1;35m>>> now running ON THE VAULT (%s) - a sudo prompt below is the VAULT asking for its password <<<\033[0m\n' "$VAULT_SSH"
@@ -386,9 +391,23 @@ EOF
   else ok "vault config present - keeping it"; fi
 
   if [ ! -f "$TGT" ]; then
-    cp "$HERE/config/targets.example.yaml" "$TGT" 2>/dev/null || die "missing config/targets.example.yaml"
-    warn "wrote a starter targets.yaml - edit it to list the VAULT's own pool(s)/replica datasets"
-    askyn "open it in \$EDITOR now?" y && { "${EDITOR:-vi}" "$TGT" <"$TTY" >/dev/tty 2>&1 || true; }
+    say "Generating a starter targets.yaml from THIS host's own pools"
+    info "(a vault must monitor ITS pools/replicas - never home's, or it reports home's fleet as UNKNOWN)"
+    {
+      echo "# cairn vault targets - auto-generated $(date -u +%Y-%m-%dT%H:%M:%SZ). Edit to taste."
+      echo "# List only what lives on THIS host. Add snapshot-freshness checks for replicas as they land,"
+      echo "# e.g.  - { name: Pics-replica, type: zfs-local, source: iwolf/Pics }"
+      echo "targets:"
+      if command -v zpool >/dev/null 2>&1; then
+        for p in $(zpool list -H -o name 2>/dev/null); do echo "  - { name: $p, type: zfs-local, source: $p }"; done
+      fi
+      echo "  - { name: smart, type: smart }"
+      echo "  - { name: kernel-disk-errors, type: kernel-errors }"
+      echo "  - { name: zfs-events, type: zfs-events }"
+    } > "$TGT"
+    chmod 644 "$TGT"
+    ok "wrote $TGT (this host's pools + SMART / kernel / zfs-events)"
+    askyn "review/edit it now?" n && { "${EDITOR:-vi}" "$TGT" <"$TTY" >/dev/tty 2>&1 || true; }
   fi
 
   local CAN=0; askyn "should the vault EXECUTE actions (e.g. run its own scrubs)? (default: report-only)" n && CAN=1
