@@ -3,8 +3,8 @@
 #
 # Pulls the configured datasets FROM home INTO this vault's pool over the dedicated restricted key.
 # Delegation-only (no sudo): home has send/snapshot/hold on the sources, the vault has receive on its
-# pool. Plain send with no remote pipe - home's pull-command.sh reports stream helpers (mbuffer/lzop)
-# as absent, so syncoid falls back to a bare `zfs send`, which is all the restricted key permits.
+# pool. syncoid runs normally (compression + mbuffer buffering + resume) - home's pull-command.sh is
+# pipeline-aware and permits the `zfs send | lzop | mbuffer` pipeline while still allowing nothing else.
 #
 # Config (default ~/.config/cairn/replication.conf), whitespace-separated, '#' comments ok:
 #   HOME_SSH  user@home-host-or-vpn-addr
@@ -27,7 +27,7 @@ done < "$CONF"
   || { echo "cairn-pull: config incomplete (need HOME_SSH, KEY, and at least one SET)" >&2; exit 2; }
 command -v syncoid >/dev/null || { echo "cairn-pull: syncoid not installed (apt install sanoid)" >&2; exit 2; }
 
-COMMON=(--no-privilege-elevation --no-sync-snap --no-stream --compress=none --sshkey "$KEY")
+COMMON=(--no-privilege-elevation --no-sync-snap --no-stream --sshkey "$KEY")
 rc=0
 for s in "${SETS[@]}"; do
   IFS='|' read -r name src dst raw <<<"$s"
