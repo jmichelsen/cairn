@@ -68,9 +68,10 @@ def _mint_session(role, username):
     tok = _secrets.token_hex(32); now = int(time.time())
     with db() as c:
         c.execute("DELETE FROM auth_tokens WHERE kind='session' AND expires_ts < ?", (now,))
-        c.execute("INSERT INTO auth_tokens(hash,role,kind,label,created_ts,expires_ts,active) "
-                  "VALUES(?,?,?,?,?,?,1)",
-                  (_hash(tok), role, "session", f"session:{username}:{tok[:8]}", now, now + SESSION_TTL))
+        # parent = the owning username, so cairn-user can revoke this account's sessions on change.
+        c.execute("INSERT INTO auth_tokens(hash,role,kind,label,parent,created_ts,expires_ts,active) "
+                  "VALUES(?,?,?,?,?,?,?,1)",
+                  (_hash(tok), role, "session", f"session:{username}:{tok[:8]}", username, now, now + SESSION_TTL))
         c.commit()
     return tok
 

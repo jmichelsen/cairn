@@ -35,6 +35,13 @@ def _c():
         role TEXT NOT NULL DEFAULT 'viewer', created_ts INTEGER, active INTEGER DEFAULT 1)""")
     return c
 
+def _kill_sessions(c, username):
+    """Invalidate any live session tokens for this account, so a password change, role change,
+    disable, or removal takes effect immediately instead of waiting for the session to expire.
+    The API records the owning username in each session token's `parent` column, matched here exactly."""
+    return c.execute("UPDATE auth_tokens SET active=0 WHERE kind='session' AND active=1 AND parent=?",
+                     (username,)).rowcount
+
 def _read_pw(args, confirm):
     if getattr(args, "password_stdin", False):
         pw = sys.stdin.readline().rstrip("\n")
@@ -71,10 +78,16 @@ def main():
     elif args.cmd == "passwd":
         pw = _read_pw(args, confirm=True)
         n = c.execute("UPDATE users SET pass_hash=? WHERE username=?", (_pw_hash(pw), args.username)).rowcount
-        c.commit(); sys.exit(0 if n else f"no such user '{args.username}'")
+        k = _kill_sessions(c, args.username) if n else 0
+        c.commit()
+        if not n: sys.exit(f"no such user '{args.username}'")
+        print(f"password changed for {args.username}" + (f" ({k} session(s) signed out)" if k else ""))
     elif args.cmd == "role":
         n = c.execute("UPDATE users SET role=? WHERE username=?", (args.role, args.username)).rowcount
-        c.commit(); print(f"{args.username} -> role={args.role}") if n else sys.exit(f"no such user '{args.username}'")
+        k = _kill_sessions(c, args.username) if n else 0   # force re-login so the new role takes effect
+        c.commit()
+        if not n: sys.exit(f"no such user '{args.username}'")
+        print(f"{args.username} -> role={args.role}" + (f" ({k} session(s) signed out)" if k else ""))
     elif args.cmd == "list":
         for u in c.execute("SELECT username,role,active,created_ts FROM users ORDER BY role,username"):
             made = time.strftime("%Y-%m-%d", time.localtime(u["created_ts"])) if u["created_ts"] else "?"
@@ -82,10 +95,16 @@ def main():
     elif args.cmd in ("disable", "enable"):
         n = c.execute("UPDATE users SET active=? WHERE username=?",
                       (1 if args.cmd == "enable" else 0, args.username)).rowcount
-        c.commit(); print(f"{args.cmd}d {args.username}") if n else sys.exit(f"no such user '{args.username}'")
+        k = _kill_sessions(c, args.username) if (n and args.cmd == "disable") else 0
+        c.commit()
+        if not n: sys.exit(f"no such user '{args.username}'")
+        print(f"{args.cmd}d {args.username}" + (f" ({k} session(s) signed out)" if k else ""))
     elif args.cmd == "remove":
+        k = _kill_sessions(c, args.username)
         n = c.execute("DELETE FROM users WHERE username=?", (args.username,)).rowcount
-        c.commit(); print(f"removed {args.username}") if n else sys.exit(f"no such user '{args.username}'")
+        c.commit()
+        if not n: sys.exit(f"no such user '{args.username}'")
+        print(f"removed {args.username}" + (f" ({k} session(s) signed out)" if k else ""))
 
 if __name__ == "__main__":
     main()
