@@ -111,3 +111,17 @@ CREATE TABLE IF NOT EXISTS acks (
   ts      INTEGER NOT NULL,
   note    TEXT
 );
+
+-- Reconciliation of cross-agent target overlaps (e.g. home's `zfs-repl -> iwolf/X` and a vault's
+-- `zfs-local iwolf/X` are two ends of one relationship). Surfaced in the dashboard for the user to
+-- resolve, rather than auto-hidden.
+CREATE TABLE IF NOT EXISTS reconcile_dismissed (   -- "keep both": stop warning about this pair
+  pair    TEXT PRIMARY KEY,
+  ts      INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS target_retired (        -- user-retired target: stays disabled even if its
+  agent   TEXT NOT NULL,                            -- agent keeps reporting it (survives re-ingest)
+  name    TEXT NOT NULL,
+  ts      INTEGER NOT NULL,
+  PRIMARY KEY(agent, name)
+);
