@@ -169,9 +169,12 @@ fi
 say "Backup toolchain (optional - install what THIS host uses)"
 ensure_opt "command -v rsync >/dev/null"   rsync   "file transfers, restores, and vault seeding"
 ensure_opt "command -v syncoid >/dev/null" syncoid "ZFS snapshot replication (sanoid + syncoid)"
+ensure_opt "command -v restic >/dev/null"  restic  "restic repository monitoring"
+ensure_opt "command -v rclone >/dev/null"  rclone  "rclone remote (off-site sync) monitoring"
 if [ "$ROLE" = home ]; then
   ensure_opt "command -v borg >/dev/null"        borg        "borg repository monitoring"
   ensure_opt "command -v backupninja >/dev/null" backupninja "backupninja handler monitoring"
+  ensure_opt "command -v snapper >/dev/null"     snapper     "snapper (btrfs) snapshot monitoring"
 fi
 ensure_httm
 [ "$CHECK" = 1 ] && { ok "preflight passed - nothing changed (--check)"; exit 0; }

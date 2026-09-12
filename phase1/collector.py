@@ -342,6 +342,114 @@ def adapter_borg(t, defaults, now):
     st["detail_json"] = json.dumps(dict(reasons=reasons, encryption=enc if 'enc' in dir() else None))
     return [st]
 
+def _have(cmd):
+    """True if `cmd` is an executable on PATH (no shutil dependency)."""
+    return any(os.access(os.path.join(p, cmd), os.X_OK)
+               for p in os.environ.get("PATH", "").split(os.pathsep) if p)
+
+def _epoch(s):
+    """Parse a date string to unix epoch via `date -d` (handles ISO + snapper's 'YYYY-MM-DD HH:MM:SS')."""
+    if not s:
+        return None
+    rc, ep, _ = run(["date", "-d", s, "+%s"])
+    return int(ep.strip()) if rc == 0 and ep.strip().isdigit() else None
+
+def _fresh(st, t, defaults, now, last_ts, noun):
+    """Shared freshness verdict: OK/WARN/CRIT off the fresh_warn_h/fresh_crit_h thresholds."""
+    reasons = []
+    if last_ts:
+        st["last_run_ts"] = last_ts
+        age = now - last_ts
+        fw, fc = th(t, defaults, "fresh_warn_h") * 3600, th(t, defaults, "fresh_crit_h") * 3600
+        if age >= fc:
+            st["severity"] = worst(st["severity"], "CRIT"); reasons.append(f"{noun} {age//3600}h old")
+        elif age >= fw:
+            st["severity"] = worst(st["severity"], "WARN"); reasons.append(f"{noun} {age//3600}h old")
+    else:
+        st["severity"] = worst(st["severity"], "WARN"); reasons.append(f"no {noun} found")
+    return reasons
+
+def _errline(err, out, rc):
+    lines = [l.strip() for l in ((err or out) or "").splitlines() if l.strip()]
+    return (lines[-1] if lines else f"rc={rc}")[:170]
+
+def adapter_restic(t, defaults, now):
+    """restic repo: newest snapshot age (freshness) + snapshot count. Repo in `source`; the password
+    comes from `passphrase_env` (env var name) or RESTIC_PASSWORD / `password_file`."""
+    repo = t["source"]
+    st = dict(severity="UNKNOWN", last_error=None)
+    if not _have("restic"):
+        st["last_error"] = "restic not installed"; return [st]
+    env = {"RESTIC_REPOSITORY": repo}
+    pe = t.get("passphrase_env") or "RESTIC_PASSWORD"
+    if os.environ.get(pe):
+        env["RESTIC_PASSWORD"] = os.environ[pe]
+    if t.get("password_file"):
+        env["RESTIC_PASSWORD_FILE"] = t["password_file"]
+    rc, out, err = run(["restic", "snapshots", "--json", "--no-lock"], timeout=180, env=env)
+    if rc != 0:
+        st["last_error"] = _errline(err, out, rc)   # unreadable / locked / bad password -> UNKNOWN
+        return [st]
+    try:
+        snaps = json.loads(out or "[]")
+    except ValueError as e:
+        st["last_error"] = f"parse restic snapshots: {e}"; return [st]
+    last_ts = _epoch(snaps[-1].get("time")) if snaps else None
+    st["archive_count"] = len(snaps)
+    st["severity"] = "OK"
+    reasons = _fresh(st, t, defaults, now, last_ts, "last snapshot")
+    st["detail_json"] = json.dumps(dict(reasons=reasons, tool="restic"))
+    return [st]
+
+def adapter_rclone(t, defaults, now):
+    """rclone remote: confirm the remote is configured + reachable; optional freshness from a `marker`
+    file the sync job touches (rclone keeps no backup-time state of its own). Remote in `source`."""
+    remote = t["source"]
+    st = dict(severity="UNKNOWN", last_error=None)
+    if not _have("rclone"):
+        st["last_error"] = "rclone not installed"; return [st]
+    rc, out, err = run(["rclone", "lsjson", "--max-depth", "0", remote], timeout=90)
+    if rc != 0:
+        st["severity"] = "CRIT"; st["last_error"] = f"remote unreachable: {_errline(err, out, rc)}"
+        st["detail_json"] = json.dumps(dict(reasons=["remote unreachable"], tool="rclone")); return [st]
+    st["severity"] = "OK"
+    marker = t.get("marker")
+    if marker and os.path.exists(marker):
+        reasons = _fresh(st, t, defaults, now, int(os.path.getmtime(marker)), "last sync")
+    elif marker:
+        st["severity"] = "WARN"; reasons = ["sync marker missing"]
+    else:
+        reasons = ["remote reachable (no freshness marker configured)"]
+    st["detail_json"] = json.dumps(dict(reasons=reasons, tool="rclone"))
+    return [st]
+
+def adapter_snapper(t, defaults, now):
+    """snapper (btrfs) config: newest snapshot age (freshness) + count. Config name in `source`
+    (e.g. root, home). Uses snapper --jsonout (0.10+); needs read access to the config."""
+    cfg = t["source"]
+    st = dict(severity="UNKNOWN", last_error=None)
+    if not _have("snapper"):
+        st["last_error"] = "snapper not installed"; return [st]
+    rc, out, err = run(["snapper", "--jsonout", "-c", cfg, "list"], timeout=60)
+    if rc != 0:
+        st["last_error"] = (f"needs permission for config '{cfg}'"
+                            if "permission" in (err or "").lower() else _errline(err, out, rc))
+        return [st]
+    try:
+        data = json.loads(out or "{}")
+        snaps = data.get(cfg) if isinstance(data, dict) else (data or [])
+        if snaps is None and isinstance(data, dict) and data:
+            snaps = next(iter(data.values()))
+        snaps = [s for s in (snaps or []) if s.get("number")]   # skip snapshot 0 (the live subvolume)
+    except (ValueError, StopIteration):
+        st["last_error"] = "parse snapper --jsonout"; return [st]
+    last_ts = _epoch(snaps[-1].get("date")) if snaps else None   # jsonout list is chronological
+    st["archive_count"] = len(snaps)
+    st["severity"] = "OK"
+    reasons = _fresh(st, t, defaults, now, last_ts, "newest snapshot")
+    st["detail_json"] = json.dumps(dict(reasons=reasons, tool="snapper", config=cfg))
+    return [st]
+
 def adapter_kernel_errors(t, defaults, now):
     """Scan the recent kernel log for disk I/O / link-reset / HBA-storm errors. This is the ONLY
     durable evidence when ZFS self-heals a transient (0B resilver, counters cleared) - e.g. a brief
@@ -979,6 +1087,12 @@ def collect_all(cfg, now=None):
                 sts = adapter_zfs_repl(t, defaults, now, pools)
             elif typ == "borg-repo":
                 sts = adapter_borg(t, defaults, now)
+            elif typ == "restic":
+                sts = adapter_restic(t, defaults, now)
+            elif typ == "rclone":
+                sts = adapter_rclone(t, defaults, now)
+            elif typ == "snapper":
+                sts = adapter_snapper(t, defaults, now)
             elif typ == "smart":
                 sts = adapter_smart(t, defaults, now)
             elif typ == "kernel-errors":
