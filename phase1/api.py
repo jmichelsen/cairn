@@ -412,7 +412,8 @@ async def report(request: Request):
             tid = conn.execute("""INSERT INTO targets(name,type,source,dest,tier,location,encrypted,agent,enabled)
                 VALUES(?,?,?,?,?,?,?,?,1)
                 ON CONFLICT(name) DO UPDATE SET type=excluded.type,source=excluded.source,dest=excluded.dest,
-                  tier=excluded.tier,location=excluded.location,encrypted=excluded.encrypted,agent=excluded.agent
+                  tier=excluded.tier,location=excluded.location,encrypted=excluded.encrypted,agent=excluded.agent,
+                  enabled=1
                 RETURNING id""",
                 (name, s.get("type"), s.get("source"), s.get("dest"), s.get("tier"),
                  s.get("location"), 1 if s.get("encrypted") else 0, agent)).fetchone()[0]
@@ -427,6 +428,15 @@ async def report(request: Request):
                     pass
                 why = ", ".join(d.get("reasons", [])) or (s.get("last_error") or "")
                 alerts.append((s["severity"], f"{name}: {s['severity']}", f"[{agent}] {why}".strip(), f"cairn-{name}"))
+        # Authoritative report: retire (disable) targets THIS agent used to own but no longer reports,
+        # so removing a target from targets.yaml - or reassigning it to another agent - doesn't leave a
+        # ghost row on the board. A re-reported target is re-enabled above. Guard: only when the agent
+        # actually reported something; an empty report is a collection hiccup, not "all targets gone".
+        reported = [s.get("name") for s in statuses if s.get("name")]
+        if reported:
+            ph = ",".join("?" * len(reported))
+            conn.execute(f"UPDATE targets SET enabled=0 WHERE agent=? AND enabled=1 AND name NOT IN ({ph})",
+                         [agent, *reported])
         conn.execute("DELETE FROM status WHERE ts < ?", (now - 90 * DAY,))
         conn.commit()
         _reap_agents(conn, now)   # dead-man's-switch: alert on any OTHER agent gone silent
