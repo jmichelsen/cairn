@@ -43,28 +43,49 @@ PKG=""  # detected package manager
 detect_pkg() { for m in apt-get dnf yum pacman zypper; do command -v "$m" >/dev/null && { PKG="$m"; return; }; done; }
 _sudo_primed=0
 prime_sudo() { [ "$_sudo_primed" = 1 ] && return; sudo -v || die "sudo required to install packages / grant access"; _sudo_primed=1; }
-pkg_install() {  # pkg_install pkg...
-  [ $# -gt 0 ] || return 0
-  [ -n "$PKG" ] || die "no supported package manager found - install manually: $*"
-  prime_sudo
-  say "Installing missing packages: $*"
+_pkg_do() {  # run the package manager for "$@"; return its exit status (never dies)
   case "$PKG" in
     apt-get) sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
     dnf|yum) sudo "$PKG" install -y "$@" ;;
     pacman)  sudo pacman -Sy --noconfirm "$@" ;;
     zypper)  sudo zypper -n install "$@" ;;
-  esac || die "package install failed ($PKG install $*)"
+    *) return 127 ;;
+  esac
+}
+pkg_install() {  # required package(s): die on failure
+  [ $# -gt 0 ] || return 0
+  [ -n "$PKG" ] || die "no supported package manager found - install manually: $*"
+  prime_sudo
+  say "Installing missing packages: $*"
+  _pkg_do "$@" || die "package install failed ($PKG install $*)"
 }
 # cmd->package name differs per distro; we target apt/Debian primarily (as requested) with fallbacks.
 pkgname() { case "$1:$PKG" in
     yaml:apt-get) echo python3-yaml;;  yaml:*) echo python3-pyyaml;;
     docker:apt-get) echo docker.io;;   docker:*) echo docker;;
     compose:apt-get) echo docker-compose-v2;; compose:*) echo docker-compose;;
+    syncoid:*) echo sanoid;;            # the sanoid package ships both sanoid + syncoid
+    borg:*) echo borgbackup;;           # command is `borg`, package is borgbackup
     *) echo "$1";; esac; }
 ensure() {  # ensure "check-cmd" pkgkey "human hint" -> installs pkg if the check fails
   local chk="$1" key="$2"; eval "$chk" 2>/dev/null && return 0
   local p; p="$(pkgname "$key")"
   if [ "$YES" = 1 ] || askyn "install missing prerequisite '$p'?" y; then pkg_install "$p"; eval "$chk" 2>/dev/null || die "'$key' still unavailable after installing $p"; else die "prerequisite '$key' missing"; fi
+}
+ensure_opt() {  # optional tool: offer to install, but WARN (never die) if missing/declined/failed -
+  # cairn just reports nothing for a backup tool this host doesn't have.
+  local chk="$1" key="$2" why="$3"; eval "$chk" 2>/dev/null && { ok "$key ready"; return 0; }
+  local p; p="$(pkgname "$key")"
+  if [ -z "$PKG" ]; then warn "no package manager - install '$key' manually ($why)"; return 0; fi
+  if [ "$YES" = 1 ] || askyn "install '$p'? (enables: $why)" y; then
+    if prime_sudo && _pkg_do "$p" && eval "$chk" 2>/dev/null; then ok "$key ready"; else
+      warn "'$key' not installed - $why unavailable until it is present"; fi
+  else warn "skipped '$key' - $why unavailable until installed"; fi
+}
+ensure_httm() {  # httm is NOT in Debian apt (Rust tool); check + point at the real install path
+  command -v httm >/dev/null 2>&1 && { ok "httm ready"; return 0; }
+  warn "httm not found - the recovery-point catalog (points / deleted-file / version search) needs it"
+  info "httm is not in apt: install a .deb from https://github.com/kimono-koans/httm/releases, or 'cargo install httm'"
 }
 # docker CLI access: daemon is root; if this user isn't in the docker group, install-time docker runs
 # via sudo (and we add the user to the group for future sudoless use - takes effect next login).
@@ -133,13 +154,24 @@ ensure "python3 -c 'import yaml'"      yaml    "python3 yaml"
 if [ "$ROLE" = home ]; then
   ensure "command -v docker >/dev/null"          docker  "docker"
   ensure "docker compose version >/dev/null 2>&1" compose "docker compose plugin"
-  command -v rsync >/dev/null || ensure "command -v rsync >/dev/null" rsync "rsync"   # for SSH vault push
   ensure_docker_access
-  ok "docker + compose + python/yaml ready"
+  ok "docker + compose ready"
 else
   command -v systemctl >/dev/null || die "systemd needed for the vault agent"
   ok "python/yaml + systemd ready"
 fi
+
+# Backup toolchain (optional): cairn monitors and drives these; a host missing one just reports nothing
+# for it, so these are best-effort (offer to install, never block). rsync/syncoid/httm apply to any
+# host; borg + backupninja are for the main backup host.
+say "Backup toolchain (optional - install what THIS host uses)"
+ensure_opt "command -v rsync >/dev/null"   rsync   "file transfers, restores, and vault seeding"
+ensure_opt "command -v syncoid >/dev/null" syncoid "ZFS snapshot replication (sanoid + syncoid)"
+if [ "$ROLE" = home ]; then
+  ensure_opt "command -v borg >/dev/null"        borg        "borg repository monitoring"
+  ensure_opt "command -v backupninja >/dev/null" backupninja "backupninja handler monitoring"
+fi
+ensure_httm
 [ "$CHECK" = 1 ] && { ok "preflight passed - nothing changed (--check)"; exit 0; }
 
 # ---------------- existing-install summary (shown on idempotent + --configure runs) ----------------
