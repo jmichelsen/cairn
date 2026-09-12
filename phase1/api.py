@@ -32,10 +32,47 @@ SEVCLS = {"CRIT": "crit", "WARN": "warn", "UNKNOWN": "unk", "OK": "ok"}  # sever
 # into the store at startup; mint per-agent tokens via POST /tokens or the cairn-token CLI.
 import hashlib as _hashlib, secrets as _secrets
 AGENT_PATHS = ("/api/v1/backup/report", "/api/v1/backup/intents")  # + /intents/{id}/result
+ADMIN_ONLY_PATHS = ("/api/v1/backup/tokens",)  # sensitive even on GET - never for a viewer
 ACCESS_TTL = int(os.environ.get("CAIRN_ACCESS_TTL", str(24 * 3600)))  # access-token lifetime (s)
+SESSION_TTL = int(os.environ.get("CAIRN_SESSION_TTL", str(7 * 24 * 3600)))  # password-login session (s)
 
 def _hash(token):
     return _hashlib.sha256(token.encode()).hexdigest()
+
+# Password hashing for named accounts (users table). Stdlib PBKDF2-SHA256, hash-at-rest like tokens.
+def _pw_hash(pw, salt=None, iters=200_000):
+    salt = salt or _secrets.token_bytes(16)
+    dk = _hashlib.pbkdf2_hmac("sha256", pw.encode(), salt, iters)
+    return f"pbkdf2_sha256${iters}${salt.hex()}${dk.hex()}"
+
+def _pw_verify(pw, stored):
+    try:
+        _algo, iters, salt_hex, hash_hex = stored.split("$")
+        dk = _hashlib.pbkdf2_hmac("sha256", pw.encode(), bytes.fromhex(salt_hex), int(iters))
+        return _secrets.compare_digest(dk.hex(), hash_hex)
+    except Exception:
+        return False
+
+def _verify_user(username, password):
+    """Return the account's role if username+password check out (and the account is active), else None."""
+    if not username or not password:
+        return None
+    with db() as c:
+        r = c.execute("SELECT pass_hash,role FROM users WHERE username=? AND active=1",
+                      (username,)).fetchone()
+    return r["role"] if (r and _pw_verify(password, r["pass_hash"])) else None
+
+def _mint_session(role, username):
+    """Issue a short-lived session token for a password login (its role copied from the account),
+    so the cookie carries a real token and nobody pastes a raw admin secret. Prunes expired sessions."""
+    tok = _secrets.token_hex(32); now = int(time.time())
+    with db() as c:
+        c.execute("DELETE FROM auth_tokens WHERE kind='session' AND expires_ts < ?", (now,))
+        c.execute("INSERT INTO auth_tokens(hash,role,kind,label,created_ts,expires_ts,active) "
+                  "VALUES(?,?,?,?,?,?,1)",
+                  (_hash(tok), role, "session", f"session:{username}:{tok[:8]}", now, now + SESSION_TTL))
+        c.commit()
+    return tok
 
 def _seed_tokens():
     """Seed the store from env (hash-at-rest). Idempotent. Plaintext env is only a bootstrap
@@ -65,8 +102,9 @@ def _extract_token(request):
     return request.cookies.get("bm_token", "")
 
 def _lookup_role(token):
-    """Return the role for a presented token, or None. Only admin+access kinds authenticate
-    requests (enroll secrets are used only at /enroll); access tokens must be unexpired."""
+    """Return the role (admin|viewer|agent) for a presented token, or None. Every kind except
+    'enroll' authenticates a request (enroll secrets are used only at /enroll); any token with an
+    expires_ts (access/session) must be unexpired."""
     if not token:
         return None
     now = int(time.time())
@@ -74,57 +112,88 @@ def _lookup_role(token):
     with db() as c:
         r = c.execute("SELECT role,kind,expires_ts FROM auth_tokens WHERE hash=? AND active=1",
                       (h,)).fetchone()
-        if not r or r["kind"] not in ("admin", "access"):
+        if not r or r["kind"] == "enroll":
             return None
-        if r["kind"] == "access" and r["expires_ts"] and r["expires_ts"] < now:
+        if r["expires_ts"] and r["expires_ts"] < now:
             return None
         c.execute("UPDATE auth_tokens SET last_used_ts=? WHERE hash=?", (now, h))
         c.commit()
     return r["role"]
 
-def _valid(token, need):
-    role = _lookup_role(token)
-    if role is None:
-        return False
-    return role == "admin" if need == "admin" else role in ("admin", "agent")
-
 @app.middleware("http")
 async def auth_gate(request: Request, call_next):
+    """Three-axis gate. Agent paths: admin or agent. Token-admin paths (sensitive even on GET):
+    admin only. Any other GET: admin or viewer (read-only humans). Any other mutating method:
+    admin only. The resolved role is stashed on request.state.role for the dashboard to render
+    read-only. 401 = not signed in (HTML GET redirects to /login); 403 = signed in but read-only."""
     p = request.url.path
-    if p in ("/login", "/favicon.ico", "/api/v1/backup/enroll"):
+    if p in ("/login", "/logout", "/favicon.ico", "/api/v1/backup/enroll"):
         return await call_next(request)   # /enroll authenticates via the enrollment secret itself
     if not HAS_ADMIN:
         return JSONResponse({"detail": "no admin token configured - set CAIRN_ADMIN_TOKEN and restart"},
                             status_code=503)
-    role = "agent" if p.startswith(AGENT_PATHS) else "admin"
-    if _valid(_extract_token(request), role):
+    role = _lookup_role(_extract_token(request))
+    request.state.role = role
+    if p.startswith(AGENT_PATHS):
+        ok = role in ("admin", "agent")
+    elif p.startswith(ADMIN_ONLY_PATHS):
+        ok = role == "admin"
+    elif request.method in ("GET", "HEAD"):
+        ok = role in ("admin", "viewer")
+    else:
+        ok = role == "admin"
+    if ok:
         return await call_next(request)
     wants_html = "text/html" in request.headers.get("accept", "")
-    if role == "admin" and wants_html and request.method == "GET":
+    if role is None and request.method == "GET" and wants_html and not p.startswith(AGENT_PATHS):
         return RedirectResponse("/login", status_code=302)
-    return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return JSONResponse({"detail": "unauthorized" if role is None else "forbidden (read-only account)"},
+                        status_code=401 if role is None else 403)
 
 LOGIN_HTML = """<!doctype html><meta charset=utf-8><title>Cairn login</title>
-<style>body{font:15px system-ui,sans-serif;display:grid;place-items:center;height:90vh}
-form{display:grid;gap:.6rem;width:280px} input,button{padding:.5rem;font-size:1rem}</style>
+<style>body{font:15px system-ui,sans-serif;display:grid;place-items:center;height:90vh;margin:0}
+form{display:grid;gap:.6rem;width:280px} input,button{padding:.5rem;font-size:1rem}
+h2{margin:0 0 .2rem} details{font-size:.9rem;color:#555} details input{margin-top:.5rem;width:100%;box-sizing:border-box}
+button{cursor:pointer}</style>
 <form method=post action=/login><h2>Cairn</h2>
-<input type=password name=token placeholder="admin token" autofocus>
-<button>Sign in</button>{err}</form>"""
+<input name=username placeholder=username autocomplete=username autofocus>
+<input type=password name=password placeholder=password autocomplete=current-password>
+<button>Sign in</button>{err}
+<details><summary>Sign in with a token</summary>
+<input type=password name=token placeholder="access / read-only share token"></details></form>"""
+
+def _login_page(bad):
+    return HTMLResponse(LOGIN_HTML.replace(
+        "{err}", "<p style='color:#c0392b;margin:.2rem 0'>invalid credentials</p>" if bad else ""))
+
+def _sign_in_cookie(cookie_tok, max_age, scheme):
+    r = RedirectResponse("/", status_code=302)
+    r.set_cookie("bm_token", cookie_tok, httponly=True, samesite="strict",
+                 secure=scheme == "https", max_age=max_age)
+    return r
 
 @app.get("/login", response_class=HTMLResponse)
-def login_form(bad: int = 0):
-    return LOGIN_HTML.replace("{err}", "<p style='color:#c0392b'>invalid token</p>" if bad else "")
+def login_form(request: Request, bad: int = 0, token: str = ""):
+    # `?token=...` is the shareable read-only link: validate, drop it into the cookie, strip the URL.
+    if token:
+        if _lookup_role(token):
+            return _sign_in_cookie(token, 30 * DAY, request.url.scheme)
+        bad = 1
+    return _login_page(bad)
 
 @app.post("/login")
 async def login_submit(request: Request):
     from urllib.parse import parse_qs
-    raw = (await request.body()).decode("utf-8", "replace")
-    token = parse_qs(raw).get("token", [""])[0].strip()
-    if _valid(token, "admin"):
-        r = RedirectResponse("/", status_code=302)
-        r.set_cookie("bm_token", token, httponly=True, samesite="strict",
-                     secure=request.url.scheme == "https", max_age=30 * DAY)
-        return r
+    form = parse_qs((await request.body()).decode("utf-8", "replace"))
+    username = form.get("username", [""])[0].strip()
+    password = form.get("password", [""])[0]
+    token = form.get("token", [""])[0].strip()
+    if username:  # named account -> mint a session token carrying the account's role
+        role = _verify_user(username, password)
+        if role:
+            return _sign_in_cookie(_mint_session(role, username), SESSION_TTL, request.url.scheme)
+    elif token and _lookup_role(token):  # direct token (admin bootstrap, or a shared RO token)
+        return _sign_in_cookie(token, 30 * DAY, request.url.scheme)
     return RedirectResponse("/login?bad=1", status_code=302)
 
 @app.post("/logout")
@@ -739,11 +808,12 @@ async def enroll(request: Request):
 async def mint_token(request: Request):
     body = await _json(request)
     role = body.get("role"); label = body.get("label")
-    kind = body.get("kind") or ("admin" if role == "admin" else "enroll")  # agents get enroll secrets
-    if role not in ("admin", "agent"):
-        raise HTTPException(400, "role must be 'admin' or 'agent'")
-    if kind not in ("admin", "enroll", "access"):
-        raise HTTPException(400, "kind must be admin | enroll | access")
+    # agents get enroll secrets; a viewer gets a shareable read-only 'ui' token (no expiry).
+    kind = body.get("kind") or {"admin": "admin", "viewer": "ui"}.get(role, "enroll")
+    if role not in ("admin", "agent", "viewer"):
+        raise HTTPException(400, "role must be 'admin', 'viewer', or 'agent'")
+    if kind not in ("admin", "enroll", "access", "ui"):
+        raise HTTPException(400, "kind must be admin | enroll | access | ui")
     if not label:
         raise HTTPException(400, "label required (e.g. the agent/host name)")
     token = _secrets.token_hex(32)
@@ -758,7 +828,9 @@ async def mint_token(request: Request):
     if role == "admin":
         HAS_ADMIN = True
     hint = ("enrollment secret - put on the agent as CAIRN_ENROLL_SECRET; it mints short-lived "
-            "access tokens") if kind == "enroll" else "SAVE NOW - only its hash is stored"
+            "access tokens") if kind == "enroll" else (
+            "read-only share token - hand it out, or send a link to /login?token=<this>"
+            if kind == "ui" else "SAVE NOW - only its hash is stored")
     return {"token": token, "label": label, "role": role, "kind": kind, "note": hint}
 
 @app.get("/api/v1/backup/tokens")
@@ -1074,6 +1146,8 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
   font:600 12.5px/1 "Red Hat Text",sans-serif;padding:8px 14px;border-radius:7px;cursor:pointer}
 .seg button:hover{color:var(--ink)}
 .signout{color:var(--acc);text-decoration:none;font-size:12.5px;white-space:nowrap}
+.robadge{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--mut);
+  border:1px solid var(--line);border-radius:999px;padding:2px 9px;white-space:nowrap}
 .drysw{display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:12.5px;color:var(--mut);
   border:1px solid var(--line);background:var(--surf);border-radius:9px;padding:6px 11px;user-select:none}
 .drysw input{appearance:none;-webkit-appearance:none;width:30px;height:17px;border-radius:10px;
@@ -1480,10 +1554,13 @@ async function reconAct(btn, action, tid, pair){
 }
 </script>"""
 
-def _acts(r, can_act):
+def _acts(r, can_act, viewer=False):
     """Card action buttons - only when an EXECUTE-capable agent owns the target (else the intent
-    would hang pending). Recovery (Points/Deleted/Versions) sits on a compact sub-row."""
+    would hang pending). Recovery (Points/Deleted/Versions) sits on a compact sub-row. A read-only
+    viewer gets no controls at all (not even the report-only note)."""
     n = r["name"]; t = r["type"]
+    if viewer:
+        return ""
     if not can_act:
         return ('<div class="cact"><span class="ro">report-only</span></div>'
                 if t in ("zfs-repl", "zfs-local") else "")
@@ -1644,7 +1721,7 @@ def _pair_card(v):
             f'<div class=src>{subtitle}</div>'
             f'<div class=phalves>{half(R, "source")}{half(L, "off-site copy")}</div></div>')
 
-def _card(r, can_act):
+def _card(r, can_act, viewer=False):
     nm = r["name"]; n = _esc(nm); sev = SEVCLS.get(r["severity"], "unk")
     src = r.get("source") or ""
     src_line = f"{src} → {r['dest']}" if r.get("dest") else src
@@ -1708,7 +1785,9 @@ def _card(r, can_act):
                     f'<div class="smdet" hidden><pre class=jlogpre>{_esc(chr(10).join(jr))}</pre></div></div>')
     acked = r.get("acked")
     card_cls, cs_text = ("ack", "ACK’D") if acked else (sev, r["severity"])
-    if acked:
+    if viewer:      # read-only: show the ACK'D state as a static badge, but no acknowledge control
+        ack_html = ('<span class="ackbtn on" title="acknowledged">✓ acknowledged</span>' if acked else "")
+    elif acked:
         ack_html = (f'<button class="ackbtn on" onclick="unackTarget(\'{nm}\')" '
                     f'title="acknowledged - click to clear">✓ acknowledged</button>')
     elif r["severity"] in ("WARN", "CRIT"):
@@ -1719,7 +1798,7 @@ def _card(r, can_act):
     return (f'<div class="card {card_cls}" data-t="{n}"><div class="ch"><span class="cn">{title}</span>'
             f'<span class="chr"><span class="cbusy" title="action running"></span>'
             f'<span class="cs">{cs_text}</span></span></div>{src_html}{sched_html}{c321_html}{mr_html}{why_html}'
-            f'{ack_html}{_acts(r, can_act)}{hist_html}{log_html}</div>')
+            f'{ack_html}{_acts(r, can_act, viewer)}{hist_html}{log_html}</div>')
 
 def _heatmap(order_names):
     """14-day worst-severity-per-day grid, aligned to the card order."""
@@ -1803,7 +1882,8 @@ def _shell(inner):
             f"<form id=lo method=post action=/logout hidden></form></div>{PAGE_SCRIPT}</body></html>")
 
 @app.get("/", response_class=HTMLResponse)
-def index():
+def index(request: Request):
+    viewer = getattr(request.state, "role", "admin") == "viewer"
     with db() as conn:
         rows = latest_status(conn)
         capable = {x["name"] for x in conn.execute(
@@ -1866,7 +1946,8 @@ def index():
                       f'<span class=pchev>&#9662;</span></button>'
                       f'<div class=pbody><div class=cards>')
             cur = g
-        cards += _smart_card(r) if r["type"] == "smart" else _card(r, r.get("agent") in capable)
+        cards += _smart_card(r) if r["type"] == "smart" else \
+            _card(r, (r.get("agent") in capable) and not viewer, viewer)
     if cur is not None:
         cards += "</div></div></section>"
 
@@ -1893,7 +1974,7 @@ def index():
             'within a poll interval; if it persists, check the Agents section for a stale agent.</div>')
 
     recon_banner = ""
-    if overlaps:
+    if overlaps and not viewer:   # reconciling is a mutating action; a viewer can't act on it
         n = len(overlaps)
         recon_banner = (
             '<div class=reconbanner>&#9878; '
@@ -1928,13 +2009,16 @@ def index():
                       '<span class=pt>Replication</span><span class=pdot></span>'
                       '<span class=pchev>&#9662;</span></button>'
                       f'<div class=pbody><div class=cards>{inner}</div></div></section>')
+    dry_html = "" if viewer else (
+        '<label class=drysw title="When on, every action runs a safe dry-run probe (native -n / read-only) instead of executing">'
+        '<input type=checkbox id=drychk onchange="setDry(this.checked)"><span>Dry-run</span></label>')
+    ro_badge = '<span class=robadge title="read-only account - viewing only">read-only</span>' if viewer else ""
     return _shell(f"""
   <div class=topbar2><h2 class=applogo>Cairn</h2>
     <div class=seg role=tablist>
       <button data-h=steel onclick="setHero('steel')">Summary</button>
       <button data-h=heat onclick="setHero('heat')">14-day fleet</button></div>
-    <label class=drysw title="When on, every action runs a safe dry-run probe (native -n / read-only) instead of executing">
-      <input type=checkbox id=drychk onchange="setDry(this.checked)"><span>Dry-run</span></label>
+    {ro_badge}{dry_html}
     <a class=signout href=# onclick="lo.submit();return false">sign out</a></div>
   {warm_banner}{recon_banner}
   <div id=hero-steel class=herox>{steel_hero}</div>

@@ -92,14 +92,25 @@ CREATE TABLE IF NOT EXISTS agents (
 -- kind = credential type (admin|enroll|access). Per-agent rows are individually revocable.
 CREATE TABLE IF NOT EXISTS auth_tokens (
   hash        TEXT PRIMARY KEY,       -- sha256 hex of the secret/token
-  role        TEXT NOT NULL,          -- admin | agent
-  kind        TEXT NOT NULL DEFAULT 'access',  -- admin | enroll | access
+  role        TEXT NOT NULL,          -- admin | viewer | agent
+  kind        TEXT NOT NULL DEFAULT 'access',  -- admin | enroll | access | ui | session
   label       TEXT UNIQUE,            -- human name, e.g. 'vault', 'local', 'bootstrap-admin'
   parent      TEXT,                   -- for access tokens: the enroll label that issued it
-  expires_ts  INTEGER,                -- access tokens expire; NULL = never (static/admin/enroll)
+  expires_ts  INTEGER,                -- access/session tokens expire; NULL = never (admin/enroll/ui)
   created_ts  INTEGER,
   last_used_ts INTEGER,
   active      INTEGER DEFAULT 1
+);
+
+-- Named human accounts for password login. The password is never stored: only a salted
+-- PBKDF2-SHA256 hash. A successful login mints a short-lived 'session' token (auth_tokens) whose
+-- role is copied from here, so the rest of the auth path is unchanged. Manage with cairn-user.py.
+CREATE TABLE IF NOT EXISTS users (
+  username    TEXT PRIMARY KEY,
+  pass_hash   TEXT NOT NULL,          -- pbkdf2_sha256$iters$salt_hex$hash_hex
+  role        TEXT NOT NULL DEFAULT 'viewer',  -- admin | viewer
+  created_ts  INTEGER,
+  active       INTEGER DEFAULT 1
 );
 
 -- acknowledgements: silence a known/transient WARN|CRIT until the condition changes or it expires.
