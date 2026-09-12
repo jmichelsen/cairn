@@ -94,8 +94,8 @@ API are unprivileged.
 | --- | --- | --- |
 | 0 | Alerting now, no app: sanoid/pool/scrub checks → email + Gotify, hourly timer | **built + tested** (deploy: `phase0/INSTALL.md`) |
 | 1 | Collector → SQLite → JSON API + derived views (badge, 3-2-1, coverage-gap, timeline) | **built + tested vs live data** (deploy: `phase1/DEPLOY.md`) |
-| 2 | Homepage widget + fuller dashboard | pending |
-| 3 | **Actions** (snapshot / replicate / scrub) - buttons → intent → owning agent executes | **built + dry-run tested** (`AGENT.md`) |
+| 2 | Fuller dashboard - fleet heatmap, capacity gauge, coverage-gap rail, per-kind target cards, per-drive SMART cards, `zed` event timeline, scheduled jobs + job log, acknowledgements, theme-aware. A `/health` badge endpoint feeds a Homepage/status widget | **built + tested** |
+| 3 | **Actions** (snapshot / replicate / scrub) - buttons → intent → owning agent executes | **built + tested** - execute-capable agent runs them live; dry-run is opt-in, per-action or agent-wide (`AGENT.md`) |
 | ✔ | **Control-plane + uniform agent** - one HTTP agent, local or remote vault; API touches no host | **built + end-to-end tested** |
 | ✔ | **Zero-trust auth** - every endpoint; hash-at-rest; two-tier enroll+access with rotation/revoke | **built + tested** |
 | 4 | **Recovery-point catalog via `httm`** - points / deleted-file / version search + guarded restore, as agent actions | **built + tested** |
