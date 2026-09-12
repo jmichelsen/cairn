@@ -5,6 +5,7 @@
 #   ./install.sh home            # this box = control plane + dashboard + local agent
 #   ./install.sh vault [--config vault-install.conf]   # this box = remote reporting agent
 #   ./install.sh home --add-vault  # add a remote vault to an ALREADY-set-up home (skips home setup)
+#   ./install.sh home --configure  # re-run config on an existing install (DESTRUCTIVE: regenerates tokens)
 #   ./install.sh --check         # preflight only, change nothing
 #
 # Design: you run ONE command, answer a few questions, and elevate ONCE (a single sudo for the
@@ -82,7 +83,7 @@ ensure_docker_access() {
 }
 
 # ---------------- args ----------------
-ROLE=""; CONFIG_IN=""; YES=0; SMART_DETAIL=0; CHECK=0; API_URL=""; VAULT_SSH=""; ADD_VAULT=0
+ROLE=""; CONFIG_IN=""; YES=0; SMART_DETAIL=0; CHECK=0; API_URL=""; VAULT_SSH=""; ADD_VAULT=0; RECONFIGURE=0
 while [ $# -gt 0 ]; do case "$1" in
   home|vault) ROLE="$1";;
   --role) ROLE="$2"; shift;;
@@ -90,14 +91,15 @@ while [ $# -gt 0 ]; do case "$1" in
   --api-url) API_URL="$2"; shift;;
   --vault-ssh) VAULT_SSH="$2"; shift;;
   --add-vault) ADD_VAULT=1;;
+  --configure|--reconfigure) RECONFIGURE=1;;
   --smart-detail) SMART_DETAIL=1;;
   --yes|-y) YES=1;;
   --check) CHECK=1;;
-  -h|--help) sed -n '2,18p' "$0"; exit 0;;
+  -h|--help) sed -n '2,19p' "$0"; exit 0;;
   *) die "unknown arg: $1 (try --help)";;
 esac; shift; done
 [ -n "$CONFIG_IN" ] && [ -z "$ROLE" ] && ROLE=vault
-[ "$ADD_VAULT" = 1 ] && [ -z "$ROLE" ] && ROLE=home
+{ [ "$ADD_VAULT" = 1 ] || [ "$RECONFIGURE" = 1 ]; } && [ -z "$ROLE" ] && ROLE=home
 detect_pkg
 
 # ---------------- self-bootstrap (so `curl … | bash` works without a manual clone) ----------------
@@ -140,15 +142,43 @@ else
 fi
 [ "$CHECK" = 1 ] && { ok "preflight passed - nothing changed (--check)"; exit 0; }
 
+# ---------------- existing-install summary (shown on idempotent + --configure runs) ----------------
+show_existing_config() {
+  local f="$HERE/config/cairn.env" u="$HOME/.config/systemd/user/cairn-agent.service"
+  info "current settings (kept as-is):"
+  if [ -f "$f" ]; then
+    info "  alert email  : $(grep -m1 '^NOTIFY_EMAIL=' "$f" | cut -d= -f2-)"
+    info "  SMTP         : $(grep -m1 '^SMTP_HOST=' "$f" | cut -d= -f2-):$(grep -m1 '^SMTP_PORT=' "$f" | cut -d= -f2-)"
+    local g; g="$(grep -m1 '^GOTIFY_URL=' "$f" | cut -d= -f2-)"; info "  Gotify       : ${g:-(none)}"
+    info "  poll interval: $(grep -m1 '^CAIRN_INTERVAL=' "$f" | cut -d= -f2-)s"
+    grep -q '^CAIRN_ADMIN_TOKEN=' "$f" && info "  admin token  : (set - see config/cairn.env)"
+  fi
+  [ -f "$HERE/config/targets.yaml" ] && info "  targets      : config/targets.yaml"
+  [ -f "$u" ] && info "  local agent  : $(grep -m1 '^Environment=CAIRN_API_URL=' "$u" | cut -d= -f3-)"
+  local c; c="$(dps --format '{{.Names}} {{.Status}}' 2>/dev/null | grep -iE '^cairn' | head -1)"
+  [ -n "$c" ] && info "  api container: $c"
+}
+
 # ============================================================ HOME ============================================================
 install_home() {
   local ENVF="$HERE/config/cairn.env" TGT="$HERE/config/targets.yaml"
   mkdir -p "$HERE/config"
 
-  # ---- config + tokens (idempotent: keep existing, non-placeholder tokens) ----
-  if [ -f "$ENVF" ] && grep -q '^CAIRN_ADMIN_TOKEN=' "$ENVF" && ! grep -q 'CHANGEME' "$ENVF"; then
-    say "Config exists - keeping the tokens already in config/cairn.env"
+  # ---- config + tokens (idempotent by default; --configure regenerates, destructively) ----
+  local NEED_CONFIG=0
+  if [ ! -f "$ENVF" ] || ! grep -q '^CAIRN_ADMIN_TOKEN=' "$ENVF" || grep -q 'CHANGEME' "$ENVF"; then
+    NEED_CONFIG=1
+  elif [ "$RECONFIGURE" = 1 ]; then
+    say "Detected an existing install"; show_existing_config
+    warn "--configure REGENERATES config + tokens. This is DESTRUCTIVE:"
+    warn "  - a NEW admin login token (the current dashboard login stops working)"
+    warn "  - NEW agent tokens (every existing agent must be re-tokened / re-enrolled)"
+    askyn "overwrite config/cairn.env with fresh settings + tokens?" n && NEED_CONFIG=1 || info "keeping existing config"
   else
+    say "Detected an existing install - keeping it (idempotent)"; show_existing_config
+    info "to CHANGE settings (regenerates tokens - destructive): ./install.sh home --configure"
+  fi
+  if [ "$NEED_CONFIG" = 1 ]; then
     say "Generating config + zero-trust tokens"
     local ADMIN AGENT EMAIL GURL GTOK
     ADMIN="$(gen)"; AGENT="$(gen)"
@@ -188,6 +218,8 @@ EOF
     cp "$HERE/config/targets.example.yaml" "$TGT" 2>/dev/null || die "missing config/targets.example.yaml"
     warn "wrote a STARTER config/targets.yaml from the example - edit it to list YOUR pools/repos"
     askyn "open it in \$EDITOR now?" y && { "${EDITOR:-vi}" "$TGT" <"$TTY" >/dev/tty 2>&1 || true; }
+  elif [ "$RECONFIGURE" = 1 ] && askyn "re-edit config/targets.yaml?" n; then
+    "${EDITOR:-vi}" "$TGT" <"$TTY" >/dev/tty 2>&1 || true
   else ok "targets.yaml present"; fi
 
   # ---- public URL (for a future vault to reach this home) ----
