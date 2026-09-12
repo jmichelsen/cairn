@@ -731,6 +731,7 @@ body{margin:0;background:var(--bg);color:var(--ink);
 button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
 /* hero + heatmap */
 .hero{padding:22px 26px 18px;background:linear-gradient(180deg,var(--rail),var(--surf));border-bottom:1px solid var(--line)}
+.warmbanner{margin:12px 16px 0;padding:9px 13px;border-radius:9px;font-size:12.5px;line-height:1.45;color:var(--ink);background:color-mix(in srgb,var(--warn) 14%,var(--surf));border:1px solid color-mix(in srgb,var(--warn) 45%,var(--line))}
 .hero-top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .hero-top h2{font-weight:900;font-size:20px;letter-spacing:-.01em}
 .verd{font-weight:700;font-size:12.5px;padding:4px 12px;border-radius:20px;border:1px solid currentColor;letter-spacing:.02em}
@@ -1578,10 +1579,10 @@ def index():
     if not rows:
         return _shell(
             '<div class=hero><div class=hero-top><h2>Cairn</h2>'
-            '<span class="verd unk">No data yet</span></div>'
-            '<p class=why style="margin-top:14px;max-width:60ch">No agent has reported yet. Start an '
-            'agent (see AGENT.md) - it enrolls, reads this host\'s ZFS / borg / backupninja, and '
-            'populates the dashboard within one poll interval.</p></div>')
+            '<span class="verd unk">&#9203; Waiting for first check-in</span></div>'
+            '<p class=why style="margin-top:14px;max-width:60ch">No agent has reported yet. Once an '
+            'agent enrolls (see AGENT.md) it reads this host\'s ZFS / borg / backupninja and fills in '
+            'the dashboard within one poll interval - nothing is wrong, it is just starting up.</p></div>')
 
     rows.sort(key=lambda r: (_group(r)[0], r["name"]))
     order_names = [r["name"] for r in rows]
@@ -1629,6 +1630,22 @@ def index():
               if term.startswith("OK") else "")
         leg += f"<div><dt>{sw}{term}</dt><dd>{desc}</dd></div>"
 
+    # "Warming up" banner: if even the NEWEST status across the board is well past the slowest agent's
+    # interval, the data is not current (Cairn just (re)started, or agents are behind) - say so instead
+    # of letting a stale/report-only-looking board read as truth.
+    now_ts = int(time.time())
+    newest = max((r.get("ts") or 0) for r in rows)
+    intervals = [a.get("report_interval") or 0 for a in agents if a.get("report_interval")]
+    slowest = max(intervals) if intervals else 300
+    warm_banner = ""
+    if newest and (now_ts - newest) > max(slowest * 2, 180):
+        mins = (now_ts - newest) // 60
+        warm_banner = (
+            '<div class=warmbanner>&#9203; <b>Warming up.</b> The newest agent check-in is '
+            f'{mins} min old, so the board below may be incomplete and action buttons stay disabled '
+            'until an execute-capable agent reports. If Cairn just started or restarted this clears '
+            'within a poll interval; if it persists, check the Agents section for a stale agent.</div>')
+
     c = h["counts"]; ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(h["ts"]))
     verdict = {"OK": "All healthy", "WARN": "Attention", "CRIT": "Critical",
                "UNKNOWN": "Unknown"}.get(h["severity"], h["severity"])
@@ -1653,6 +1670,7 @@ def index():
     <label class=drysw title="When on, every action runs a safe dry-run probe (native -n / read-only) instead of executing">
       <input type=checkbox id=drychk onchange="setDry(this.checked)"><span>Dry-run</span></label>
     <a class=signout href=# onclick="lo.submit();return false">sign out</a></div>
+  {warm_banner}
   <div id=hero-steel class=herox>{steel_hero}</div>
   <div id=hero-heat class=herox><div class=hero>
     <div class=hero-top><span class="verd {vcls}" id=heatverd>{verdict}</span>
