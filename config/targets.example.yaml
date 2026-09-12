@@ -35,6 +35,18 @@ targets:
   - { name: borg-home, type: borg-repo, source: /repos/home }
   # - { name: borg-sys, type: borg-repo, source: /repos/system, passphrase_env: BORG_PASSPHRASE_SYS }
 
+  # --- restic repos (newest-snapshot freshness + count). source = repo (path or rest:/s3:/b2:/sftp:
+  #     URL); give the passphrase via passphrase_env (an env var name) or password_file. ---
+  # - { name: restic-laptop, type: restic, source: /repos/restic, passphrase_env: RESTIC_PW_LAPTOP }
+
+  # --- rclone remotes (the off-site copy). Confirms the remote is reachable; rclone stores no
+  #     backup time itself, so for freshness point `marker` at a file the sync job touches on success. ---
+  # - { name: rclone-gdrive, type: rclone, source: "gdrive:backups", marker: /var/lib/cairn/rclone-gdrive.stamp }
+
+  # --- snapper (btrfs) configs (newest-snapshot freshness + count). source = config name; the
+  #     collector needs read access (ALLOW_USERS in /etc/snapper/configs/<name>). ---
+  # - { name: snapper-root, type: snapper, source: root }
+
   # --- SMART health of physical disks (needs device access - see docker-compose.yml) ---
   - { name: smart, type: smart }
 

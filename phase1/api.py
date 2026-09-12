@@ -807,8 +807,11 @@ def revoke_token(label: str):
 # coverage gaps in the rail, targets as grouped cards, and a metric legend. Theme-aware (the
 # viewer's light/dark preference drives the token set); server-rendered from live status.
 GROUPS = {"zfs-local": (0, "Pools"),
+          "snapper": (0, "Snapshots (snapper)"),
+          "rclone": (1, "Off-site (rclone)"),
           "zfs-repl": (2, "Replication (ZFS)"),
           "borg-repo": (3, "Archive repos (borg)"),
+          "restic": (3, "Archive repos (restic)"),
           "backupninja-handler": (4, "Scheduled jobs"),
           "schedules": (4, "Scheduled jobs"),
           "smart": (5, "Disk health (SMART)"),

@@ -3,7 +3,8 @@
 *A cairn marks the safe path and endures the weather - so you always know your way back to your data.*
 
 One dashboard for the health of every backup on a ZFS host - **ZFS replication lag, pool
-health/capacity/scrub, borg repos, backupninja handlers, and SMART** - with email + Gotify
+health/capacity/scrub, borg / restic repos, rclone remotes, snapper (btrfs) snapshots,
+backupninja handlers, and SMART** - with email + Gotify
 alerts and **push-button on-demand actions** (snapshot / replicate / scrub). Self-hosted,
 single small container + SQLite. No agent phone-home, no cloud.
 
@@ -110,7 +111,7 @@ config/  *.example              generic env + targets templates (copy to real, e
 phase0/  notify.sh              notifier: email (SMTP) + Gotify on CRIT, per-key cooldown
          check_backups.sh + units    standalone host alerting (Phase 0, optional)
 phase1/  schema.sql             SQLite schema (targets, status, intents)
-         collector.py           adapter library (zfs/borg/backupninja/smart) + collect_all()
+         collector.py           adapter library (zfs/borg/restic/rclone/snapper/backupninja/smart) + collect_all()
          api.py                 control plane: report ingest, intent routing, views, dashboard
 ```
 
