@@ -20,8 +20,12 @@ friend's house - only makes outbound connections; home never needs an inbound pa
   wrapper, which allows only read-only zfs/zpool + probes.
 - **Delegation is the backstop:** the SSH user on home has only `zfs allow send,snapshot,hold` on the
   sources (no destroy/receive), and the vault has `receive` on its pool. No sudo at run time.
-- **No pipe:** the wrapper reports stream helpers (mbuffer/lzop/pv) as absent, so syncoid falls back to
-  a plain `zfs send` - the wrapper never has to permit a pipeline. `--compress=none` reinforces this.
+- **Pipeline, not plain send:** the wrapper is pipeline-aware - it permits syncoid's normal
+  `zfs send | lzop | mbuffer` pipeline (so compression + buffering + resume work, which matters over a
+  remote link) by validating EVERY stage: read-only zfs/zpool, or a stream filter with no file access
+  (`-o`/`-i`/path tokens rejected, so the filters can't read or write files). Only `|` is allowed as a
+  control char; every other metacharacter is rejected, so eval can run a zfs-send pipeline and nothing
+  else. No `--compress=none` needed.
 
 ## Setup (manual, until folded into install.sh)
 
