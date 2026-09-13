@@ -1720,12 +1720,19 @@ def _pair_card(v):
     if R.get("encrypted") or L.get("encrypted"): meta.append("enc")
     if meta: subtitle += " &middot; " + " &middot; ".join(_esc(m) for m in meta)
     def half(row, role):
-        hs = SEVCLS.get(row["severity"], "unk")
-        age = (_ago_s(row["snap_age_src_s"]) + " old") if row.get("snap_age_src_s") is not None else "no snapshot"
+        sevw = row["severity"]; age_s = row.get("snap_age_src_s")
+        # The SOURCE half can't compute replication lag once its dest lives on another agent, so the
+        # collector marks it UNKNOWN. But home DOES know its own source-snapshot freshness - the real
+        # local signal, and the '3' end of 3-2-1 for the off-site half - so show THAT rather than a
+        # contradictory "UNKNOWN" sitting next to a fresh snapshot. (28h/50h = the default repl ladder.)
+        if role == "source" and sevw == "UNKNOWN" and age_s is not None:
+            sevw = "CRIT" if age_s >= 50 * 3600 else "WARN" if age_s >= 28 * 3600 else "OK"
+        hs = SEVCLS.get(sevw, "unk")
+        age = (_ago_s(age_s) + " old") if age_s is not None else "no snapshot"
         ks = f' &middot; key {_esc(row["key_status"])}' if row.get("key_status") else ""
         return (f'<div class=phalf><span class=pd style="background:var(--{hs})"></span>'
                 f'<div class=phinfo><b>{_esc(row.get("agent") or "?")}</b> '
-                f'<span class=psev>{_esc(row["severity"])}</span> <span class=prole>{role}</span>'
+                f'<span class=psev>{_esc(sevw)}</span> <span class=prole>{role}</span>'
                 f'<small>{_esc(row.get("source") or "")}<br>newest snapshot {age}{ks}</small></div></div>')
     return (f'<div class="card pair {sev}" data-t="{name}"><div class=ch>'
             f'<span class=cn>{PAIR_ICON}{name}</span><span class=chr>'
