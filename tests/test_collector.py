@@ -145,7 +145,8 @@ def test_recovery_walk_is_bounded_readonly(monkeypatch):
     cmd, err = collector.build_recovery_walk("deleted", {"name": "p", "type": "zfs-local",
                                                          "source": "pool/ds"})
     assert err is None
-    assert cmd[0] == "httm" and cmd[-1] == "/mnt/pool"
+    # a nice/ionice politeness prefix may lead the argv, so assert membership, not position
+    assert "httm" in cmd and cmd[-1] == "/mnt/pool"
     for flag in ("--deleted=only", "--recursive", "--one-filesystem", "--no-live", "--json"):
         assert flag in cmd
 

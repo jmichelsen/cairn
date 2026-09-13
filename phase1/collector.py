@@ -1341,9 +1341,9 @@ def build_command(action, t, opts=None):
         if err:
             return None, err
         if action == "recover-search":   # versions of a file/dir across snapshots (SLOW: automount)
-            return ["httm", "--json", "--recursive", target_path], None
+            return NICE + ["httm", "--json", "--recursive", target_path], None
         if action == "recover-deleted":  # files gone from live but present in snapshots
-            return ["httm", "--deleted=only", "--recursive", "--json", target_path], None
+            return NICE + ["httm", "--deleted=only", "--recursive", "--json", target_path], None
         if action == "restore":
             # copy a chosen snapshot version to a staging dir; NEVER overwrite a live file.
             version = opts.get("version") or ""     # absolute path inside .zfs/snapshot/...
@@ -1398,6 +1398,21 @@ def build_dryrun(action, t, opts=None):
         return None, "would copy the chosen snapshot version into the staging dir (copy-only, never overwrites live)"
     return None, f"no dry-run for '{action}'"
 
+def _nice_prefix():
+    """CPU/IO politeness prefix for the heavy httm scans, so a walk yields to real work on the box.
+    IMPORTANT: ionice's classes only affect the Linux CFQ/BFQ scheduler and are effectively a NO-OP on
+    ZFS (ZFS uses its own ZIO scheduler), so on a ZFS pool the real disk-load control is cadence and
+    off-peak scheduling (see the agent's walk window), NOT this. `nice` still helps the CPU-bound tree
+    walk + JSON build, and ionice does help on any non-ZFS dataset, so include both when present."""
+    pre = []
+    if shutil.which("ionice"):
+        pre += ["ionice", "-c3"]        # idle IO class (no-op on ZFS, helps ext4/btrfs/etc.)
+    if shutil.which("nice"):
+        pre += ["nice", "-n19"]         # lowest CPU priority
+    return pre
+
+NICE = _nice_prefix()
+
 def build_recovery_walk(kind, t):
     """argv for a per-dataset recovery-manifest walk (read-only). 'deleted' = files gone from live but
     still in snapshots. --recursive to cover the tree, --one-filesystem so a parent dataset's walk does
@@ -1411,7 +1426,7 @@ def build_recovery_walk(kind, t):
     mp, err = _mountpoint(src)
     if err:
         return None, err
-    return ["httm", "--deleted=only", "--recursive", "--one-filesystem", "--no-live", "--json", mp], None
+    return NICE + ["httm", "--deleted=only", "--recursive", "--one-filesystem", "--no-live", "--json", mp], None
 
 def reduce_deleted_manifest(raw_json, cap=2000):
     """Collapse httm's deleted-files output to ONE (newest) version per path, newest-modified first,

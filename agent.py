@@ -42,10 +42,27 @@ CAN_EXEC = _e("CAIRN_CAN_EXECUTE", "0") == "1"
 INTERVAL = int(_e("CAIRN_INTERVAL", "900"))
 DRYRUN   = _e("CAIRN_DRYRUN", "0") == "1"
 TIMEOUT  = int(_e("CAIRN_ACTION_TIMEOUT", "7200"))
-# Nightly recovery-manifest walk: how many datasets to walk per loop (spreads the fleet / first fill),
-# and the per-dataset walk timeout. The API decides WHICH datasets are due, so this is a no-op most loops.
-RECOVER_WALK_MAX     = int(_e("CAIRN_RECOVER_WALK_MAX", "2"))
+# Nightly recovery-manifest walk. The walk is disk-heavy (it crosses every snapshot), and ionice does
+# NOT throttle ZFS, so the real protection is OFF-PEAK scheduling + doing one dataset at a time:
+#   RECOVER_WALK_HOURS  local-hour window the walk may run in, end-exclusive ("1-6" = 01:00-05:59; wraps,
+#                       e.g. "22-6" = 22:00-05:59; "" = anytime). Keeps the walk off the disks by day.
+#   RECOVER_WALK_MAX    datasets per loop (default 1, so load is spread across loops, not packed).
+#   RECOVER_WALK_TIMEOUT per-dataset cap so one huge dataset can't run away.
+RECOVER_WALK_HOURS   = _e("CAIRN_RECOVER_WALK_HOURS", "1-6")
+RECOVER_WALK_MAX     = int(_e("CAIRN_RECOVER_WALK_MAX", "1"))
 RECOVER_WALK_TIMEOUT = int(_e("CAIRN_RECOVER_WALK_TIMEOUT", "900"))
+
+def _in_walk_window():
+    """True if now (agent-local time) is inside RECOVER_WALK_HOURS. Supports a wrapping window (22-6)."""
+    spec = (RECOVER_WALK_HOURS or "").strip()
+    if not spec:
+        return True
+    try:
+        a, b = (int(x) for x in spec.split("-", 1))
+    except ValueError:
+        return True     # misconfigured window -> don't silently block walks forever
+    h = time.localtime().tm_hour
+    return (a <= h < b) if a <= b else (h >= a or h < b)
 # Identify with a real User-Agent. urllib's default ("Python-urllib/X.Y") is a known-bot signature
 # that CDNs/WAFs in front of the API (e.g. Cloudflare) reject with 403, so always send our own.
 UA       = _e("CAIRN_USER_AGENT", "cairn-agent/1.0")
@@ -161,6 +178,8 @@ def do_recovery_walk(cfg):
     is missing or stale (walk interval), so this is a no-op most loops. For each, walk with httm (bounded
     to this dataset via --one-filesystem), reduce to the newest version per file, gzip, and push. Walking
     is read-only; the manifest turns the otherwise-slow on-demand deleted scan into an instant lookup."""
+    if not _in_walk_window():
+        return 0                       # off-peak only: stay off the disks during the day
     tmap = {t["name"]: t for t in cfg.get("targets", [])}
     due = (api_call("GET", f"/api/v1/backup/agent/recovery-due?agent={NAME}") or {}).get("targets", [])
     walked = 0
