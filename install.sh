@@ -572,6 +572,28 @@ RestartSec=15
 [Install]
 WantedBy=default.target
 EOF
+  # ---- optional: SMART attribute-table detail (per-disk model/temp/health/attributes). Sudoless by
+  #      default (disk health from smartd's journal); the full table needs smartmontools + a scoped
+  #      read-only smartctl sudo wrapper. Vaults omitted this before, so it never got offered here. ----
+  local vsd=""; [ "$SMART_DETAIL" = 1 ] && vsd="--smart-detail"
+  [ -z "$vsd" ] && { askyn "enable SMART attribute-table detail on this vault (per-disk model/temp/health; installs smartmontools + a scoped smartctl sudo wrapper)?" n && vsd="--smart-detail"; }
+  if [ -n "$vsd" ]; then
+    ensure_opt "command -v smartctl >/dev/null 2>&1 || command -v /usr/sbin/smartctl >/dev/null 2>&1" smartmontools "per-disk SMART attribute detail"
+    sudo env CAIRN_USER="$USER" bash -c "'$HERE/phase1/grant-access.sh' --smart-detail"
+    local vunit="$HOME/.config/systemd/user/cairn-agent.service"
+    grep -q '^Environment=CAIRN_SMART_DETAIL=' "$vunit" || sed -i '/^ExecStart=/i Environment=CAIRN_SMART_DETAIL=1' "$vunit"
+    # surface the disks: ensure an ACTIVE smart target in targets.yaml (uncomment a commented one, else append)
+    if ! grep -qE '^[[:space:]]*-[[:space:]]*\{[[:space:]]*name:[[:space:]]*smart,' "$TGT"; then
+      if grep -qE '^[[:space:]]*#[[:space:]]*-[[:space:]]*\{[[:space:]]*name:[[:space:]]*smart,' "$TGT"; then
+        sed -i -E 's/^([[:space:]]*)#([[:space:]]*-[[:space:]]*\{[[:space:]]*name:[[:space:]]*smart,[^}]*\})/\1\2/' "$TGT"
+      else
+        printf '  - { name: smart, type: smart }\n' >> "$TGT"
+      fi
+      ok "added a 'smart' target to $TGT"
+    fi
+    ok "SMART detail enabled (smartmontools + wrapper + CAIRN_SMART_DETAIL=1)"
+  fi
+
   systemctl --user daemon-reload
   systemctl --user enable --now cairn-agent.service
   sudo loginctl enable-linger "$USER" 2>/dev/null || warn "couldn't enable linger (run: sudo loginctl enable-linger $USER) - agent won't survive logout without it"
