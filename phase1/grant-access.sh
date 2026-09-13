@@ -55,12 +55,21 @@ echo "== borg handlers: 'create_options = --umask 0027' so nightly segments are 
 # so every repo goes UNKNOWN after the next run. The real, one-time fix is borg's OWN --umask, set once
 # per handler. Then every future run (root's EXISTING backupninja cron) writes 0640 group-readable files
 # and the unprivileged agent reads them with NO runtime sudo, forever. Install-time only; sudoless after.
+# Handler backups live OUTSIDE /etc/backup.d - backupninja processes EVERY file in that dir and errors
+# ("no handler script for suffix 'bm-bak'") on any it doesn't recognize, which fails the whole run. A
+# sibling dir is never scanned. Also migrate any *.bm-bak an older version of this script left in place.
+HBAK=/etc/backup.d.cairn-bak
+mkdir -p "$HBAK"
+bakof() { echo "$HBAK/$(basename "$1").bm-bak"; }
 shopt -s nullglob
+for stray in /etc/backup.d/*.bm-bak; do
+  mv -f "$stray" "$HBAK/$(basename "$stray")"; echo "  moved stray backup out of /etc/backup.d: $(basename "$stray")"
+done
 for h in /etc/backup.d/*.borg; do
   if grep -Eq '^[[:space:]]*create_options[[:space:]]*=.*--umask' "$h"; then
     echo "  already sets --umask: $h"; continue
   fi
-  cp -a "$h" "$h.bm-bak"
+  b="$(bakof "$h")"; cp -a "$h" "$b"
   # NB: the backupninja borg handler reads create_options from the [source] section
   # (setsection source -> getconf create_options), so it MUST live under [source], not EOF.
   if grep -Eq '^[[:space:]]*create_options[[:space:]]*=' "$h"; then
@@ -69,12 +78,12 @@ for h in /etc/backup.d/*.borg; do
     sed -i -E '/^[[:space:]]*\[source\]/a create_options = --umask 0027   # cairn: group-readable segments' "$h"
   else
     echo "  WARN: no [source] section in $h - add 'create_options = --umask 0027' under [source] by hand"
-    rm -f "$h.bm-bak"; continue
+    rm -f "$b"; continue
   fi
   if grep -Eq '^[[:space:]]*create_options[[:space:]]*=.*--umask 0027' "$h"; then
-    echo "  patched: $h (backup: $h.bm-bak)"
+    echo "  patched: $h (backup: $b)"
   else
-    echo "  WARN: could not patch $h - add 'create_options = --umask 0027' by hand"; cp -a "$h.bm-bak" "$h"
+    echo "  WARN: could not patch $h - add 'create_options = --umask 0027' by hand"; cp -a "$b" "$h"
   fi
 done
 shopt -u nullglob

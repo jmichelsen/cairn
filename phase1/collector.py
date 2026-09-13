@@ -692,6 +692,11 @@ def adapter_schedules(t, defaults, now):
         return [dict(severity="UNKNOWN", last_error="no schedule timers found (syncoid/sanoid absent)")]
     return out
 
+# Non-handler files that may appear beside real backupninja handlers (or in its error log): editor
+# swap/backup files, package-manager leftovers, and this project's own *.bm-bak handler backups.
+_BN_JUNK = re.compile(r"(\.bm-bak|\.bak|\.orig|\.tmp|\.disabled|\.save|\.swp|"
+                      r"\.dpkg-(old|new|dist)|\.rpm(save|new|orig)|~)$", re.I)
+
 def adapter_backupninja(t, defaults, now):
     """One status per handler, parsed from the log + reports dir (both adm-readable) so this
     works in user mode WITHOUT reading /etc/backup.d (root 0750, may hold DB passwords)."""
@@ -721,6 +726,10 @@ def adapter_backupninja(t, defaults, now):
         except (PermissionError, FileNotFoundError):
             return [dict(severity="UNKNOWN",
                          last_error="no handlers (log/reports unreadable; need adm group)")]
+    # Drop non-handler files that can leak in via log-parsing: editor/package/backup junk (e.g. a
+    # *.bm-bak that backupninja itself rejects). Real handlers are <NN>.<type>, never these suffixes.
+    handlers = [h for h in handlers if not h.startswith(".")
+                and not _BN_JUNK.search(h)]
     for h in handlers:
         htype = h.split(".")[-1]
         st = dict(severity="UNKNOWN", handler_type=htype, name_suffix=h, last_error=None)
