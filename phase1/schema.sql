@@ -85,7 +85,8 @@ CREATE TABLE IF NOT EXISTS agents (
   can_execute  INTEGER DEFAULT 0,
   last_report_ts INTEGER,
   report_interval INTEGER,
-  agent_version   TEXT              -- the cairn version this agent is running (from its VERSION file)
+  agent_version   TEXT,             -- the cairn version this agent is running (from its VERSION file)
+  update_requested INTEGER DEFAULT 0 -- operator asked this agent to self-update; sent once on next report
 );
 
 -- Auth credentials, HASH-AT-REST: only sha256(secret) is stored, never the secret.

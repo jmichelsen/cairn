@@ -254,7 +254,8 @@ def _init_db():
                                   ("auth_tokens", "parent", "TEXT"),
                                   ("auth_tokens", "expires_ts", "INTEGER"),
                                   ("agents", "report_interval", "INTEGER"),
-                                  ("agents", "agent_version", "TEXT")]:
+                                  ("agents", "agent_version", "TEXT"),
+                                  ("agents", "update_requested", "INTEGER DEFAULT 0")]:
                 try:
                     c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
                 except sqlite3.OperationalError:
@@ -336,6 +337,18 @@ def agents_view():
     """Liveness of every enrolled agent (for the dashboard's Agents card + monitoring)."""
     with db() as conn:
         return {"agents": agent_states(conn)}
+
+@app.post("/api/v1/backup/agents/{name}/update")
+def request_agent_update(name: str):
+    """Queue a self-update for one agent (the dashboard's per-agent Update button). Delivered once on
+    the agent's next check-in (in the report response); the agent then runs `install.sh --update`,
+    which refreshes its code and restarts it, keeping every existing setting. (auth: middleware/admin)"""
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone():
+            raise HTTPException(404, f"no agent '{name}'")
+        conn.execute("UPDATE agents SET update_requested=1 WHERE name=?", (name,))
+        conn.commit()
+    return {"ok": True, "agent": name, "queued": True}
 
 @app.post("/api/v1/backup/acks")
 async def ack_target(request: Request):
@@ -662,11 +675,17 @@ async def report(request: Request):
         conn.execute("UPDATE targets SET enabled=0 WHERE id IN "
                      "(SELECT t.id FROM targets t JOIN target_retired r ON t.agent=r.agent AND t.name=r.name)")
         conn.execute("DELETE FROM status WHERE ts < ?", (now - 90 * DAY,))
+        # One-shot self-update signal: if an operator pressed Update for this agent, tell it once (in
+        # this response) and clear the flag so it doesn't loop.
+        row = conn.execute("SELECT update_requested FROM agents WHERE name=?", (agent,)).fetchone()
+        do_update = bool(row and row["update_requested"])
+        if do_update:
+            conn.execute("UPDATE agents SET update_requested=0 WHERE name=?", (agent,))
         conn.commit()
         _reap_agents(conn, now)   # dead-man's-switch: alert on any OTHER agent gone silent
     for a in alerts:
         dispatch_alert(*a)
-    return {"ok": True, "ingested": len(statuses)}
+    return {"ok": True, "ingested": len(statuses), "update": do_update}
 
 @app.get("/api/v1/backup/intents")
 def poll_intents(agent: str):
@@ -1176,6 +1195,9 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
   border:1px solid var(--line);border-radius:999px;padding:2px 9px;white-space:nowrap}
 .verold{display:inline-block;margin-left:6px;font-size:11px;font-weight:600;color:var(--warn);
   border:1px solid var(--warn);border-radius:999px;padding:0 7px;white-space:nowrap}
+.verbtn{margin-left:6px;font-size:11px;font-weight:600;color:#fff;background:var(--warn);
+  border:1px solid var(--warn);border-radius:999px;padding:1px 9px;white-space:nowrap;cursor:pointer}
+.verbtn:hover{filter:brightness(1.06)}
 .drysw{display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:12.5px;color:var(--mut);
   border:1px solid var(--line);background:var(--surf);border-radius:9px;padding:6px 11px;user-select:none}
 .drysw input{appearance:none;-webkit-appearance:none;width:30px;height:17px;border-radius:10px;
@@ -1307,6 +1329,12 @@ async function actPrompt(target, action, field, msg){
   var b={target:target, action:action, requested_by:'ui', dryrun:!!window.CAIRN_DRY}; b[field]=v;
   if(!(await confirmRun(b, action+' '+target+' ['+(v||'(all)')+']'))) return;
   post(b);
+}
+async function updateAgent(name){
+  if(!confirm('Update agent "'+name+'" to the latest version?\\nIt fetches new code and restarts, keeping every setting.')) return;
+  try{ await fetch('/api/v1/backup/agents/'+encodeURIComponent(name)+'/update',{method:'POST'}); }
+  catch(e){ alert('failed to queue update: '+e); return; }
+  alert('Update queued for "'+name+'".\\nIt runs on the agent\\'s next check-in; its version here updates when done.');
 }
 async function ackTarget(t){
   if(!confirm('Acknowledge '+t+'?\\nSilences this warning until the condition changes or 14 days pass.')) return;
@@ -1639,7 +1667,7 @@ def _when(ts):
     v = f"{max(1, s//60)}m" if s < 5400 else (f"{s//3600}h" if s < 172800 else f"{s//86400}d")
     return f"in {v}" if fut else f"{v} ago"
 
-def _agent_card(a):
+def _agent_card(a, viewer=False):
     """Liveness card for one reporting agent - the dead-man's-switch surface (e.g. the vault)."""
     sev = SEVCLS.get(a["severity"], "unk")
     n = _esc(a["name"])
@@ -1649,9 +1677,13 @@ def _agent_card(a):
     ivl = _ago_s(a["report_interval"]) if a.get("report_interval") else "?"
     ver = a.get("version")
     if ver and a.get("outdated"):
+        # A read-only viewer sees the badge; an admin gets a button that queues the agent's self-update.
+        upd = (f'<span class=verold>update to {_esc(CAIRN_VERSION)}</span>' if viewer else
+               f'<button class=verbtn onclick="updateAgent(\'{n}\')" '
+               f'title="fetch the latest code on this agent and restart it, keeping every setting">'
+               f'update to {_esc(CAIRN_VERSION)}</button>')
         ver_html = (f'<div class=jrow><span class=jk>version</span>'
-                    f'<span class=jv title="control plane is on {_esc(CAIRN_VERSION)}">'
-                    f'{_esc(ver)} <span class=verold>update to {_esc(CAIRN_VERSION)}</span></span></div>')
+                    f'<span class=jv>{_esc(ver)} {upd}</span></div>')
     elif ver:
         ver_html = f'<div class=jrow><span class=jk>version</span><span class=jv>{_esc(ver)}</span></div>'
     else:
@@ -2037,7 +2069,7 @@ def index(request: Request):
     # Agents section - reporting liveness (the dead-man's-switch for the vault + local agent)
     n_stale = sum(1 for a in agents if a["severity"] != "OK")
     scount = f"{n_stale} stale" if n_stale else ""
-    agents_cards = "".join(_agent_card(a) for a in agents) or \
+    agents_cards = "".join(_agent_card(a, viewer) for a in agents) or \
         '<div class=why style="padding:4px 2px">No agents enrolled yet.</div>'
     agents_html = (
         '<section class="pane grp" data-pane="grp:agents" id=agentsec>'
