@@ -1229,7 +1229,9 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .leg .legname{color:var(--ink);font-weight:600}
 .leg .legval{color:var(--mut);font-family:"Roboto Mono";font-size:11px}
 @media (max-width:760px){
-  .split{grid-template-columns:1fr} .rail{border-right:0;border-bottom:1px solid var(--line)}
+  /* Hide the left rail on narrow screens - it would otherwise stack between the hero and the cards,
+     eating vertical space; its gauge duplicates the hero's capacity tile. */
+  .split{grid-template-columns:1fr} .rail{display:none}
   .lg{grid-template-columns:1fr} .tag{margin-left:0;text-align:left}
   .sumtiles{grid-template-columns:1fr} .sumasof{margin-left:0;text-align:left}
 }
