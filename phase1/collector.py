@@ -78,6 +78,37 @@ def zpool_scrub_ts(pool):
     except ValueError:
         return line.strip(), None
 
+def zpool_scrub_progress(pool):
+    """Live scrub state for the pool card: whether a scrub is running, how far (%), ETA, bytes
+    repaired, and the pool's bottom-line data-error state. Returns {} when status is unreadable.
+    Keys: state (in_progress|finished|never), pct, eta, repaired, scrub_errors, errors."""
+    rc, out, _ = run(["zpool", "status", pool])
+    if rc != 0:
+        return {}
+    d = {}
+    m = re.search(r"scan:\s*(.+(?:\n[ \t]+.+)*)", out)   # scan line + its indented continuation lines
+    scan = m.group(1) if m else ""
+    if "in progress" in scan:
+        d["state"] = "in_progress"
+        pm = re.search(r"([\d.]+)%\s+done", scan)
+        if pm: d["pct"] = float(pm.group(1))
+        em = re.search(r"([\d:]+)\s+to go", scan)
+        if em: d["eta"] = em.group(1)
+        rm = re.search(r"([\d.]+\s*[BKMGTP]?)\s+repaired", scan)
+        if rm: d["repaired"] = rm.group(1).strip()
+    elif "none requested" in scan:
+        d["state"] = "never"
+    elif scan:
+        d["state"] = "finished"
+        rm = re.search(r"repaired\s+([\d.]+\s*[BKMGTP]?)\s+in", scan)
+        if rm: d["repaired"] = rm.group(1).strip()
+        ecm = re.search(r"with\s+(\d+)\s+errors?", scan)
+        if ecm: d["scrub_errors"] = int(ecm.group(1))
+    errm = re.search(r"errors:\s*(.+)", out)              # e.g. "No known data errors" or a corruption summary
+    if errm:
+        d["errors"] = errm.group(1).strip()
+    return d
+
 def zpool_status_detail(pool):
     """Parse `zpool status <pool>` for the health signals a resilver/flaky-link event produces:
     resilver state, non-ONLINE vdevs, and per-vdev READ/WRITE/CKSUM error counts. ZFS often
@@ -164,6 +195,7 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
     ds = t["source"]; pool = ds.split("/")[0]
     st = dict(severity="OK", detail_json=None, last_error=None)
     reasons = []
+    scrub_info = {}
     # pool health/capacity (only when the target IS a pool root)
     if ds == pool and pool in pools:
         p = pools[pool]
@@ -204,6 +236,14 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
                 st["severity"] = worst(st["severity"], "CRIT"); reasons.append(f"scrub {age_d}d>={cad['crit_d']}")
             elif age_d >= cad["warn_d"]:
                 st["severity"] = worst(st["severity"], "WARN"); reasons.append(f"scrub {age_d}d>={cad['warn_d']}")
+        # live scrub progress (%, ETA) + bottom-line data-error state, for the pool card + Scrub button
+        scrub_info = zpool_scrub_progress(pool)
+        errline = scrub_info.get("errors")
+        if errline and "No known data errors" not in errline:
+            st["severity"] = worst(st["severity"], "CRIT"); reasons.append("data errors: " + errline)
+        if scrub_info.get("scrub_errors"):
+            st["severity"] = worst(st["severity"], "CRIT")
+            reasons.append(f"last scrub found {scrub_info['scrub_errors']} error(s)")
     # dataset props + snapshot freshness
     pr = zfs_props(ds, ["usedbysnapshots", "compressratio", "keystatus"])
     st["usedbysnapshots"] = int(pr["usedbysnapshots"]) if pr.get("usedbysnapshots", "").isdigit() else None
@@ -224,7 +264,7 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
     elif t.get("note", "").find("not in sanoid") >= 0 or ds != pool:
         # a dataset with no snapshots at all is worth noting (coverage signal)
         reasons.append("no snapshots")
-    st["detail_json"] = json.dumps(dict(reasons=reasons, snap_count=len(snaps)))
+    st["detail_json"] = json.dumps(dict(reasons=reasons, snap_count=len(snaps), scrub=scrub_info))
     return [st]
 
 def adapter_zfs_repl(t, defaults, now, pools):
