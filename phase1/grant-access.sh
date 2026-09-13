@@ -98,12 +98,20 @@ for h in /etc/backup.d/*.borg; do
   fi
 done
 shopt -u nullglob
-# undo the old, INEFFECTIVE cron-umask patch a prior version of this script may have added
+# undo the old, INEFFECTIVE cron-umask patch a prior version of this script may have added.
+# The backup MUST go to the sibling dir, never $CRON.bm-bak: cron runs EVERY file in /etc/cron.d
+# regardless of extension, so a .bm-bak copy there fires backupninja a SECOND time each hour and the
+# two runs race on the borg repo locks -> intermittent "FAILED". Migrate any such stray a prior
+# version left behind, then back up out-of-tree.
 CRON=/etc/cron.d/backupninja
+if [ -f "$CRON.bm-bak" ]; then
+  mv -f "$CRON.bm-bak" "$(bakof "$CRON")"
+  echo "  moved stray cron backup out of /etc/cron.d (was double-triggering backupninja): $CRON.bm-bak"
+fi
 if [ -f "$CRON" ] && grep -q 'umask 0027; ' "$CRON"; then
-  cp -a "$CRON" "$CRON.bm-bak"
+  cp -a "$CRON" "$(bakof "$CRON")"
   sed -i -E 's#umask 0027; ##' "$CRON"
-  echo "  removed the old no-op cron umask patch from $CRON (backup: $CRON.bm-bak)"
+  echo "  removed the old no-op cron umask patch from $CRON (backup: $(bakof "$CRON"))"
 fi
 
 echo "== backupninja reports/log: adm-readable =="
