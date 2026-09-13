@@ -181,6 +181,10 @@ self_update_code() {
     else warn "couldn't fetch/apply $url tarball - code NOT updated"; fi
     rm -rf "$tb"
   fi
+  # Ensure the executable bit on scripts systemd/ssh invoke DIRECTLY (a tarball carries git's mode, so
+  # a script committed 0644 would land non-runnable and e.g. cairn-pull.service would fail to exec it).
+  chmod +x "$HERE"/install.sh "$HERE"/agent.py "$HERE"/entrypoint.sh 2>/dev/null || true
+  chmod +x "$HERE"/replication/*.sh "$HERE"/phase1/*.sh "$HERE"/phase1/*.py "$HERE"/phase0/*.sh 2>/dev/null || true
 }
 update_agent() {
   # Fetch new code, keep the EXISTING unit + config exactly as-is (every setting preserved), restart.
