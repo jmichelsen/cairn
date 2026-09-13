@@ -90,10 +90,24 @@ def do_report(cfg):
             if st.get(k) is not None:
                 item[k] = st[k]
         items.append(item)
-    api_call("POST", "/api/v1/backup/report",
-             {"agent": NAME, "ts": int(time.time()), "can_execute": CAN_EXEC,
-              "interval": INTERVAL, "version": VERSION, "statuses": items})
-    return len(items)
+    resp = api_call("POST", "/api/v1/backup/report",
+                    {"agent": NAME, "ts": int(time.time()), "can_execute": CAN_EXEC,
+                     "interval": INTERVAL, "version": VERSION, "statuses": items}) or {}
+    return len(items), bool(resp.get("update"))
+
+def self_update():
+    """The control plane asked this agent to update. Run install.sh --update in a DETACHED cgroup
+    (systemd-run --user) so the agent restart it performs doesn't kill the updater mid-flight."""
+    import subprocess
+    script = str(HERE / "install.sh")
+    print("update requested by control plane -> launching detached updater (install.sh --update)")
+    try:
+        subprocess.Popen(["systemd-run", "--user", "--collect", "--quiet",
+                          f"--unit=cairn-self-update-{int(time.time())}", "bash", script, "--update"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:   # no systemd-run: best-effort detached (may not survive the restart)
+        subprocess.Popen(["bash", script, "--update"], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def do_execute(cfg):
     tmap = {t["name"]: t for t in cfg.get("targets", [])}
@@ -142,7 +156,10 @@ def main():
             print(f"initial enroll failed (will retry on first 401): {e}")
     while True:
         try:
-            n = do_report(cfg); print(f"reported {n} statuses")
+            n, want_update = do_report(cfg); print(f"reported {n} statuses")
+            if want_update:
+                self_update();
+                if not once: time.sleep(INTERVAL); continue   # let the detached updater restart us
         except Exception as e:
             print(f"report failed: {e}")
         if CAN_EXEC:
