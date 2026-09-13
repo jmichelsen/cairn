@@ -11,7 +11,15 @@
 #   KEY       /path/to/the/pull/private/key
 #   SET       <name> <source-dataset> <dest-dataset> [raw]     # 'raw' => encrypted raw send (-w)
 set -u
-CONF="${1:-$HOME/.config/cairn/replication.conf}"
+# Args: [CONF] [--only NAME] [--conf CONF]. --only pulls just ONE configured SET (the dashboard's
+# per-dataset "Replicate now"); no --only pulls every SET (the nightly timer).
+CONF="$HOME/.config/cairn/replication.conf"; ONLY=""
+while [ $# -gt 0 ]; do case "$1" in
+  --only) ONLY="${2:-}"; shift ;;
+  --conf) CONF="${2:-}"; shift ;;
+  --*)    echo "cairn-pull: unknown option '$1'" >&2; exit 2 ;;
+  *)      CONF="$1" ;;
+esac; shift; done
 [ -f "$CONF" ] || { echo "cairn-pull: no config at $CONF" >&2; exit 2; }
 
 HOME_SSH=""; KEY=""; SETS=()
@@ -28,12 +36,15 @@ done < "$CONF"
 command -v syncoid >/dev/null || { echo "cairn-pull: syncoid not installed (apt install sanoid)" >&2; exit 2; }
 
 COMMON=(--no-privilege-elevation --no-sync-snap --no-stream --sshkey "$KEY")
-rc=0
+rc=0; ran=0
 for s in "${SETS[@]}"; do
   IFS='|' read -r name src dst raw <<<"$s"
+  [ -n "$ONLY" ] && [ "$name" != "$ONLY" ] && continue
+  ran=$((ran+1))
   opts=("${COMMON[@]}"); [ "$raw" = raw ] && opts+=(--sendoptions=w)
   echo "== pull $name: $HOME_SSH:$src -> $dst ${raw:+(raw)} =="
   if syncoid "${opts[@]}" "$HOME_SSH:$src" "$dst"; then echo "  ok"; else echo "  FAILED ($name)"; rc=1; fi
 done
-[ "$rc" = 0 ] && echo "cairn-pull: all sets current" || echo "cairn-pull: one or more sets FAILED"
+[ -n "$ONLY" ] && [ "$ran" = 0 ] && { echo "cairn-pull: no configured SET named '$ONLY'" >&2; exit 2; }
+[ "$rc" = 0 ] && echo "cairn-pull: ${ONLY:-all sets} current" || echo "cairn-pull: one or more sets FAILED"
 exit "$rc"
