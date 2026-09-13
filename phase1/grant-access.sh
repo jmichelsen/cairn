@@ -66,16 +66,27 @@ for stray in /etc/backup.d/*.bm-bak; do
   mv -f "$stray" "$HBAK/$(basename "$stray")"; echo "  moved stray backup out of /etc/backup.d: $(basename "$stray")"
 done
 for h in /etc/backup.d/*.borg; do
+  # REPAIR: an earlier version added an inline '# ...' comment to create_options. backupninja
+  # interpolates the value into a shell command, so the '#' comments out the archive name + paths
+  # and `borg create` fails ("the following arguments are required: ARCHIVE, PATH"). Strip any
+  # trailing comment from a create_options line so the handler runs again. Must run BEFORE the
+  # "already sets --umask" skip, since a broken line still contains --umask.
+  if grep -Eq '^[[:space:]]*create_options[[:space:]]*=[^#]*#' "$h"; then
+    b="$(bakof "$h")"; [ -e "$b" ] || cp -a "$h" "$b"
+    sed -i -E 's/^([[:space:]]*create_options[[:space:]]*=[^#]*[^#[:space:]])[[:space:]]*#.*$/\1/' "$h"
+    echo "  repaired create_options (removed an inline comment that broke borg create): $h"
+  fi
   if grep -Eq '^[[:space:]]*create_options[[:space:]]*=.*--umask' "$h"; then
     echo "  already sets --umask: $h"; continue
   fi
   b="$(bakof "$h")"; cp -a "$h" "$b"
   # NB: the backupninja borg handler reads create_options from the [source] section
   # (setsection source -> getconf create_options), so it MUST live under [source], not EOF.
+  # NEVER put an inline '# comment' on this line - it is interpolated into a shell command.
   if grep -Eq '^[[:space:]]*create_options[[:space:]]*=' "$h"; then
     sed -i -E 's#^([[:space:]]*create_options[[:space:]]*=[[:space:]]*)#\1--umask 0027 #' "$h"
   elif grep -Eq '^[[:space:]]*\[source\]' "$h"; then
-    sed -i -E '/^[[:space:]]*\[source\]/a create_options = --umask 0027   # cairn: group-readable segments' "$h"
+    sed -i -E '/^[[:space:]]*\[source\]/a create_options = --umask 0027' "$h"
   else
     echo "  WARN: no [source] section in $h - add 'create_options = --umask 0027' under [source] by hand"
     rm -f "$b"; continue
