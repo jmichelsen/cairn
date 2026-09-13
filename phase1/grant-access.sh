@@ -38,14 +38,16 @@ getent group backup >/dev/null || groupadd -f backup
 id -nG "$U" | tr ' ' '\n' | grep -qx backup || usermod -aG backup "$U"
 id -nG "$U" | tr ' ' '\n' | grep -qx adm    || usermod -aG adm "$U"
 
+OPENED_BORG=0; FIRST_BORG=""
 echo "== borg repos: group-read (backups keep running as root; encryption=none) =="
 for r in "${BORG_REPOS[@]}"; do
   [ -e "$r" ] || { echo "  skip (missing): $r"; continue; }
   chgrp -R backup "$r"
   chmod -R g+rX "$r"
   find "$r" -type d -exec chmod g+s {} +   # setgid: new files inherit group 'backup'
-  echo "  opened: $r"
+  echo "  opened: $r"; OPENED_BORG=$((OPENED_BORG+1)); [ -n "$FIRST_BORG" ] || FIRST_BORG="$r"
 done
+[ "$OPENED_BORG" = 0 ] && echo "  (no local borg repos found on this host - nothing to open)"
 
 echo "== borg handlers: 'create_options = --umask 0027' so nightly segments are group-readable =="
 # WHY a shell/cron umask does NOT work here: /usr/sbin/backupninja hard-sets 'umask 077', and borg's
@@ -124,17 +126,20 @@ else
   echo "     rm -f /etc/sudoers.d/cairn-smart $OPT/smart-probe.sh"
 fi
 
-cat <<EOF
-
-DONE. Notes:
-  * Log out/in (or 'exec su - $U') for group membership to take effect in your shell.
-  * Mail: uses a local SMTP relay (e.g. msmtpd on 127.0.0.1:2500, MAIL_MODE=relay) - no msmtprc widening.
-  * borg repos: this run chmod'd EXISTING files group-readable AND set 'create_options = --umask
-    0027' in each /etc/backup.d/*.borg so FUTURE nightly segments are written 0640 (group-readable).
-    That's a ONE-TIME setup change - the agent then reads borg with NO runtime sudo, and it won't
-    regress every night. Verify after the next backupninja run (restore-points non-zero on the
-    dashboard):
-      sudo -u $U borg info --bypass-lock <one-of-your-borg-repos> | head
-  * No cron and no per-night chmod: the --umask fix is permanent once set. If a repo ever still
-    shows UNKNOWN, it's leftover 0600 files from before the fix - re-run this once to chmod them.
-EOF
+# Build the closing notes from what actually happened on THIS host, so a box with no borg/backupninja
+# (e.g. a vault) doesn't get guidance about repos it doesn't have.
+echo ""
+echo "DONE. Notes:"
+echo "  * Log out/in (or run 'exec su - \"\$USER\"') for the new group membership to take effect in your shell."
+if [ "$OPENED_BORG" -gt 0 ]; then
+  echo "  * borg repos: opened $OPENED_BORG repo(s) for group-read AND set 'create_options = --umask 0027' in"
+  echo "    each /etc/backup.d/*.borg, so FUTURE nightly segments are written group-readable. One-time change -"
+  echo "    the agent then reads borg with NO runtime sudo and won't regress nightly. Verify after the next run"
+  echo "    (restore-points non-zero on the dashboard):  sudo -u \"\$USER\" borg info --bypass-lock '$FIRST_BORG' | head"
+  echo "  * If a borg repo ever shows UNKNOWN again, it's leftover 0600 files from before the fix - re-run this once."
+fi
+if [ "$SMART_DETAIL" = 1 ]; then
+  echo "  * SMART detail: wrapper + sudoers installed. Set CAIRN_SMART_DETAIL=1 on the agent unit and restart it"
+  echo "    (the installer does this for you). To remove later: rm -f /etc/sudoers.d/cairn-smart $OPT/smart-probe.sh"
+fi
+echo "  * Alert email is optional and configured in cairn.env, not here (a local SMTP relay avoids widening msmtprc)."
