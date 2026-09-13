@@ -1151,6 +1151,8 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .card .hidebtn{margin-top:10px;font-size:10.5px;color:var(--mut);background:none;border:0;padding:2px 0;
   cursor:pointer;text-decoration:underline;text-underline-offset:2px;opacity:.7}
 .card .hidebtn:hover{opacity:1;color:var(--ink)}
+.hidpane{margin-top:30px;padding-top:22px;border-top:1px solid var(--line)}
+.hidpane .paneh .pt{opacity:.75}
 .hidpane .pbody{display:flex;flex-direction:column;gap:8px}
 .hidpane .hidrow{display:flex;align-items:center;justify-content:space-between;gap:14px;
   padding:11px 14px;border:1px solid var(--line);border-radius:9px;background:var(--surf)}
@@ -1637,7 +1639,11 @@ function panePing(id){                                // flag a collapsed pane; 
 }
 (function(){                                          // restore each pane's collapsed state
   document.querySelectorAll('.pane[data-pane]').forEach(function(p){
-    try{ if(localStorage.getItem(paneKey(p.getAttribute('data-pane')))) p.classList.add('collapsed'); }catch(e){}
+    try{ var v=localStorage.getItem(paneKey(p.getAttribute('data-pane')));
+      // '1' = user collapsed it; null = never touched, and Hidden panes default collapsed (a stored
+      // '' means the user explicitly opened one, so leave those be).
+      if(v==='1' || (v===null && p.classList.contains('hidpane'))) p.classList.add('collapsed');
+    }catch(e){}
   });
 })();
 function updateActCount(){                            // show in-flight count on the Activity header
@@ -2250,10 +2256,13 @@ def index(request: Request):
             f'<button class=unhidebtn onclick="unhideTarget({int(x["id"])})">Unhide</button></div>'
             for x in subset)
         pid = f"grp:{agslug}:hidden"
+        # No count badge: this is a deliberately-ignored area, so a number would only draw the eye
+        # to something the admin chose to stop caring about. Collapsed by default too (the restore JS
+        # special-cases .hidpane), so it sits quietly out of the way until you go looking for it.
         return (f'<section class="pane grp hidpane" data-pane="{_esc(pid)}">'
                 f'<button class=paneh onclick="togglePane(\'{_esc(pid)}\')">'
-                f'<span class=pt>Hidden</span><span class=pcount>{len(subset)}</span>'
-                f'<span class=pdot></span><span class=pchev>&#9662;</span></button>'
+                f'<span class=pt>Hidden</span>'
+                f'<span class=pchev>&#9662;</span></button>'
                 f'<div class=pbody>{items}</div></section>')
 
     tcount = {}
