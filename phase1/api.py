@@ -1151,12 +1151,16 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .card .hidebtn{margin-top:10px;font-size:10.5px;color:var(--mut);background:none;border:0;padding:2px 0;
   cursor:pointer;text-decoration:underline;text-underline-offset:2px;opacity:.7}
 .card .hidebtn:hover{opacity:1;color:var(--ink)}
-.hidpane .hidrow{display:flex;align-items:center;justify-content:space-between;gap:10px;
-  padding:6px 4px;border-bottom:1px solid var(--line)}
-.hidpane .hidn{font:12px/1.4 "Roboto Mono",monospace;color:var(--ink)}
-.hidpane .hida{color:var(--mut);margin-left:8px;font-size:10.5px}
+.hidpane .pbody{display:flex;flex-direction:column;gap:8px}
+.hidpane .hidrow{display:flex;align-items:center;justify-content:space-between;gap:14px;
+  padding:11px 14px;border:1px solid var(--line);border-radius:9px;background:var(--surf)}
+.hidpane .hidrow:hover{border-color:color-mix(in srgb,var(--acc) 40%,var(--line))}
+.hidpane .hidmeta{display:flex;flex-direction:column;gap:3px;min-width:0}
+.hidpane .hidn{font:13px/1.3 "Roboto Mono",monospace;color:var(--ink);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hidpane .hida{color:var(--mut);font-size:10px;letter-spacing:.05em;text-transform:uppercase}
 .hidpane .unhidebtn{flex:none;font-size:11px;font-weight:600;cursor:pointer;color:var(--acc);
-  background:none;border:1px solid var(--line);border-radius:6px;padding:3px 9px}
+  background:none;border:1px solid var(--line);border-radius:7px;padding:5px 12px;transition:border-color .15s}
 .hidpane .unhidebtn:hover{border-color:var(--acc)}
 .card .cs{font-size:10.5px;font-weight:700;letter-spacing:.05em;flex:none}
 .card.ok .cs{color:var(--ok)} .card.warn .cs{color:var(--warn)} .card.crit .cs{color:var(--crit)} .card.unk .cs{color:var(--unk)}
@@ -2233,6 +2237,25 @@ def index(request: Request):
                 f'<span class=pchev>&#9662;</span></button>'
                 f'<div class=pbody><div class=cards>{inner}</div></div></section>')
 
+    def _hidden_pane(ag, agslug):
+        """This agent's hidden targets, as a collapsible section inside its own tab pane - so the
+        Hidden list follows the selected agent instead of pooling every agent's retired targets."""
+        subset = [x for x in retired if x["agent"] == ag]
+        if not subset:
+            return ""
+        items = "".join(
+            f'<div class=hidrow>'
+            f'<span class=hidmeta><span class=hidn>{_esc(x["name"])}</span>'
+            f'<span class=hida>{_esc(x["type"])}</span></span>'
+            f'<button class=unhidebtn onclick="unhideTarget({int(x["id"])})">Unhide</button></div>'
+            for x in subset)
+        pid = f"grp:{agslug}:hidden"
+        return (f'<section class="pane grp hidpane" data-pane="{_esc(pid)}">'
+                f'<button class=paneh onclick="togglePane(\'{_esc(pid)}\')">'
+                f'<span class=pt>Hidden</span><span class=pcount>{len(subset)}</span>'
+                f'<span class=pdot></span><span class=pchev>&#9662;</span></button>'
+                f'<div class=pbody>{items}</div></section>')
+
     tcount = {}
     for r in rows:
         k = r.get("agent") or "?"; tcount[k] = tcount.get(k, 0) + 1
@@ -2243,7 +2266,8 @@ def index(request: Request):
         subset = [r for r in rows if (r.get("agent") or "?") == ag]
         my_pairs = [v for v in pair_views
                     if v["r"].get("agent") == ag or v["l"].get("agent") == ag]
-        content = _pairs_pane(my_pairs, agslug) + _grouped(subset, agslug) \
+        content = (_pairs_pane(my_pairs, agslug) + _grouped(subset, agslug)
+                   + _hidden_pane(ag, agslug)) \
             or '<div class=why style="padding:12px 2px">No targets reported by this agent yet.</div>'
         tabs_html += _agent_card(a, viewer, tab=agslug, active=is_active)
         panes_html += f'<div class=agentpane data-agpane="{agslug}"{"" if is_active else " hidden"}>{content}</div>'
@@ -2251,21 +2275,8 @@ def index(request: Request):
                         if tabs_html else
                         '<div class=why style="padding:12px 2px">No agents enrolled yet.</div>')
 
-    # Hidden pane: targets an admin chose to stop monitoring, each restorable. Only rendered when
-    # something is hidden (and never for a viewer, who can't restore).
-    hidden_html = ""
-    if retired:
-        items = "".join(
-            f'<div class=hidrow><span class=hidn>{_esc(x["name"])}'
-            f'<span class=hida>{_esc(x["agent"])} · {_esc(x["type"])}</span></span>'
-            f'<button class=unhidebtn onclick="unhideTarget({int(x["id"])})">Unhide</button></div>'
-            for x in retired)
-        hidden_html = (
-            '<div class="pane hidpane" data-pane=hidden>'
-            '<button class=paneh onclick="togglePane(\'hidden\')"><span class=pt>Hidden</span>'
-            f'<span class=pcount>{len(retired)}</span><span class=pdot></span>'
-            '<span class=pchev>&#9662;</span></button>'
-            f'<div class=pbody>{items}</div></div>')
+    # Hidden targets are now rendered per-agent inside each tab pane (see _hidden_pane), so the list
+    # follows the selected agent instead of pooling every agent's retired targets in one footer pane.
 
     leg = ""
     for term, desc in LEGEND:
@@ -2331,7 +2342,7 @@ def index(request: Request):
       <div class="pane actpane" data-pane=acts>
         <button class=paneh onclick="togglePane('acts')"><span class=pt>Activity</span><span class=pcount id=actcount></span><span class=pdot></span><span class=pchev>&#9662;</span></button>
         <div class=pbody><div id=actlog><span class=amsg>idle - actions stream here.</span></div></div></div>
-      {hidden_html}</div>
+    </div>
     <div class=legend><h3>Metric key</h3><dl class=lg>{leg}</dl></div>
   </div>
   <div id=reconmodal class=modalwrap hidden onclick="if(event.target===this)closeReconcile()">
