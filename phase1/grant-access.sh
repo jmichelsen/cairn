@@ -98,11 +98,17 @@ if [ "$SMART_DETAIL" = 1 ]; then
   install -D -o root -g root -m 0755 "$SRC_WRAPPER" "$OPT/smart-probe.sh"
   # Validate a TEMP copy first - a broken file in /etc/sudoers.d can wedge all sudo.
   SUDO_TMP="$(mktemp)"
-  cat >"$SUDO_TMP" <<EOF
-# cairn: allow youruser to run ONLY the read-only SMART probe wrapper as root.
-Defaults:$U !requiretty
-$U ALL=(root) NOPASSWD: $OPT/smart-probe.sh
-EOF
+  # `Defaults:$U !requiretty` lets the tty-less agent run the wrapper via sudo. Classic sudo needs it
+  # where the system sets a global `requiretty`; sudo-rs (newer Debian/Ubuntu) doesn't know the setting
+  # ("unknown setting: requiretty") AND never requires a tty - so build WITH the line, and if that fails
+  # validation, drop it and validate again rather than aborting.
+  write_sudoers() {
+    { echo "# cairn: allow $U to run ONLY the read-only SMART probe wrapper as root."
+      [ "${1:-1}" = 1 ] && echo "Defaults:$U !requiretty"
+      echo "$U ALL=(root) NOPASSWD: $OPT/smart-probe.sh"; } > "$SUDO_TMP"
+  }
+  write_sudoers 1
+  visudo -cf "$SUDO_TMP" >/dev/null 2>&1 || { echo "  (this sudo rejects !requiretty - omitting it; it isn't needed here)"; write_sudoers 0; }
   if visudo -cf "$SUDO_TMP" >/dev/null; then
     install -o root -g root -m 0440 "$SUDO_TMP" /etc/sudoers.d/cairn-smart
     echo "  sudoers installed + validated - now set CAIRN_SMART_DETAIL=1 on the agent + restart it"
