@@ -822,10 +822,41 @@ def _smart_cache_path():
     d = os.environ.get("CAIRN_SMART_CACHE", os.path.expanduser("~/.cache/cairn"))
     return os.path.join(d, "smart-cache.json")
 
+def _disk_byid(dev):
+    """Stable per-drive identity from /dev/disk/by-id. A /dev/sdX letter is NOT stable - it shifts when
+    disks are added/removed/reordered (that's what produced phantom smart:sdk/sdm rows after a reseat) -
+    and it collides across hosts (every box has an sda). A by-id encodes model+serial: stable across
+    reboots and globally unique. Prefer a readable model_serial 'ata-'/'nvme-' id; fall back to wwn,
+    then scsi, then the bare device name if by-id is unavailable."""
+    bydir = "/dev/disk/by-id"
+    try:
+        target = os.path.realpath(dev)
+        cands = []
+        for nm in os.listdir(bydir):
+            if re.search(r"-part\d+$", nm):
+                continue
+            try:
+                if os.path.realpath(os.path.join(bydir, nm)) == target:
+                    cands.append(nm)
+            except OSError:
+                continue
+    except OSError:
+        return os.path.basename(dev)
+    if not cands:
+        return os.path.basename(dev)
+    def rank(nm):
+        if nm.startswith("nvme-eui."):                       return 5   # cryptic, last resort for nvme
+        if nm.startswith(("ata-", "nvme-")):                 return 0   # model_serial, readable + stable
+        if nm.startswith("wwn-"):                            return 3
+        if nm.startswith(("scsi-SATA_", "scsi-1ATA_")):      return 2
+        if nm.startswith("scsi-"):                           return 4
+        return 6
+    return sorted(cands, key=lambda nm: (rank(nm), len(nm)))[0]
+
 def _smart_parse(dev, typ, o, err, now):
     """Normalize one smartctl -a JSON blob (ATA / NVMe / SCSI) into a status dict whose
     detail_json carries identity, key stats, and the full attribute table for the drive view."""
-    st = dict(severity="UNKNOWN", name_suffix=os.path.basename(dev), last_error=None)
+    st = dict(severity="UNKNOWN", name_suffix=_disk_byid(dev), last_error=None)
     try:
         d = json.loads(o)
     except ValueError:
@@ -992,8 +1023,14 @@ def _smartd_alerts(window_h=72):
     return alerts
 
 def _merge_smartd(results, alerts):
+    # alerts are keyed by /dev basename; match on the result's device (from detail_json), not its
+    # name_suffix, which is now a stable by-id rather than the sdX basename.
     for r in results:
-        a = alerts.get(r.get("name_suffix"))
+        try:
+            dev = json.loads(r.get("detail_json") or "{}").get("dev") or ""
+        except (ValueError, TypeError):
+            dev = ""
+        a = alerts.get(os.path.basename(dev)) if dev else None
         if not a:
             continue
         r["severity"] = worst(r.get("severity", "OK"), a["sev"])
@@ -1016,7 +1053,7 @@ def _smart_scan_only():
     for ln in out.splitlines():
         m = re.match(r"(/dev/\S+)\s+-d\s+(\S+)", ln)
         if m:
-            results.append(dict(severity="OK", name_suffix=os.path.basename(m.group(1)), last_error=None,
+            results.append(dict(severity="OK", name_suffix=_disk_byid(m.group(1)), last_error=None,
                                 detail_json=json.dumps({"dev": m.group(1), "typ": m.group(2),
                                                         "detail_optin": True})))
     return results
