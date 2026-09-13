@@ -492,14 +492,19 @@ def scorecard():
     """3-2-1 per Tier-A dataset: copies / distinct media (pools) / off-site copies."""
     with db() as conn:
         rows = latest_status(conn)
+        # A dataset's replica is OFF-SITE when its dest lives on a DIFFERENT agent (a remote vault).
+        # That's exactly a guaranteed pair (home zfs-repl -> vault zfs-local), so reuse that detection
+        # instead of relying on a `location` flag nobody sets. Keyed by the home (sending) half.
+        offsite_keys = {(p["r_agent"], p["r_name"]) for p in _pair_rows(conn)}
     tiera = [r for r in rows if r["type"] == "zfs-repl" and (r["tier"] == "A")]
     cards = []
     for r in tiera:
         src_pool = (r["source"] or "").split("/")[0]
         dst_pool = (r["dest"] or "").split("/")[0]
         pools = {p for p in (src_pool, dst_pool) if p}
-        # location of dest: a same-site secondary counts as onsite; an off-site vault = 'offsite'
-        offsite = 1 if (r.get("location") == "offsite") else 0
+        # off-site if the dest is monitored by another agent (the vault) OR flagged location=offsite.
+        offsite = 1 if (r.get("location") == "offsite"
+                        or ((r.get("agent") or "", r["name"]) in offsite_keys)) else 0
         onsite = len(pools) - offsite
         copies = len(pools)
         card = dict(name=r["name"], copies=copies, media=len(pools), onsite=onsite,
@@ -507,25 +512,30 @@ def scorecard():
                     pass_321=(copies >= 3 and len(pools) >= 2 and offsite >= 1),
                     note="")
         if offsite == 0:
-            card["note"] = "NO off-site copy - vault not yet a target for this dataset"
+            card["note"] = "NO off-site copy - no remote vault holds this dataset yet"
+        elif copies < 3:
+            card["note"] = "off-site copy present; needs a 3rd copy for full 3-2-1"
         cards.append(card)
     overall = all(c["pass_321"] for c in cards) if cards else False
     return {"pass": overall, "cards": cards,
-            "explain": "3-2-1 = >=3 copies, >=2 media, >=1 off-site. A same-site secondary doesn't "
-                       "count; the off-site column stays 0 until an off-site vault is a dataset target."}
+            "explain": "3-2-1 = >=3 copies, >=2 media, >=1 off-site. A dataset counts as off-site once "
+                       "a remote vault holds its replica (a different agent reports the destination)."}
 
 @app.get("/api/v1/backup/coverage-gap")
 def coverage_gap():
     """Things backed up by nothing / not snapshotted / no off-site."""
     with db() as conn:
         rows = latest_status(conn)
+        offsite_keys = {(p["r_agent"], p["r_name"]) for p in _pair_rows(conn)}  # dest held by a vault
     gaps = []
     for r in rows:
         d = json.loads(r.get("detail_json") or "{}")
         reasons = d.get("reasons", [])
         if "no snapshots" in reasons:
             gaps.append(dict(name=r["name"], gap="not snapshotted", severity=r["severity"]))
-        if r["type"] == "zfs-repl" and r.get("location") != "offsite":
+        has_offsite = (r.get("location") == "offsite"
+                       or ((r.get("agent") or "", r["name"]) in offsite_keys))
+        if r["type"] == "zfs-repl" and not has_offsite:
             gaps.append(dict(name=r["name"], gap="no off-site copy", severity=r["severity"]))
         if r["severity"] == "CRIT" and r["type"] == "zfs-repl":
             gaps.append(dict(name=r["name"], gap="replication stale/broken", severity="CRIT"))
