@@ -1,5 +1,8 @@
 # Cairn
 
+[![tests](https://gitlab.com/mclife-hosted/cairn/badges/main/pipeline.svg?key_text=tests&key_width=44)](https://gitlab.com/mclife-hosted/cairn/-/commits/main)
+[![deploy](https://gitlab.com/mclife-hosted/cairn-deploy/badges/main/pipeline.svg?key_text=deploy&key_width=52)](https://gitlab.com/mclife-hosted/cairn-deploy/-/commits/main)
+
 *A cairn marks the safe path and endures the weather - so you always know your way back to your data.*
 
 One dashboard for the health of every backup on a ZFS host - **ZFS replication lag, pool
