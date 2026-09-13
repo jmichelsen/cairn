@@ -624,7 +624,10 @@ EOF
   fi
 
   systemctl --user daemon-reload
-  systemctl --user enable --now cairn-agent.service
+  systemctl --user enable cairn-agent.service >/dev/null 2>&1 || true
+  # restart (not just enable --now): on a re-run the agent is already active, and only a restart
+  # reloads the regenerated unit env + targets.yaml (e.g. a freshly enabled SMART target).
+  systemctl --user restart cairn-agent.service
   sudo loginctl enable-linger "$USER" 2>/dev/null || warn "couldn't enable linger (run: sudo loginctl enable-linger $USER) - agent won't survive logout without it"
   sleep 3
   systemctl --user is-active --quiet cairn-agent.service && ok "vault agent running → $CAIRN_API_URL" \
