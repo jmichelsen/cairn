@@ -531,7 +531,10 @@ def coverage_gap():
     for r in rows:
         d = json.loads(r.get("detail_json") or "{}")
         reasons = d.get("reasons", [])
-        if "no snapshots" in reasons:
+        # "no snapshots" on a zfs-repl really means its REMOTE dest couldn't be read (e.g. iwolf moved
+        # to the vault); the source snapshot age proves the data IS snapshotted. Only flag a genuine
+        # absence of SOURCE snapshots, so a replicated dataset isn't mislabeled "not snapshotted".
+        if "no snapshots" in reasons and r.get("snap_age_src_s") is None:
             gaps.append(dict(name=r["name"], gap="not snapshotted", severity=r["severity"]))
         has_offsite = (r.get("location") == "offsite"
                        or ((r.get("agent") or "", r["name"]) in offsite_keys))
