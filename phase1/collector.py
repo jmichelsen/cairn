@@ -191,6 +191,42 @@ DEFAULT_THRESHOLDS = {
 def th(t, defaults, key):
     return t.get(key, defaults.get(key))
 
+_WHOAMI = None
+def _whoami():
+    """(user, [groups]) for the agent process, cached. Used to read zfs delegation for THIS user."""
+    global _WHOAMI
+    if _WHOAMI is None:
+        try:
+            import getpass; u = getpass.getuser()
+        except Exception:
+            u = os.environ.get("USER") or ""
+        rc, out, _ = run(["id", "-Gn"])
+        _WHOAMI = (u, out.split() if rc == 0 else [])
+    return _WHOAMI
+
+def zfs_delegated(ds, perm, user, groups=()):
+    """True if `user` (or a group they're in, or everyone) holds `perm` on `ds` via `zfs allow` -
+    i.e. the user-mode agent can run that zfs verb WITHOUT sudo. Best-effort; False on any doubt."""
+    rc, out, _ = run(["zfs", "allow", ds])
+    if rc != 0:
+        return False
+    gset = set(groups)
+    for raw in out.splitlines():
+        toks = raw.strip().split()
+        if len(toks) >= 3 and toks[0] == "user" and toks[1] == user and perm in toks[2].split(","):
+            return True
+        if len(toks) >= 3 and toks[0] == "group" and toks[1] in gset and perm in toks[2].split(","):
+            return True
+        if len(toks) >= 2 and toks[0] == "everyone" and perm in toks[1].split(","):
+            return True
+    return False
+
+def can_sudo(cmd_path):
+    """True if the agent user may run cmd_path as root with NO password (a provisioned NOPASSWD rule).
+    `sudo -n -l` only QUERIES the policy - it never runs the command, and -n never prompts."""
+    rc, _, _ = run(["sudo", "-n", "-l", cmd_path])
+    return rc == 0
+
 def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
     ds = t["source"]; pool = ds.split("/")[0]
     st = dict(severity="OK", detail_json=None, last_error=None)
@@ -264,7 +300,14 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
     elif t.get("note", "").find("not in sanoid") >= 0 or ds != pool:
         # a dataset with no snapshots at all is worth noting (coverage signal)
         reasons.append("no snapshots")
-    st["detail_json"] = json.dumps(dict(reasons=reasons, snap_count=len(snaps), scrub=scrub_info))
+    # Per-target action capabilities so the UI only offers actions this agent can actually perform
+    # (snapshot needs zfs delegation; scrub needs a pool root + the provisioned sudo wrapper).
+    user, groups = _whoami()
+    wrapper = os.environ.get("CAIRN_ZPOOL_WRAPPER", "/opt/cairn/phase1/zpool-scrub.sh")
+    caps = {"snapshot": zfs_delegated(ds, "snapshot", user, groups),
+            "scrub": (ds == pool) and can_sudo(wrapper)}
+    st["detail_json"] = json.dumps(dict(reasons=reasons, snap_count=len(snaps),
+                                        scrub=scrub_info, caps=caps))
     return [st]
 
 def adapter_zfs_repl(t, defaults, now, pools):

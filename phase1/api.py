@@ -1727,12 +1727,15 @@ def _acts(r, can_act, viewer=False):
                 f"<button onclick=\"act('{n}','sync',false)\">no-snap</button>")
     elif t == "zfs-local":
         main = ""
-        if r.get("source"):   # snapshot any dataset-backed volume (pool root or child dataset)
+        _d = json.loads(r.get("detail_json") or "{}")
+        caps = _d.get("caps") or {}                       # absent (pre-caps agent) => show, as before
+        # snapshot needs zfs delegation; hide the button on datasets this agent can't snapshot (e.g.
+        # an OS root pool with no `zfs allow`), so it never queues an intent that only fails.
+        if r.get("source") and caps.get("snapshot", True):
             main += f"<button class=pri onclick=\"act('{n}','snapshot',true)\">Snapshot</button>"
-        # Scrub is a whole-POOL operation, so only offer it on a pool root - a child dataset would
-        # silently scrub its entire parent pool (duplicating the pool card's own button).
-        if r.get("source") and "/" not in r["source"]:
-            sc = (json.loads(r.get("detail_json") or "{}")).get("scrub") or {}
+        # Scrub is a whole-POOL operation (only on a pool root) AND needs the provisioned sudo wrapper.
+        if r.get("source") and "/" not in r["source"] and caps.get("scrub", True):
+            sc = _d.get("scrub") or {}
             if sc.get("state") == "in_progress":
                 pct = sc.get("pct")
                 lbl = f"Scrubbing… {pct:.0f}%" if isinstance(pct, (int, float)) else "Scrubbing…"
