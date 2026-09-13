@@ -395,9 +395,16 @@ def find_overlaps(conn):
     for p in _pair_rows(conn):
         paired.add((p["r_agent"], p["r_name"])); paired.add((p["l_agent"], p["l_name"]))
     dismissed = {r[0] for r in conn.execute("SELECT pair FROM reconcile_dismissed")}
+    # ONLY dataset-replication targets can be two views of one replicated dataset. Per-host monitors
+    # (smart, kernel-errors, zfs-events, borg, schedules, backupninja) legitimately share a NAME across
+    # hosts - e.g. smart:sda on home and on the vault are two DIFFERENT physical disks - so they must
+    # never be offered to reconcile (retiring one would drop a real, unrelated target).
     byname = {}
-    for r in conn.execute("SELECT id,name,IFNULL(agent,'') agent,type,source,dest FROM targets WHERE enabled=1"):
+    for r in conn.execute("SELECT id,name,IFNULL(agent,'') agent,type,source,dest FROM targets "
+                          "WHERE enabled=1 AND type IN ('zfs-repl','zfs-local')"):
         byname.setdefault(r["name"], []).append(dict(r))
+    def _paths(t):   # the dataset path(s) a target references
+        return {p for p in (t.get("source"), t.get("dest")) if p}
     out = []
     for name, ts in byname.items():
         if len({t["agent"] for t in ts}) < 2:
@@ -406,6 +413,10 @@ def find_overlaps(conn):
             continue
         a = ts[0]; b = next((t for t in ts if t["agent"] != a["agent"]), None)
         if not b:
+            continue
+        # Require the two to actually reference the SAME dataset - otherwise two hosts that happen to
+        # name a pool the same (e.g. both 'tank') would be matched as if one replicated the other.
+        if not (_paths(a) & _paths(b)):
             continue
         pair = f"{a['agent']}:{a['name']}|{b['agent']}:{b['name']}"
         if pair in dismissed:
