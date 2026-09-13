@@ -1151,18 +1151,14 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .card .hidebtn{margin-top:10px;font-size:10.5px;color:var(--mut);background:none;border:0;padding:2px 0;
   cursor:pointer;text-decoration:underline;text-underline-offset:2px;opacity:.7}
 .card .hidebtn:hover{opacity:1;color:var(--ink)}
-.hidpane{margin-top:30px;padding-top:22px;border-top:1px solid var(--line)}
-.hidpane .paneh .pt{opacity:.75}
-.hidpane .pbody{display:flex;flex-direction:column;gap:8px}
-.hidpane .hidrow{display:flex;align-items:center;justify-content:space-between;gap:14px;
-  padding:11px 14px;border:1px solid var(--line);border-radius:9px;background:var(--surf)}
-.hidpane .hidrow:hover{border-color:color-mix(in srgb,var(--acc) 40%,var(--line))}
-.hidpane .hidmeta{display:flex;flex-direction:column;gap:3px;min-width:0}
-.hidpane .hidn{font:13px/1.3 "Roboto Mono",monospace;color:var(--ink);
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.hidpane .hida{color:var(--mut);font-size:10px;letter-spacing:.05em;text-transform:uppercase}
+.hidpane{margin-top:22px}
+.hidpane .hidrow{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:9px 4px;border-bottom:1px solid var(--line)}
+.hidpane .hidrow:last-child{border-bottom:0}
+.hidpane .hidn{font:12.5px/1.4 "Roboto Mono",monospace;color:var(--ink)}
+.hidpane .hida{color:var(--mut);margin-left:10px;font-size:10.5px}
 .hidpane .unhidebtn{flex:none;font-size:11px;font-weight:600;cursor:pointer;color:var(--acc);
-  background:none;border:1px solid var(--line);border-radius:7px;padding:5px 12px;transition:border-color .15s}
+  background:none;border:1px solid var(--line);border-radius:7px;padding:4px 11px;transition:border-color .15s}
 .hidpane .unhidebtn:hover{border-color:var(--acc)}
 .card .cs{font-size:10.5px;font-weight:700;letter-spacing:.05em;flex:none}
 .card.ok .cs{color:var(--ok)} .card.warn .cs{color:var(--warn)} .card.crit .cs{color:var(--crit)} .card.unk .cs{color:var(--unk)}
@@ -1501,10 +1497,23 @@ if(window.matchMedia) matchMedia('(prefers-color-scheme:dark)').addEventListener
 function showAgent(slug){
   document.querySelectorAll('[data-agpane]').forEach(function(p){ p.hidden = (p.getAttribute('data-agpane')!==slug); });
   document.querySelectorAll('[data-agtab]').forEach(function(t){ t.classList.toggle('active', t.getAttribute('data-agtab')===slug); });
+  filterHidden(slug);
   try{ localStorage.setItem('bm_agtab', slug); }catch(e){}
 }
-(function(){ try{ var s=localStorage.getItem('bm_agtab');
-  if(s && document.querySelector('[data-agpane="'+s+'"]')) showAgent(s); }catch(e){} })();
+function filterHidden(slug){   // the Hidden pane lives below Activity but follows the active agent tab
+  var pane=document.querySelector('.hidpane'); if(!pane) return;
+  var shown=0;
+  pane.querySelectorAll('.hidrow').forEach(function(r){
+    var mine=(r.getAttribute('data-hagent')===slug); r.hidden=!mine; if(mine) shown++;
+  });
+  pane.hidden=(shown===0);     // no lonely "Hidden" header when this agent has nothing hidden
+}
+(function(){ var s=null;
+  try{ s=localStorage.getItem('bm_agtab'); }catch(e){}
+  if(s && document.querySelector('[data-agpane="'+s+'"]')){ showAgent(s); return; }
+  var t=document.querySelector('[data-agtab].active');   // no stored choice: use the server-active tab
+  if(t) filterHidden(t.getAttribute('data-agtab'));
+})();
 function esc(s){return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function relTime(ts){ if(!ts) return ''; var s=Math.max(0, Date.now()/1000 - ts);
   if(s<90) return Math.round(s)+'s ago'; if(s<5400) return Math.round(s/60)+'m ago';
@@ -1639,11 +1648,7 @@ function panePing(id){                                // flag a collapsed pane; 
 }
 (function(){                                          // restore each pane's collapsed state
   document.querySelectorAll('.pane[data-pane]').forEach(function(p){
-    try{ var v=localStorage.getItem(paneKey(p.getAttribute('data-pane')));
-      // '1' = user collapsed it; null = never touched, and Hidden panes default collapsed (a stored
-      // '' means the user explicitly opened one, so leave those be).
-      if(v==='1' || (v===null && p.classList.contains('hidpane'))) p.classList.add('collapsed');
-    }catch(e){}
+    try{ if(localStorage.getItem(paneKey(p.getAttribute('data-pane')))) p.classList.add('collapsed'); }catch(e){}
   });
 })();
 function updateActCount(){                            // show in-flight count on the Activity header
@@ -2243,28 +2248,6 @@ def index(request: Request):
                 f'<span class=pchev>&#9662;</span></button>'
                 f'<div class=pbody><div class=cards>{inner}</div></div></section>')
 
-    def _hidden_pane(ag, agslug):
-        """This agent's hidden targets, as a collapsible section inside its own tab pane - so the
-        Hidden list follows the selected agent instead of pooling every agent's retired targets."""
-        subset = [x for x in retired if x["agent"] == ag]
-        if not subset:
-            return ""
-        items = "".join(
-            f'<div class=hidrow>'
-            f'<span class=hidmeta><span class=hidn>{_esc(x["name"])}</span>'
-            f'<span class=hida>{_esc(x["type"])}</span></span>'
-            f'<button class=unhidebtn onclick="unhideTarget({int(x["id"])})">Unhide</button></div>'
-            for x in subset)
-        pid = f"grp:{agslug}:hidden"
-        # No count badge: this is a deliberately-ignored area, so a number would only draw the eye
-        # to something the admin chose to stop caring about. Collapsed by default too (the restore JS
-        # special-cases .hidpane), so it sits quietly out of the way until you go looking for it.
-        return (f'<section class="pane grp hidpane" data-pane="{_esc(pid)}">'
-                f'<button class=paneh onclick="togglePane(\'{_esc(pid)}\')">'
-                f'<span class=pt>Hidden</span>'
-                f'<span class=pchev>&#9662;</span></button>'
-                f'<div class=pbody>{items}</div></section>')
-
     tcount = {}
     for r in rows:
         k = r.get("agent") or "?"; tcount[k] = tcount.get(k, 0) + 1
@@ -2275,8 +2258,7 @@ def index(request: Request):
         subset = [r for r in rows if (r.get("agent") or "?") == ag]
         my_pairs = [v for v in pair_views
                     if v["r"].get("agent") == ag or v["l"].get("agent") == ag]
-        content = (_pairs_pane(my_pairs, agslug) + _grouped(subset, agslug)
-                   + _hidden_pane(ag, agslug)) \
+        content = _pairs_pane(my_pairs, agslug) + _grouped(subset, agslug) \
             or '<div class=why style="padding:12px 2px">No targets reported by this agent yet.</div>'
         tabs_html += _agent_card(a, viewer, tab=agslug, active=is_active)
         panes_html += f'<div class=agentpane data-agpane="{agslug}"{"" if is_active else " hidden"}>{content}</div>'
@@ -2284,8 +2266,24 @@ def index(request: Request):
                         if tabs_html else
                         '<div class=why style="padding:12px 2px">No agents enrolled yet.</div>')
 
-    # Hidden targets are now rendered per-agent inside each tab pane (see _hidden_pane), so the list
-    # follows the selected agent instead of pooling every agent's retired targets in one footer pane.
+    # Hidden pane: targets an admin chose to stop monitoring, each restorable. Rendered once below
+    # Activity (it is the lowest-priority thing on the board), but each row is tagged with its agent
+    # so filterHidden() shows only the active tab's hidden targets - the pane follows the selected tab
+    # and stays hidden entirely when that agent has nothing hidden. Flat rows, no count badge: it
+    # should recede, not advertise itself. Starts with `hidden` so JS filters before it ever paints.
+    hidden_html = ""
+    if retired:
+        items = "".join(
+            f'<div class=hidrow data-hagent="{_esc(_slug(x["agent"]))}">'
+            f'<span class=hidn>{_esc(x["name"])}'
+            f'<span class=hida>{_esc(x["agent"])} &middot; {_esc(x["type"])}</span></span>'
+            f'<button class=unhidebtn onclick="unhideTarget({int(x["id"])})">Unhide</button></div>'
+            for x in retired)
+        hidden_html = (
+            '<div class="pane hidpane" data-pane=hidden hidden>'
+            '<button class=paneh onclick="togglePane(\'hidden\')"><span class=pt>Hidden</span>'
+            '<span class=pchev>&#9662;</span></button>'
+            f'<div class=pbody>{items}</div></div>')
 
     leg = ""
     for term, desc in LEGEND:
@@ -2351,7 +2349,7 @@ def index(request: Request):
       <div class="pane actpane" data-pane=acts>
         <button class=paneh onclick="togglePane('acts')"><span class=pt>Activity</span><span class=pcount id=actcount></span><span class=pdot></span><span class=pchev>&#9662;</span></button>
         <div class=pbody><div id=actlog><span class=amsg>idle - actions stream here.</span></div></div></div>
-    </div>
+      {hidden_html}</div>
     <div class=legend><h3>Metric key</h3><dl class=lg>{leg}</dl></div>
   </div>
   <div id=reconmodal class=modalwrap hidden onclick="if(event.target===this)closeReconcile()">
