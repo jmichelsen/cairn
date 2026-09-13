@@ -770,6 +770,14 @@ def poll_intents(agent: str):
         conn.commit()
     return {"intents": rows}
 
+# Recovery actions (httm/zfs listing + copy-only restore). Defined here so intent_result can size the
+# stored result: a listing must be kept whole to stay parseable, everything else stays compact.
+RECOVER_ACTIONS = {"recover-points", "recover-search", "recover-deleted", "restore"}
+# How long a recovery LISTING is reused before a click re-runs the scan. Snapshot history changes only
+# when snapshots are created/pruned, so a few minutes is safe and spares the slow httm walk. Override
+# with CAIRN_RECOVER_CACHE_TTL (seconds); 0 disables reuse.
+RECOVER_CACHE_TTL = int(os.environ.get("CAIRN_RECOVER_CACHE_TTL", "600"))
+
 @app.post("/api/v1/backup/intents/{iid}/result")
 async def intent_result(iid: int, request: Request):
     """An agent reports an action's outcome. The API fires the action-outcome notification.
@@ -780,8 +788,11 @@ async def intent_result(iid: int, request: Request):
     with db() as conn:
         r = conn.execute("SELECT i.action, t.name AS target FROM intents i "
                          "LEFT JOIN targets t ON t.id=i.target_id WHERE i.id=?", (iid,)).fetchone()
+        # Recovery listings can be large (many snapshots / a recursive deleted scan); store them intact
+        # so the browser can parse them. Other actions keep the small cap that bounds DB growth.
+        cap = 262144 if (r and r["action"] in RECOVER_ACTIONS) else 4000
         conn.execute("UPDATE intents SET state=?,result=?,result_ts=? WHERE id=?",
-                     (state, json.dumps(body)[:4000], int(time.time()), iid))
+                     (state, json.dumps(body)[:cap], int(time.time()), iid))
         conn.commit()
     tgt = r["target"] if r else "?"; act = r["action"] if r else "?"
     out = (body.get("output") or "")[:1500]
@@ -796,7 +807,7 @@ async def intent_result(iid: int, request: Request):
 # ---------------- actions: the dashboard queues an intent (routed to the owning agent) ----------------
 # No files, no host executor. The intent waits in the DB until the target's agent polls for it.
 # Keep this POST surface PRIVATE (reverse proxy / VPN) - never on the public token path.
-RECOVER_ACTIONS = {"recover-points", "recover-search", "recover-deleted", "restore"}
+# RECOVER_ACTIONS is defined above intent_result (it sizes the stored result).
 
 @app.post("/api/v1/backup/actions")
 async def create_action(request: Request):
@@ -842,6 +853,26 @@ async def create_action(request: Request):
         if not cap or not cap["can_execute"]:
             raise HTTPException(409, f"target '{target}' is owned by report-only agent "
                                      f"'{r['agent']}' (CAIRN_CAN_EXECUTE=0) - no executor to run this")
+        # Recovery LISTINGS look back at slowly-changing snapshot history and the httm scan is the slow
+        # part, so reuse a recent completed result for the same target+action+path instead of re-running
+        # it (skips the agent round-trip entirely; shared across viewers). ?refresh forces a fresh scan.
+        # Restore is never cached - it copies files - and dry-runs aren't reused.
+        if (action in RECOVER_ACTIONS and action != "restore"
+                and not opts.get("dryrun") and not body.get("refresh")):
+            cutoff = int(time.time()) - RECOVER_CACHE_TTL
+            want_path = opts.get("path") or ""
+            for c in conn.execute(
+                    "SELECT id, opts, result_ts FROM intents WHERE target_id=? AND action=? "
+                    "AND state='done' AND result_ts>=? ORDER BY result_ts DESC LIMIT 25",
+                    (r["id"], action, cutoff)).fetchall():
+                try:
+                    same = (json.loads(c["opts"] or "{}").get("path") or "") == want_path
+                except (ValueError, TypeError):
+                    same = False
+                if same:
+                    return {"id": c["id"], "state": "done", "target": target, "action": action,
+                            "agent": r["agent"], "opts": opts, "cached": True,
+                            "cached_ts": c["result_ts"]}
         cur = conn.execute(
             "INSERT INTO intents(target_id,action,opts,state,requested_by,created_ts) "
             "VALUES(?,?,?,'pending',?,strftime('%s','now'))",
@@ -1089,6 +1120,31 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .reconacts button{border:1px solid var(--line);background:var(--surf);color:var(--ink);border-radius:7px;padding:5px 11px;font-size:12px;cursor:pointer}
 .reconacts button:hover{border-color:var(--ack)}
 .reconacts button:disabled{opacity:.5;cursor:default}
+/* recovery browser (Points / Versions / Deleted + Restore) */
+.modalhd .rechdbtns{display:flex;align-items:center;gap:10px}
+.recrefresh{border:1px solid var(--line);background:var(--surf);color:var(--acc);border-radius:7px;padding:4px 11px;font-size:11px;font-weight:600;cursor:pointer}
+.recrefresh:hover{border-color:var(--acc)}
+.recnote{margin:0 0 12px;font-size:12px;color:var(--mut);line-height:1.5}
+.recnote code{font-family:"Roboto Mono",monospace;font-size:11px;background:var(--heatbg);padding:1px 5px;border-radius:4px}
+.reccached{font-size:11px;color:var(--mut);margin:0 0 12px}
+.rectblwrap{overflow-x:auto}
+.rectbl{width:100%;border-collapse:collapse;font-size:12px}
+.rectbl th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);font-weight:700;padding:0 8px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+.rectbl td{padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+.rectbl tbody tr:last-child td,.rectbl tr:last-child td{border-bottom:0}
+.recsnap{font-family:"Roboto Mono",monospace}
+.recsize,.recage{color:var(--mut);font-variant-numeric:tabular-nums;white-space:nowrap}
+.recact{text-align:right;white-space:nowrap}
+.recfile{margin-bottom:18px}
+.recfp{font-family:"Roboto Mono",monospace;font-size:11px;color:var(--mut);word-break:break-all;margin-bottom:6px}
+.recrestore{border:1px solid var(--line);background:var(--surf);color:var(--acc);border-radius:7px;padding:4px 11px;font-size:11px;font-weight:600;cursor:pointer}
+.recrestore:hover{border-color:var(--acc)}
+.recrestore:disabled{opacity:.5;cursor:default}
+.reclive{font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+.recok{color:var(--ok);font-size:11px;word-break:break-all}
+.recfail{color:var(--crit);font-size:11px;word-break:break-all}
+.recwait{color:var(--mut);font-size:11px}
+.recpre{white-space:pre-wrap;word-break:break-word;font-size:11px;max-height:40vh;overflow:auto;background:var(--heatbg);padding:10px;border-radius:8px}
 .card.pair .pbadge{font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);border:1px solid var(--line);border-radius:5px;padding:1px 6px;margin-right:8px}
 .picn{width:15px;height:15px;vertical-align:-2px;margin-right:7px;color:var(--mut)}
 .phalves{display:flex;flex-direction:column;gap:10px;margin-top:11px}
@@ -1769,6 +1825,105 @@ async function reconAct(btn, action, tid, pair){
     if(!left.length){ closeReconcile(); location.reload(); }
   }catch(e){ btns.forEach(function(x){x.disabled=false;}); }
 }
+// ---- recovery browser: Points / Versions / Deleted, and copy-only Restore ----
+// Points  = the dataset's snapshots (restore points).   Versions = one file's history across snapshots.
+// Deleted = files gone from live but still in snapshots. Restore = copy a chosen version to staging.
+var _recTarget=null, _recVers=[], _recLast=null, _recCachedTs=0;
+function openRec(){ document.getElementById('recmodal').hidden=false; }
+function closeRec(){ document.getElementById('recmodal').hidden=true; }
+function recRefresh(){ if(_recLast) openRecover(_recLast.target, _recLast.kind, true); }
+function recBanner(){   // "cached Nm ago" line when the listing was reused, else nothing
+  return _recCachedTs ? '<p class=reccached>cached '+relTime(_recCachedTs)+' \\u00b7 Refresh to re-scan</p>' : '';
+}
+async function pollAction(id){                          // resolve to {state,output,cmd,action}
+  for(var i=0;i<180;i++){
+    var j=await (await fetch('/api/v1/backup/actions/'+id)).json();
+    var st=j.state||'?';
+    if(['done','failed','stalled'].includes(st)){
+      var res={}; try{res=JSON.parse(j.result||'{}')}catch(e){}
+      return {state:st, output:res.output||'', cmd:res.cmd||'', action:j.action};
+    }
+    await new Promise(s=>setTimeout(s,2000));
+  }
+  throw new Error('timed out after 6 min');
+}
+async function openRecover(target, kind, refresh){
+  var path=null;
+  if(kind!=='points'){
+    if(refresh && _recLast){ path=_recLast.path; }      // re-scan the same path, no re-prompt
+    else {
+      var msg = kind==='deleted' ? 'Deleted files under (path relative to dataset root; blank = whole dataset):'
+                                 : 'List versions of (path relative to dataset root):';
+      path=prompt(msg); if(path===null) return;
+    }
+  }
+  _recTarget=target; _recLast={target:target, kind:kind, path:path}; _recCachedTs=0;
+  var titles={points:'Restore points', versions:'File versions', deleted:'Deleted files'};
+  document.getElementById('rectitle').textContent=titles[kind]+' \\u00b7 '+target+(path?(' / '+path):'');
+  var rb=document.getElementById('recrefresh'); if(rb) rb.hidden=false;
+  var body=document.getElementById('recbody');
+  body.innerHTML='<div class=hempty>scanning '+esc(target)+(kind==='deleted'?' (recursive, may take a moment)':'')+'\\u2026</div>';
+  openRec();
+  var action = kind==='points'?'recover-points' : kind==='deleted'?'recover-deleted':'recover-search';
+  var b={target:target, action:action, requested_by:'ui'}; if(path) b.path=path; if(refresh) b.refresh=true;
+  var r,j;
+  try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); j=await r.json(); }
+  catch(e){ body.innerHTML='<div class=hempty>request failed: '+esc(String(e))+'</div>'; return; }
+  if(!r.ok){ body.innerHTML='<div class=hempty>rejected: '+esc(j.detail||('HTTP '+r.status))+'</div>'; return; }
+  if(j.cached){ _recCachedTs=j.cached_ts||0; }           // reused a recent scan (see recBanner)
+  var out; try{ out=await pollAction(j.id); }
+  catch(e){ body.innerHTML='<div class=hempty>scan did not finish: '+esc(String(e))+'</div>'; return; }
+  if(out.state!=='done'){ body.innerHTML='<div class=hempty>scan '+esc(out.state)+':</div><pre class=recpre>'+esc(out.output||'(no output)')+'</pre>'; return; }
+  if(kind==='points') renderPoints(out.output); else renderVersions(out.output, kind);
+}
+function renderPoints(txt){
+  var body=document.getElementById('recbody');
+  var lines=(txt||'').split('\\n').filter(function(l){return l.indexOf('\\t')>0;});
+  if(!lines.length){ body.innerHTML='<div class=hempty>No snapshots for this dataset.</div>'; return; }
+  var rows=lines.map(function(l){
+    var p=l.split('\\t'); var full=p[0]; var epoch=parseInt(p[1],10)||0;
+    var snap=full.indexOf('@')>=0?full.slice(full.indexOf('@')+1):full;
+    var d=epoch?new Date(epoch*1000):null;
+    return '<tr><td class=recsnap>'+esc(snap)+'</td><td>'+(d?d.toLocaleString():'')+'</td><td class=recage>'+(epoch?relTime(epoch):'')+'</td></tr>';
+  }).reverse().join('');
+  body.innerHTML=recBanner()+'<p class=recnote>'+lines.length+' restore point'+(lines.length==1?'':'s')+'. To recover files from one, use <b>Versions</b> (one file\\u2019s history) or <b>Deleted</b> (files no longer live).</p>'
+    +'<div class=rectblwrap><table class=rectbl><thead><tr><th>Snapshot</th><th>Created</th><th>Age</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+}
+function renderVersions(txt, kind){
+  var body=document.getElementById('recbody'); _recVers=[];
+  var data; try{ data=JSON.parse(txt||'{}'); }
+  catch(e){ body.innerHTML='<div class=hempty>could not parse the scan result:</div><pre class=recpre>'+esc((txt||'').slice(0,4000))+'</pre>'; return; }
+  var blocks=[];
+  Object.keys(data||{}).forEach(function(k){
+    var vers=(data[k]||[]); if(!vers.length) return;
+    var rows=vers.map(function(v){
+      var vp=v.path||''; var m=v.metadata||{}; var isLive=(vp===k);
+      var act;
+      if(isLive){ act='<span class=reclive>live</span>'; }
+      else { _recVers.push(vp); act='<button class=recrestore data-vi="'+(_recVers.length-1)+'" onclick="doRestore(this)">Restore</button>'; }
+      return '<tr><td>'+esc(m.modify_time||'')+'</td><td class=recsize>'+esc(m.size||'')+'</td><td class=recact>'+act+'</td></tr>';
+    }).join('');
+    blocks.push('<div class=recfile><div class=recfp>'+esc(k)+'</div><div class=rectblwrap><table class=rectbl>'
+      +'<thead><tr><th>Version (modified)</th><th>Size</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div></div>');
+  });
+  if(!blocks.length){ body.innerHTML=recBanner()+'<div class=hempty>'+(kind==='deleted'?'No deleted files found in snapshots under that path.':'No other versions found for that path.')+'</div>'; return; }
+  body.innerHTML=recBanner()+'<p class=recnote>Restore copies a version into the dataset\\u2019s <code>.bm-restores/</code> staging dir \\u2014 your live files are never touched.</p>'+blocks.join('');
+}
+async function doRestore(btn){
+  var vp=_recVers[parseInt(btn.getAttribute('data-vi'),10)]; if(vp==null) return;
+  if(!confirm("Restore this version?\\nIt is copied into the dataset's .bm-restores/ staging dir. Live files are not touched.")) return;
+  btn.disabled=true; var td=btn.parentNode; td.innerHTML='<span class=recwait>restoring\\u2026</span>';
+  var b={target:_recTarget, action:'restore', version:vp, requested_by:'ui'};
+  var r,j;
+  try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); j=await r.json(); }
+  catch(e){ td.innerHTML='<span class=recfail>failed</span>'; return; }
+  if(!r.ok){ td.innerHTML='<span class=recfail>'+esc(j.detail||('HTTP '+r.status))+'</span>'; return; }
+  var out; try{ out=await pollAction(j.id); }catch(e){ td.innerHTML='<span class=recfail>timed out</span>'; return; }
+  if(out.state==='done'){
+    var dest=''; var mm=(out.output||'').match(/-> '([^']*)'/); if(mm) dest=mm[1];
+    td.innerHTML='<span class=recok>restored'+(dest?(' \\u2192 '+esc(dest)):'')+'</span>';
+  } else { td.innerHTML='<span class=recfail>'+esc(out.output||out.state)+'</span>'; }
+}
 </script>"""
 
 def _acts(r, can_act, viewer=False):
@@ -1784,9 +1939,9 @@ def _acts(r, can_act, viewer=False):
     rec = ""
     if t in ("zfs-repl", "zfs-local") and r.get("source"):
         rec = (f'<div class="crec">'
-               f"<button onclick=\"act('{n}','recover-points')\">Points</button>"
-               f"<button onclick=\"actPrompt('{n}','recover-deleted','path','deleted files under (blank = whole dataset):')\">Deleted</button>"
-               f"<button onclick=\"actPrompt('{n}','recover-search','path','list versions of (path relative to dataset root):')\">Versions</button>"
+               f"<button onclick=\"openRecover('{n}','points')\" title=\"snapshots you can recover from\">Points</button>"
+               f"<button onclick=\"openRecover('{n}','deleted')\" title=\"files deleted from live but still in snapshots\">Deleted</button>"
+               f"<button onclick=\"openRecover('{n}','versions')\" title=\"every snapshot version of one file/path\">Versions</button>"
                f"</div>")
     if t == "zfs-repl":
         main = (f"<button class=pri onclick=\"act('{n}','sync',true)\">Replicate</button>"
@@ -2356,5 +2511,12 @@ def index(request: Request):
     <div class=modalbox>
       <div class=modalhd>Reconcile target overlaps<button class=modalx onclick="closeReconcile()">&times;</button></div>
       <div id=reconbody class=modalbody></div>
+    </div></div>
+  <div id=recmodal class=modalwrap hidden onclick="if(event.target===this)closeRec()">
+    <div class=modalbox>
+      <div class=modalhd><span id=rectitle>Recovery</span>
+        <span class=rechdbtns><button class=recrefresh id=recrefresh onclick="recRefresh()" title="re-run the scan (bypass cache)" hidden>Refresh</button>
+        <button class=modalx onclick="closeRec()">&times;</button></span></div>
+      <div id=recbody class=modalbody></div>
     </div></div>
   <script>var GP={{pct:{gpct},label:"{glabel}"}};</script>""")
