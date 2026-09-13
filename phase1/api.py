@@ -489,6 +489,42 @@ async def reconcile_act(request: Request):
             return {"ok": True, "dismissed": pair}
     raise HTTPException(400, "action must be 'retire' or 'dismiss'")
 
+
+def _retired_rows(conn):
+    """Currently-hidden targets, joined back to their target row for id/type - for the Hidden pane."""
+    return [dict(r) for r in conn.execute(
+        "SELECT t.id, t.agent, t.name, t.type FROM target_retired r "
+        "JOIN targets t ON t.agent=r.agent AND t.name=r.name ORDER BY t.agent, t.name").fetchall()]
+
+
+@app.post("/api/v1/backup/targets/{tid}/retire")
+def hide_target(tid: int):
+    """Stop monitoring one target (the per-card Hide button). Persistent: a `target_retired` row keeps
+    it disabled even while its agent keeps reporting it, so it stays hidden until explicitly unhidden."""
+    with db() as conn:
+        row = conn.execute("SELECT agent,name FROM targets WHERE id=?", (tid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "unknown target")
+        conn.execute("INSERT OR IGNORE INTO target_retired(agent,name,ts) VALUES(?,?,?)",
+                     (row["agent"], row["name"], int(time.time())))
+        conn.execute("UPDATE targets SET enabled=0 WHERE id=?", (tid,))
+        conn.commit()
+    return {"ok": True, "hidden": {"agent": row["agent"], "name": row["name"]}}
+
+
+@app.post("/api/v1/backup/targets/{tid}/unretire")
+def unhide_target(tid: int):
+    """Restore a hidden target (the Hidden pane's Unhide button). Re-enables it; the agent's next
+    report confirms it and it reappears on the board."""
+    with db() as conn:
+        row = conn.execute("SELECT agent,name FROM targets WHERE id=?", (tid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "unknown target")
+        conn.execute("DELETE FROM target_retired WHERE agent=? AND name=?", (row["agent"], row["name"]))
+        conn.execute("UPDATE targets SET enabled=1 WHERE id=?", (tid,))
+        conn.commit()
+    return {"ok": True, "shown": {"agent": row["agent"], "name": row["name"]}}
+
 @app.get("/api/v1/backup/status")
 def status():
     with db() as conn:
@@ -1112,6 +1148,16 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .card .scrubbar>span{display:block;height:100%;background:var(--acc);border-radius:4px;transition:width .6s ease}
 .card .scrublbl{font-family:"Roboto Mono";font-size:11px;color:var(--mut);margin-top:5px}
 button.scrubbtn[disabled]{opacity:.6;cursor:progress}
+.card .hidebtn{margin-top:10px;font-size:10.5px;color:var(--mut);background:none;border:0;padding:2px 0;
+  cursor:pointer;text-decoration:underline;text-underline-offset:2px;opacity:.7}
+.card .hidebtn:hover{opacity:1;color:var(--ink)}
+.hidpane .hidrow{display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:6px 4px;border-bottom:1px solid var(--line)}
+.hidpane .hidn{font:12px/1.4 "Roboto Mono",monospace;color:var(--ink)}
+.hidpane .hida{color:var(--mut);margin-left:8px;font-size:10.5px}
+.hidpane .unhidebtn{flex:none;font-size:11px;font-weight:600;cursor:pointer;color:var(--acc);
+  background:none;border:1px solid var(--line);border-radius:6px;padding:3px 9px}
+.hidpane .unhidebtn:hover{border-color:var(--acc)}
 .card .cs{font-size:10.5px;font-weight:700;letter-spacing:.05em;flex:none}
 .card.ok .cs{color:var(--ok)} .card.warn .cs{color:var(--warn)} .card.crit .cs{color:var(--crit)} .card.unk .cs{color:var(--unk)}
 .card.ack .cs{color:var(--ack)}
@@ -1396,6 +1442,17 @@ async function ackTarget(t){
 async function unackTarget(t){
   try{ await fetch('/api/v1/backup/acks/'+encodeURIComponent(t),{method:'DELETE'}); }
   catch(e){ alert('clear failed: '+e); return; }
+  location.reload();
+}
+async function hideTarget(tid){
+  if(!confirm('Hide this target? It stops being monitored until you restore it from the Hidden section.')) return;
+  try{ await fetch('/api/v1/backup/targets/'+tid+'/retire',{method:'POST'}); }
+  catch(e){ alert('hide failed: '+e); return; }
+  location.reload();
+}
+async function unhideTarget(tid){
+  try{ await fetch('/api/v1/backup/targets/'+tid+'/unretire',{method:'POST'}); }
+  catch(e){ alert('unhide failed: '+e); return; }
   location.reload();
 }
 async function poll(id, key, dry, target){
@@ -2003,10 +2060,15 @@ def _card(r, can_act, viewer=False):
     else:
         ack_html = ""
     title = _esc(d["label"]) if d.get("label") else n     # schedule cards carry a friendly label
+    # Hide: stop monitoring a target you don't care about (e.g. an OS pool or a pool you don't back
+    # up). Admin-only; restorable from the Hidden pane. target_id comes from the joined status row.
+    hide_html = "" if (viewer or not r.get("target_id")) else (
+        f'<button class=hidebtn onclick="hideTarget({int(r["target_id"])})" '
+        f'title="stop monitoring this target (restore it from the Hidden section)">Hide</button>')
     return (f'<div class="card {card_cls}" data-t="{n}"><div class="ch"><span class="cn">{title}</span>'
             f'<span class="chr"><span class="cbusy" title="action running"></span>'
             f'<span class="cs">{cs_text}</span></span></div>{src_html}{sched_html}{c321_html}{mr_html}{scrub_html}{why_html}'
-            f'{ack_html}{_acts(r, can_act, viewer)}{hist_html}{log_html}</div>')
+            f'{ack_html}{_acts(r, can_act, viewer)}{hist_html}{log_html}{hide_html}</div>')
 
 def _heatmap(order_names):
     """14-day worst-severity-per-day grid, aligned to the card order."""
@@ -2100,6 +2162,7 @@ def index(request: Request):
         agents = agent_states(conn)
         overlaps = find_overlaps(conn)
         pair_views, paired_keys = pairing(conn, rows)
+        retired = [] if viewer else _retired_rows(conn)   # for the Hidden pane (admins can restore)
     rows = [r for r in rows if (r["agent"], r["name"]) not in paired_keys]  # halves render as one pair card
     h = health()
     if not rows:
@@ -2188,6 +2251,22 @@ def index(request: Request):
                         if tabs_html else
                         '<div class=why style="padding:12px 2px">No agents enrolled yet.</div>')
 
+    # Hidden pane: targets an admin chose to stop monitoring, each restorable. Only rendered when
+    # something is hidden (and never for a viewer, who can't restore).
+    hidden_html = ""
+    if retired:
+        items = "".join(
+            f'<div class=hidrow><span class=hidn>{_esc(x["name"])}'
+            f'<span class=hida>{_esc(x["agent"])} · {_esc(x["type"])}</span></span>'
+            f'<button class=unhidebtn onclick="unhideTarget({int(x["id"])})">Unhide</button></div>'
+            for x in retired)
+        hidden_html = (
+            '<div class="pane hidpane" data-pane=hidden>'
+            '<button class=paneh onclick="togglePane(\'hidden\')"><span class=pt>Hidden</span>'
+            f'<span class=pcount>{len(retired)}</span><span class=pdot></span>'
+            '<span class=pchev>&#9662;</span></button>'
+            f'<div class=pbody>{items}</div></div>')
+
     leg = ""
     for term, desc in LEGEND:
         sw = ('<span class=sw style="background:linear-gradient(90deg,var(--ok),var(--warn),var(--crit))"></span>'
@@ -2251,7 +2330,8 @@ def index(request: Request):
     <div class=main>{agents_tabs_html}
       <div class="pane actpane" data-pane=acts>
         <button class=paneh onclick="togglePane('acts')"><span class=pt>Activity</span><span class=pcount id=actcount></span><span class=pdot></span><span class=pchev>&#9662;</span></button>
-        <div class=pbody><div id=actlog><span class=amsg>idle - actions stream here.</span></div></div></div></div>
+        <div class=pbody><div id=actlog><span class=amsg>idle - actions stream here.</span></div></div></div>
+      {hidden_html}</div>
     <div class=legend><h3>Metric key</h3><dl class=lg>{leg}</dl></div>
   </div>
   <div id=reconmodal class=modalwrap hidden onclick="if(event.target===this)closeReconcile()">
