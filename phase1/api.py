@@ -1106,6 +1106,11 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .card .cbusy{display:none;width:8px;height:8px;border-radius:50%;background:var(--warn);
   animation:apulse 1.1s ease-in-out infinite}
 .card.busy .cbusy{display:inline-block}
+.card .scrubprog{margin-top:12px}
+.card .scrubbar{height:6px;border-radius:4px;background:var(--line,rgba(128,128,128,.22));overflow:hidden}
+.card .scrubbar>span{display:block;height:100%;background:var(--acc);border-radius:4px;transition:width .6s ease}
+.card .scrublbl{font-family:"Roboto Mono";font-size:11px;color:var(--mut);margin-top:5px}
+button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .card .cs{font-size:10.5px;font-weight:700;letter-spacing:.05em;flex:none}
 .card.ok .cs{color:var(--ok)} .card.warn .cs{color:var(--warn)} .card.crit .cs{color:var(--crit)} .card.unk .cs{color:var(--unk)}
 .card.ack .cs{color:var(--ack)}
@@ -1497,6 +1502,23 @@ async function refreshCards(){
     if(mr && rowEl) rowEl.innerHTML=mr; else if(!mr && rowEl) rowEl.remove();
     var d=r.detail||{}, why=(d.reasons&&d.reasons.length)?d.reasons.join(', '):(r.last_error||'');
     var whyEl=c.querySelector('.why'); if(whyEl) whyEl.textContent=why;
+    // live scrub state: disable/relabel the Scrub button + show/update the progress bar
+    var sc=d.scrub||{}, running=(sc.state==='in_progress');
+    var sb=c.querySelector('[data-scrub]');
+    if(sb){
+      if(running){ sb.disabled=true; sb.removeAttribute('onclick');
+        sb.textContent=(sc.pct!=null)?('Scrubbing… '+Math.round(sc.pct)+'%'):'Scrubbing…'; }
+      else{ sb.disabled=false; sb.textContent='Scrub';
+        sb.setAttribute('onclick',"act('"+String(r.name).replace(/'/g,"\\'")+"','scrub',true)"); }
+    }
+    var sp=c.querySelector('[data-scrubprog]');
+    if(sp){
+      if(running){ sp.hidden=false;
+        var fill=sp.querySelector('[data-scrubfill]'); if(fill&&sc.pct!=null) fill.style.width=sc.pct+'%';
+        var lbl=sp.querySelector('[data-scrublbl]');
+        if(lbl){ var tx='scrubbing'+(sc.pct!=null?(' '+Number(sc.pct).toFixed(1)+'%'):'')+(sc.eta?(' · '+sc.eta+' to go'):''); lbl.textContent=tx; }
+      } else { sp.hidden=true; }
+    }
   });
   document.querySelectorAll('.histbtn.open[data-t]').forEach(function(btn){   // keep open History current
     var box=btn.nextElementSibling, target=btn.getAttribute('data-t');       // ([data-t] excludes SMART-detail toggles)
@@ -1692,7 +1714,13 @@ def _acts(r, can_act, viewer=False):
         main = ""
         if r.get("source"):   # snapshot any dataset-backed volume (pool root or child dataset)
             main += f"<button class=pri onclick=\"act('{n}','snapshot',true)\">Snapshot</button>"
-        main += f"<button onclick=\"act('{n}','scrub',true)\">Scrub</button>"
+        sc = (json.loads(r.get("detail_json") or "{}")).get("scrub") or {}
+        if sc.get("state") == "in_progress":
+            pct = sc.get("pct")
+            lbl = f"Scrubbing… {pct:.0f}%" if isinstance(pct, (int, float)) else "Scrubbing…"
+            main += f'<button class=scrubbtn data-scrub disabled>{lbl}</button>'
+        else:
+            main += f'<button class=scrubbtn data-scrub onclick="act(\'{n}\',\'scrub\',true)">Scrub</button>'
     else:
         return ""
     return f'<div class="cact">{main}</div>{rec}'
@@ -1896,6 +1924,19 @@ def _card(r, can_act, viewer=False):
     src_html = f'<div class="src">{_esc(subtitle)}</div>' if subtitle else ""
     mr_html = f'<div class="row">{mr}</div>' if mr else ""
     why_html = f'<div class="why">{why}</div>' if why else ""
+    # live scrub progress bar (pool roots only): visible while a scrub runs, hidden otherwise so the
+    # 20s refresh can surgically show/update/hide it without rebuilding the card.
+    sc = d.get("scrub") or {}
+    scrub_html = ""
+    if r["type"] == "zfs-local" and r.get("source") and "/" not in r["source"]:
+        inprog = sc.get("state") == "in_progress"
+        pctnum = sc.get("pct") if isinstance(sc.get("pct"), (int, float)) else None
+        pctw = pctnum if pctnum is not None else 0
+        pctxt = f"{pctnum:.1f}%" if pctnum is not None else ""
+        etatxt = f" · {_esc(sc.get('eta'))} to go" if sc.get("eta") else ""
+        scrub_html = (f'<div class=scrubprog data-scrubprog{"" if inprog else " hidden"}>'
+                      f'<div class=scrubbar><span data-scrubfill style="width:{pctw}%"></span></div>'
+                      f'<div class=scrublbl data-scrublbl>scrubbing {pctxt}{etatxt}</div></div>')
     # backs-up + schedule + next/last run - for scheduled jobs (backupninja, syncoid/sanoid timers)
     bu, sc = d.get("backs_up"), d.get("schedule")
     lt, nt = (d.get("last_ts") or r.get("last_run_ts")), d.get("next_ts")
@@ -1948,7 +1989,7 @@ def _card(r, can_act, viewer=False):
     title = _esc(d["label"]) if d.get("label") else n     # schedule cards carry a friendly label
     return (f'<div class="card {card_cls}" data-t="{n}"><div class="ch"><span class="cn">{title}</span>'
             f'<span class="chr"><span class="cbusy" title="action running"></span>'
-            f'<span class="cs">{cs_text}</span></span></div>{src_html}{sched_html}{c321_html}{mr_html}{why_html}'
+            f'<span class="cs">{cs_text}</span></span></div>{src_html}{sched_html}{c321_html}{mr_html}{scrub_html}{why_html}'
             f'{ack_html}{_acts(r, can_act, viewer)}{hist_html}{log_html}</div>')
 
 def _heatmap(order_names):
