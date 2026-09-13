@@ -1220,7 +1220,14 @@ def build_command(action, t, opts=None):
         if typ != "zfs-local":
             return None, f"'scrub' not allowed for type '{typ}'"
         pool = (src or "").split("/")[0]
-        return (["zpool", "scrub", pool], None) if pool else (None, "no pool for scrub")
+        if not pool:
+            return None, "no pool for scrub"
+        # `zpool scrub` needs root: ZFS delegation (`zfs allow`) covers dataset-level `zfs` verbs only,
+        # never `zpool` sub-commands, so a bare `zpool scrub` fails "permission denied" for the user-mode
+        # agent. Go through a root-owned, sudoers-pinned wrapper (same pattern as the SMART probe) that
+        # hard-constrains to `zpool scrub <existing-pool>`. Provisioned by grant-access.sh --scrub.
+        wrapper = os.environ.get("CAIRN_ZPOOL_WRAPPER", "/opt/cairn/phase1/zpool-scrub.sh")
+        return (["sudo", "-n", wrapper, pool], None)
     if action == "pull":
         # Vault-side on-demand replication: pull THIS replica's set from home via the restricted key.
         # The set name is the target name (replication.conf SET names == the dataset targets), and the

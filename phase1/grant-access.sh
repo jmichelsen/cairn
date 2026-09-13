@@ -14,6 +14,11 @@ U="${CAIRN_USER:-${SUDO_USER:-$(id -un)}}"
 # --smart-detail (or SMART_DETAIL=1) to also install the scoped read-only smartctl sudo wrapper.
 SMART_DETAIL="${SMART_DETAIL:-0}"
 for a in "$@"; do [ "$a" = "--smart-detail" ] && SMART_DETAIL=1; done
+# Execute-capable hosts (e.g. a vault that runs its own scrubs) need one narrow privileged verb:
+# `zpool scrub`. It is NOT covered by ZFS delegation (zpool sub-commands never are), so OPT-IN via
+# --scrub installs a root-owned, tightly-scoped scrub wrapper + sudoers rule. Report-only hosts skip it.
+SCRUB_EXEC="${SCRUB_EXEC:-0}"
+for a in "$@"; do [ "$a" = "--scrub" ] && SCRUB_EXEC=1; done
 BN_REPORTS=/var/lib/backupninja/reports
 OPT=/opt/cairn/phase1
 
@@ -112,6 +117,34 @@ if [ -f "$CRON" ] && grep -q 'umask 0027; ' "$CRON"; then
   cp -a "$CRON" "$(bakof "$CRON")"
   sed -i -E 's#umask 0027; ##' "$CRON"
   echo "  removed the old no-op cron umask patch from $CRON (backup: $(bakof "$CRON"))"
+fi
+
+if [ "$SCRUB_EXEC" = 1 ]; then
+  echo "== zpool scrub: scoped sudoers for the scrub wrapper (OPT-IN --scrub, execute-capable hosts) =="
+  SCRUB_SRC="$(dirname "$0")/zpool-scrub.sh"
+  [ -f "$SCRUB_SRC" ] || { echo "  ERROR: $SCRUB_SRC not found (run from the phase1 dir)" >&2; exit 1; }
+  install -D -o root -g root -m 0755 "$SCRUB_SRC" "$OPT/zpool-scrub.sh"
+  # Validate a TEMP copy first - a broken file in /etc/sudoers.d can wedge all sudo. Same !requiretty
+  # handling as the SMART wrapper (classic sudo needs it tty-less; sudo-rs rejects the setting).
+  SUDO_TMP="$(mktemp)"
+  write_scrub_sudoers() {
+    { echo "# cairn: allow $U to run ONLY the scoped zpool-scrub wrapper as root."
+      [ "${1:-1}" = 1 ] && echo "Defaults:$U !requiretty"
+      echo "$U ALL=(root) NOPASSWD: $OPT/zpool-scrub.sh"; } > "$SUDO_TMP"
+  }
+  write_scrub_sudoers 1
+  visudo -cf "$SUDO_TMP" >/dev/null 2>&1 || { echo "  (this sudo rejects !requiretty - omitting it; it isn't needed here)"; write_scrub_sudoers 0; }
+  if visudo -cf "$SUDO_TMP" >/dev/null; then
+    install -o root -g root -m 0440 "$SUDO_TMP" /etc/sudoers.d/cairn-scrub
+    echo "  sudoers installed + validated - the Scrub button now works on this host's pools"
+  else
+    echo "  ERROR: generated sudoers failed validation - NOT installing" >&2
+    rm -f "$SUDO_TMP"; exit 1
+  fi
+  rm -f "$SUDO_TMP"
+else
+  echo "== zpool scrub: SKIPPED (report-only host) - to enable the Scrub button, re-run with --scrub =="
+  echo "   to REMOVE a previously-installed scrub wrapper: rm -f /etc/sudoers.d/cairn-scrub $OPT/zpool-scrub.sh"
 fi
 
 echo "== backupninja reports/log: adm-readable =="

@@ -653,25 +653,33 @@ EOF
   #      read-only smartctl sudo wrapper. Vaults omitted this before, so it never got offered here. ----
   local vsd=""; [ "$SMART_DETAIL" = 1 ] && vsd="--smart-detail"
   [ -z "$vsd" ] && { askyn "enable SMART attribute-table detail on this vault (per-disk model/temp/health; installs smartmontools + a scoped smartctl sudo wrapper)?" n && vsd="--smart-detail"; }
-  if [ -n "$vsd" ]; then
-    # SMART detail was explicitly requested, so its smartmontools dependency installs even under --yes
-    # (unlike the general optional toolchain, which --yes skips). Best-effort: warn, never die.
-    if ! { command -v smartctl >/dev/null 2>&1 || command -v /usr/sbin/smartctl >/dev/null 2>&1; }; then
-      prime_sudo && _pkg_do smartmontools && ok "smartmontools ready" || warn "couldn't install smartmontools - SMART detail needs it"
-    fi
-    sudo env CAIRN_USER="$USER" bash -c "'$HERE/phase1/grant-access.sh' --smart-detail"
-    local vunit="$HOME/.config/systemd/user/cairn-agent.service"
-    grep -q '^Environment=CAIRN_SMART_DETAIL=' "$vunit" || sed -i '/^ExecStart=/i Environment=CAIRN_SMART_DETAIL=1' "$vunit"
-    # surface the disks: ensure an ACTIVE smart target in targets.yaml (uncomment a commented one, else append)
-    if ! grep -qE '^[[:space:]]*-[[:space:]]*\{[[:space:]]*name:[[:space:]]*smart,' "$TGT"; then
-      if grep -qE '^[[:space:]]*#[[:space:]]*-[[:space:]]*\{[[:space:]]*name:[[:space:]]*smart,' "$TGT"; then
-        sed -i -E 's/^([[:space:]]*)#([[:space:]]*-[[:space:]]*\{[[:space:]]*name:[[:space:]]*smart,[^}]*\})/\1\2/' "$TGT"
-      else
-        printf '  - { name: smart, type: smart }\n' >> "$TGT"
+  # An execute-capable vault needs the scoped `zpool scrub` wrapper, or its Scrub button fails
+  # "permission denied" (zpool verbs aren't delegable). Report-only vaults skip it.
+  local vscrub=""; [ "$CAN" = 1 ] && vscrub="--scrub"
+  if [ -n "$vsd" ] || [ -n "$vscrub" ]; then
+    if [ -n "$vsd" ]; then
+      # SMART detail was explicitly requested, so its smartmontools dependency installs even under --yes
+      # (unlike the general optional toolchain, which --yes skips). Best-effort: warn, never die.
+      if ! { command -v smartctl >/dev/null 2>&1 || command -v /usr/sbin/smartctl >/dev/null 2>&1; }; then
+        prime_sudo && _pkg_do smartmontools && ok "smartmontools ready" || warn "couldn't install smartmontools - SMART detail needs it"
       fi
-      ok "added a 'smart' target to $TGT"
     fi
-    ok "SMART detail enabled (smartmontools + wrapper + CAIRN_SMART_DETAIL=1)"
+    sudo env CAIRN_USER="$USER" bash -c "'$HERE/phase1/grant-access.sh' $vsd $vscrub"
+    local vunit="$HOME/.config/systemd/user/cairn-agent.service"
+    if [ -n "$vsd" ]; then
+      grep -q '^Environment=CAIRN_SMART_DETAIL=' "$vunit" || sed -i '/^ExecStart=/i Environment=CAIRN_SMART_DETAIL=1' "$vunit"
+      # surface the disks: ensure an ACTIVE smart target in targets.yaml (uncomment a commented one, else append)
+      if ! grep -qE '^[[:space:]]*-[[:space:]]*\{[[:space:]]*name:[[:space:]]*smart,' "$TGT"; then
+        if grep -qE '^[[:space:]]*#[[:space:]]*-[[:space:]]*\{[[:space:]]*name:[[:space:]]*smart,' "$TGT"; then
+          sed -i -E 's/^([[:space:]]*)#([[:space:]]*-[[:space:]]*\{[[:space:]]*name:[[:space:]]*smart,[^}]*\})/\1\2/' "$TGT"
+        else
+          printf '  - { name: smart, type: smart }\n' >> "$TGT"
+        fi
+        ok "added a 'smart' target to $TGT"
+      fi
+      ok "SMART detail enabled (smartmontools + wrapper + CAIRN_SMART_DETAIL=1)"
+    fi
+    [ -n "$vscrub" ] && ok "scrub execution enabled (scoped zpool-scrub wrapper) - the Scrub button now works"
   fi
 
   systemctl --user daemon-reload
