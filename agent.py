@@ -45,6 +45,12 @@ TIMEOUT  = int(_e("CAIRN_ACTION_TIMEOUT", "7200"))
 # Identify with a real User-Agent. urllib's default ("Python-urllib/X.Y") is a known-bot signature
 # that CDNs/WAFs in front of the API (e.g. Cloudflare) reject with 403, so always send our own.
 UA       = _e("CAIRN_USER_AGENT", "cairn-agent/1.0")
+def _version():
+    try:
+        return _e("CAIRN_VERSION") or (HERE / "VERSION").read_text().strip() or "0.0.0"
+    except Exception:
+        return "0.0.0"
+VERSION  = _version()
 
 META_KEYS = ["type", "source", "dest", "tier", "location", "encrypted", "cadence"]
 
@@ -86,7 +92,7 @@ def do_report(cfg):
         items.append(item)
     api_call("POST", "/api/v1/backup/report",
              {"agent": NAME, "ts": int(time.time()), "can_execute": CAN_EXEC,
-              "interval": INTERVAL, "statuses": items})
+              "interval": INTERVAL, "version": VERSION, "statuses": items})
     return len(items)
 
 def do_execute(cfg):
@@ -128,7 +134,7 @@ def main():
     once = "--once" in sys.argv
     cfg = yaml.safe_load(Path(TARGETS).read_text())
     auth = "enroll" if ENROLL_SECRET else "static-token"
-    print(f"agent '{NAME}' -> {API}  (auth={auth}, execute={CAN_EXEC}, dryrun={DRYRUN}, interval={INTERVAL}s)")
+    print(f"agent '{NAME}' v{VERSION} -> {API}  (auth={auth}, execute={CAN_EXEC}, dryrun={DRYRUN}, interval={INTERVAL}s)")
     if ENROLL_SECRET:
         try:
             enroll()

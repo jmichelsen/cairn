@@ -16,6 +16,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 HERE = Path(__file__).resolve().parent
 DB = os.environ.get("CAIRN_DB", "/var/lib/cairn/cairn.db")
+
+def _read_version():
+    """Release version, from the repo-root VERSION file (shared by API + agent) or CAIRN_VERSION."""
+    try:
+        return os.environ.get("CAIRN_VERSION") or (HERE.parent / "VERSION").read_text().strip() or "0.0.0"
+    except Exception:
+        return "0.0.0"
+CAIRN_VERSION = _read_version()
 import sys as _sys
 _sys.path.insert(0, str(HERE))
 import collector as _cmd   # PURE build_command, for action PREVIEWS only; the API never executes it
@@ -245,7 +253,8 @@ def _init_db():
                                   ("auth_tokens", "kind", "TEXT DEFAULT 'access'"),
                                   ("auth_tokens", "parent", "TEXT"),
                                   ("auth_tokens", "expires_ts", "INTEGER"),
-                                  ("agents", "report_interval", "INTEGER")]:
+                                  ("agents", "report_interval", "INTEGER"),
+                                  ("agents", "agent_version", "TEXT")]:
                 try:
                     c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
                 except sqlite3.OperationalError:
@@ -320,7 +329,7 @@ def health():
                 worst = a["severity"]
     return {"severity": worst, "counts": counts, "acked": acked,
             "targets": sum(1 for r in rows if (r["agent"], r["name"]) not in paired_keys) + len(pair_views),
-            "agents": len(astates), "stale_agents": stale_agents, "ts": now}
+            "agents": len(astates), "stale_agents": stale_agents, "ts": now, "version": CAIRN_VERSION}
 
 @app.get("/api/v1/backup/agents")
 def agents_view():
@@ -573,15 +582,17 @@ def agent_states(conn, now=None):
     now = now or int(time.time())
     out = []
     for a in conn.execute(
-            "SELECT name,can_execute,last_report_ts,report_interval FROM agents ORDER BY name").fetchall():
+            "SELECT name,can_execute,last_report_ts,report_interval,agent_version FROM agents ORDER BY name").fetchall():
         due = a["report_interval"] or 120
         stale_after = max(due * AGENT_STALE_FACTOR, AGENT_STALE_FLOOR)
         miss_after = max(due * AGENT_MISS_FACTOR, AGENT_STALE_FLOOR * 2)
         last = a["last_report_ts"] or 0
         age = now - last
         sev = "CRIT" if age >= miss_after else "WARN" if age >= stale_after else "OK"
+        ver = a["agent_version"]
         out.append(dict(name=a["name"], can_execute=bool(a["can_execute"]), last_report_ts=last,
-                        report_interval=due, age_s=age, severity=sev, stale_after=stale_after))
+                        report_interval=due, age_s=age, severity=sev, stale_after=stale_after,
+                        version=ver, outdated=bool(ver and ver != CAIRN_VERSION)))
     return out
 
 def _reap_agents(conn, now):
@@ -603,14 +614,17 @@ async def report(request: Request):
     now = int(payload.get("ts") or time.time())
     can_exec = 1 if payload.get("can_execute") else 0
     interval = int(payload.get("interval") or 0) or None   # agent's own poll cadence (for staleness)
+    version = (payload.get("version") or "").strip() or None   # agent's running cairn version
     statuses = payload.get("statuses", [])
     alerts = []
     with db() as conn:
-        conn.execute("""INSERT INTO agents(name,can_execute,last_report_ts,report_interval) VALUES(?,?,?,?)
+        conn.execute("""INSERT INTO agents(name,can_execute,last_report_ts,report_interval,agent_version)
+            VALUES(?,?,?,?,?)
             ON CONFLICT(name) DO UPDATE SET can_execute=excluded.can_execute,
             last_report_ts=excluded.last_report_ts,
-            report_interval=COALESCE(excluded.report_interval, agents.report_interval)""",
-            (agent, can_exec, now, interval))
+            report_interval=COALESCE(excluded.report_interval, agents.report_interval),
+            agent_version=COALESCE(excluded.agent_version, agents.agent_version)""",
+            (agent, can_exec, now, interval, version))
         for s in statuses:
             name = s.get("name")
             if not name:
@@ -1160,6 +1174,8 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .signout{color:var(--acc);text-decoration:none;font-size:12.5px;white-space:nowrap}
 .robadge{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--mut);
   border:1px solid var(--line);border-radius:999px;padding:2px 9px;white-space:nowrap}
+.verold{display:inline-block;margin-left:6px;font-size:11px;font-weight:600;color:var(--warn);
+  border:1px solid var(--warn);border-radius:999px;padding:0 7px;white-space:nowrap}
 .drysw{display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:12.5px;color:var(--mut);
   border:1px solid var(--line);background:var(--surf);border-radius:9px;padding:6px 11px;user-select:none}
 .drysw input{appearance:none;-webkit-appearance:none;width:30px;height:17px;border-radius:10px;
@@ -1629,12 +1645,22 @@ def _agent_card(a):
     role = "execute-capable" if a.get("can_execute") else "report-only"
     last = (_ago(a["last_report_ts"]) if a.get("last_report_ts") else "never")
     ivl = _ago_s(a["report_interval"]) if a.get("report_interval") else "?"
+    ver = a.get("version")
+    if ver and a.get("outdated"):
+        ver_html = (f'<div class=jrow><span class=jk>version</span>'
+                    f'<span class=jv title="control plane is on {_esc(CAIRN_VERSION)}">'
+                    f'{_esc(ver)} <span class=verold>update to {_esc(CAIRN_VERSION)}</span></span></div>')
+    elif ver:
+        ver_html = f'<div class=jrow><span class=jk>version</span><span class=jv>{_esc(ver)}</span></div>'
+    else:
+        ver_html = ""
     return (f'<div class="card {sev}" data-a="{n}"><div class="ch"><span class="cn">{n}</span>'
             f'<span class="chr"><span class="cs">{cs}</span></span></div>'
             f'<div class="src">{_esc(role)}</div>'
             f'<div class=jsched><div class=jrow><span class=jk>last seen</span>'
             f'<span class=jv acls="ls">{last}</span></div>'
-            f'<div class=jrow><span class=jk>reports</span><span class=jv>every {ivl}</span></div></div></div>')
+            f'<div class=jrow><span class=jk>reports</span><span class=jv>every {ivl}</span></div>'
+            f'{ver_html}</div></div>')
 
 def _smart_card(r):
     """A per-drive pill: identity + the stats that matter at a glance, expandable to the full
