@@ -12,7 +12,7 @@ import hashlib, hmac, json, os, re, sqlite3, time
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 HERE = Path(__file__).resolve().parent
 DB = os.environ.get("CAIRN_DB", "/var/lib/cairn/cairn.db")
@@ -180,6 +180,17 @@ def _sign_in_cookie(cookie_tok, max_age, scheme):
     r.set_cookie("bm_token", cookie_tok, httponly=True, samesite="strict",
                  secure=scheme == "https", max_age=max_age)
     return r
+
+# A blank (1x1 transparent) favicon. Browsers auto-request /favicon.ico; without this the app
+# 404s every page load. Whitelisted in the auth middleware above so it serves pre-login too.
+import base64 as _b64
+_FAVICON = _b64.b64decode(
+    "AAABAAEAAQEAAAEAIAAwAAAAFgAAACgAAAABAAAAAgAAAAEAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==")
+
+@app.get("/favicon.ico")
+def favicon():
+    return Response(content=_FAVICON, media_type="image/x-icon",
+                    headers={"Cache-Control": "public, max-age=604800"})
 
 @app.get("/login", response_class=HTMLResponse)
 def login_form(request: Request, bad: int = 0, token: str = ""):
@@ -2017,6 +2028,7 @@ def _hero_steel(rows, h, gpct, glabel):
 def _shell(inner):
     return (f"<!doctype html><html lang=en><head><meta charset=utf-8>"
             f"<meta name=viewport content=\"width=device-width,initial-scale=1\">"
+            f"<link rel=icon href=/favicon.ico>"
             f"<title>Cairn</title>{FONTS}{PAGE_STYLE}</head><body>"
             f"<div class=panel>{inner}"
             f"<form id=lo method=post action=/logout hidden></form></div>{PAGE_SCRIPT}</body></html>")
