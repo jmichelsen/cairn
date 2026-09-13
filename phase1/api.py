@@ -1088,7 +1088,7 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .card .cs{font-size:10.5px;font-weight:700;letter-spacing:.05em;flex:none}
 .card.ok .cs{color:var(--ok)} .card.warn .cs{color:var(--warn)} .card.crit .cs{color:var(--crit)} .card.unk .cs{color:var(--unk)}
 .card.ack .cs{color:var(--ack)}
-.card .src{font-family:"Roboto Mono";font-size:11.5px;color:var(--mut);margin-top:3px;word-break:break-all}
+.card .src{font-family:"Roboto Mono";font-size:11.5px;color:var(--mut);margin-top:3px;overflow-wrap:anywhere;word-break:normal}
 .card .row{display:flex;gap:16px;margin-top:12px;flex-wrap:wrap}
 .card .mv{font-family:"Roboto Mono";font-weight:500;font-size:16px}
 .card .ml{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}
@@ -1815,7 +1815,10 @@ def _pair_card(v, capable=frozenset(), viewer=False):
             sevw = "CRIT" if age_s >= 50 * 3600 else "WARN" if age_s >= 28 * 3600 else "OK"
         hs = SEVCLS.get(sevw, "unk")
         age = (_ago_s(age_s) + " old") if age_s is not None else "no snapshot"
-        ks = f' &middot; key {_esc(row["key_status"])}' if row.get("key_status") else ""
+        # Only show the key status for ENCRYPTED datasets; zfs reports '-' for an unencrypted one,
+        # which rendered as a meaningless "key -".
+        _ks = (row.get("key_status") or "").strip()
+        ks = f' &middot; key {_esc(_ks)}' if _ks and _ks not in ("-", "none", "n/a") else ""
         return (f'<div class=phalf><span class=pd style="background:var(--{hs})"></span>'
                 f'<div class=phinfo><b>{_esc(row.get("agent") or "?")}</b> '
                 f'<span class=psev>{_esc(sevw)}</span> <span class=prole>{role}</span>'
