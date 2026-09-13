@@ -1015,6 +1015,13 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .agenthdr{margin:18px 2px 7px;font-size:12px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--mut);display:flex;align-items:center;gap:8px}
 .agenthdr:first-child{margin-top:4px}
 .agdot{width:7px;height:7px;border-radius:50%;background:var(--ack);flex:none}
+.agenttabs{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 18px}
+.agenttab{cursor:pointer;flex:1 1 230px;min-width:190px;transition:opacity .15s,box-shadow .15s;user-select:none}
+.agenttab:not(.active){opacity:.58}
+.agenttab:hover{opacity:1}
+.agenttab.active{box-shadow:inset 0 0 0 2px var(--acc)}
+.agenttab .verbtn{cursor:pointer}
+.agentpane{display:block}
 .reconbanner{margin:12px 16px 0;padding:9px 13px;border-radius:9px;font-size:12.5px;line-height:1.45;color:var(--ink);background:color-mix(in srgb,var(--warn) 16%,var(--surf));border:1px solid color-mix(in srgb,var(--warn) 50%,var(--line));display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .reconbtn{margin-left:auto;border:1px solid var(--line);background:var(--surf);color:var(--ink);border-radius:7px;padding:5px 12px;font-size:12px;cursor:pointer}
 .reconbtn:hover{border-color:var(--warn)}
@@ -1407,6 +1414,14 @@ function drawGauge(){
 window.addEventListener('load',drawGauge);
 if(document.fonts&&document.fonts.ready) document.fonts.ready.then(drawGauge);
 if(window.matchMedia) matchMedia('(prefers-color-scheme:dark)').addEventListener('change',drawGauge);
+// Agent tabs: clicking an agent card switches to its pane; remember the choice per browser.
+function showAgent(slug){
+  document.querySelectorAll('[data-agpane]').forEach(function(p){ p.hidden = (p.getAttribute('data-agpane')!==slug); });
+  document.querySelectorAll('[data-agtab]').forEach(function(t){ t.classList.toggle('active', t.getAttribute('data-agtab')===slug); });
+  try{ localStorage.setItem('bm_agtab', slug); }catch(e){}
+}
+(function(){ try{ var s=localStorage.getItem('bm_agtab');
+  if(s && document.querySelector('[data-agpane="'+s+'"]')) showAgent(s); }catch(e){} })();
 function esc(s){return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function relTime(ts){ if(!ts) return ''; var s=Math.max(0, Date.now()/1000 - ts);
   if(s<90) return Math.round(s)+'s ago'; if(s<5400) return Math.round(s/60)+'m ago';
@@ -1550,7 +1565,9 @@ async function refreshAgents(){                          // agent liveness (dead
   var stale=0;
   (j.agents||[]).forEach(function(a){
     var c=document.querySelector('.card[data-a="'+String(a.name).replace(/"/g,'')+'"]'); if(!c) return;
-    var cls=_SEVC[(a.severity||'').toUpperCase()]||'unk'; c.className='card '+cls;
+    var cls=_SEVC[(a.severity||'').toUpperCase()]||'unk';
+    // preserve the tab role/active state (this card doubles as a tab); only swap the severity class
+    c.className='card '+cls+(c.classList.contains('agenttab')?' agenttab':'')+(c.classList.contains('active')?' active':'');
     var cs=c.querySelector('.cs'); if(cs) cs.textContent=_AGSTATE[a.severity]||a.severity;
     var ls=c.querySelector('[acls=ls]'); if(ls) ls.textContent=a.last_report_ts?relTime(a.last_report_ts):'never';
     if(a.severity!=='OK') stale++;
@@ -1691,8 +1708,9 @@ def _when(ts):
     v = f"{max(1, s//60)}m" if s < 5400 else (f"{s//3600}h" if s < 172800 else f"{s//86400}d")
     return f"in {v}" if fut else f"{v} ago"
 
-def _agent_card(a, viewer=False):
-    """Liveness card for one reporting agent - the dead-man's-switch surface (e.g. the vault)."""
+def _agent_card(a, viewer=False, tab=None, active=False):
+    """Liveness card for one reporting agent - the dead-man's-switch surface (e.g. the vault). When
+    `tab` (a slug) is given the card doubles as a TAB: clicking it switches to that agent's pane."""
     sev = SEVCLS.get(a["severity"], "unk")
     n = _esc(a["name"])
     cs = {"OK": "ONLINE", "WARN": "STALE", "CRIT": "MISSING"}.get(a["severity"], a["severity"])
@@ -1702,8 +1720,9 @@ def _agent_card(a, viewer=False):
     ver = a.get("version")
     if ver and a.get("outdated"):
         # A read-only viewer sees the badge; an admin gets a button that queues the agent's self-update.
+        # stopPropagation so pressing Update on a tab doesn't also switch tabs.
         upd = (f'<span class=verold>update to {_esc(CAIRN_VERSION)}</span>' if viewer else
-               f'<button class=verbtn onclick="updateAgent(\'{n}\')" '
+               f'<button class=verbtn onclick="event.stopPropagation();updateAgent(\'{n}\')" '
                f'title="fetch the latest code on this agent and restart it, keeping every setting">'
                f'update to {_esc(CAIRN_VERSION)}</button>')
         ver_html = (f'<div class=jrow><span class=jk>version</span>'
@@ -1712,7 +1731,9 @@ def _agent_card(a, viewer=False):
         ver_html = f'<div class=jrow><span class=jk>version</span><span class=jv>{_esc(ver)}</span></div>'
     else:
         ver_html = ""
-    return (f'<div class="card {sev}" data-a="{n}"><div class="ch"><span class="cn">{n}</span>'
+    cls = f"card {sev}" + (f" agenttab{' active' if active else ''}" if tab else "")
+    tabattrs = f' onclick="showAgent(\'{tab}\')" data-agtab="{tab}" role=tab' if tab else ""
+    return (f'<div class="{cls}" data-a="{n}"{tabattrs}><div class="ch"><span class="cn">{n}</span>'
             f'<span class="chr"><span class="cs">{cs}</span></span></div>'
             f'<div class="src">{_esc(role)}</div>'
             f'<div class=jsched><div class=jrow><span class=jk>last seen</span>'
@@ -2039,33 +2060,61 @@ def index(request: Request):
 
     heat_rows, heat_span = _heatmap(order_names)
 
-    # Cards group by type into collapsible sections; when more than one agent reports, those sections
-    # are nested under a per-agent heading, so home's fleet and a remote vault read as distinct blocks
-    # (and same-named targets from different agents no longer look like one flapping row).
+    # Per-agent TABS: each agent's liveness card doubles as a tab; its pane holds that agent's own
+    # targets (grouped by type into collapsible sections) PLUS the replication pairs it participates in.
+    # A two-sided pair (home source -> vault copy) shows in BOTH halves' tabs, so the vault tab is a
+    # complete off-site view. The busiest agent (home) is the default tab.
     def _slug(s): return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
-    cards, cur, cur_agent = "", None, None
+
+    def _grouped(subset, agslug):
+        subset = sorted(subset, key=lambda r: (_group(r)[0], r["name"]))
+        out, cur = "", None
+        for r in subset:
+            g = _group(r)[1]
+            if g != cur:
+                if cur is not None:
+                    out += "</div></div></section>"
+                pid = f"grp:{agslug}:{_slug(g)}"
+                out += (f'<section class="pane grp" data-pane="{_esc(pid)}">'
+                        f'<button class="paneh" onclick="togglePane(\'{_esc(pid)}\')">'
+                        f'<span class=pt>{_esc(g)}</span><span class=pdot></span>'
+                        f'<span class=pchev>&#9662;</span></button><div class=pbody><div class=cards>')
+                cur = g
+            out += _smart_card(r) if r["type"] == "smart" else \
+                _card(r, (r.get("agent") in capable) and not viewer, viewer)
+        if cur is not None:
+            out += "</div></div></section>"
+        return out
+
+    def _pairs_pane(pvlist, agslug):
+        if not pvlist:
+            return ""
+        pv = sorted(pvlist, key=lambda v: (SEV_ORDER.get(v["severity"], 9), v["r"]["name"]))
+        inner = "".join(_pair_card(v, capable, viewer) for v in pv)
+        pid = f"grp:{agslug}:replication"
+        return (f'<section class="pane grp" data-pane="{_esc(pid)}">'
+                f'<button class=paneh onclick="togglePane(\'{_esc(pid)}\')">'
+                f'<span class=pt>Replication</span><span class=pdot></span>'
+                f'<span class=pchev>&#9662;</span></button>'
+                f'<div class=pbody><div class=cards>{inner}</div></div></section>')
+
+    tcount = {}
     for r in rows:
-        ag = r.get("agent") or "?"
-        if multi_agent and ag != cur_agent:
-            if cur is not None:
-                cards += "</div></div></section>"; cur = None
-            cards += f'<div class=agenthdr><span class=agdot></span>{_esc(ag)}</div>'
-            cur_agent = ag
-        g = _group(r)[1]
-        if g != cur:
-            if cur is not None:
-                cards += "</div></div></section>"
-            pid = "grp:" + ((_slug(ag) + ":") if multi_agent else "") + _slug(g)
-            cards += (f'<section class="pane grp" data-pane="{_esc(pid)}">'
-                      f'<button class="paneh" onclick="togglePane(\'{_esc(pid)}\')">'
-                      f'<span class=pt>{_esc(g)}</span><span class=pdot></span>'
-                      f'<span class=pchev>&#9662;</span></button>'
-                      f'<div class=pbody><div class=cards>')
-            cur = g
-        cards += _smart_card(r) if r["type"] == "smart" else \
-            _card(r, (r.get("agent") in capable) and not viewer, viewer)
-    if cur is not None:
-        cards += "</div></div></section>"
+        k = r.get("agent") or "?"; tcount[k] = tcount.get(k, 0) + 1
+    agent_order = sorted(agents, key=lambda a: (-tcount.get(a["name"], 0), a["name"]))
+    tabs_html, panes_html = "", ""
+    for i, a in enumerate(agent_order):
+        ag = a["name"]; agslug = _slug(ag) or "agent"; is_active = (i == 0)
+        subset = [r for r in rows if (r.get("agent") or "?") == ag]
+        my_pairs = [v for v in pair_views
+                    if v["r"].get("agent") == ag or v["l"].get("agent") == ag]
+        content = _pairs_pane(my_pairs, agslug) + _grouped(subset, agslug) \
+            or '<div class=why style="padding:12px 2px">No targets reported by this agent yet.</div>'
+        tabs_html += _agent_card(a, viewer, tab=agslug, active=is_active)
+        panes_html += f'<div class=agentpane data-agpane="{agslug}"{"" if is_active else " hidden"}>{content}</div>'
+    agents_tabs_html = (f'<div class=agenttabs role=tablist>{tabs_html}</div>{panes_html}'
+                        if tabs_html else
+                        '<div class=why style="padding:12px 2px">No agents enrolled yet.</div>')
 
     leg = ""
     for term, desc in LEGEND:
@@ -2103,28 +2152,6 @@ def index(request: Request):
                "UNKNOWN": "Unknown"}.get(h["severity"], h["severity"])
     vcls = SEVCLS.get(h["severity"], "unk")
     steel_hero = _hero_steel(rows, h, gpct, glabel)
-    # Agents section - reporting liveness (the dead-man's-switch for the vault + local agent)
-    n_stale = sum(1 for a in agents if a["severity"] != "OK")
-    scount = f"{n_stale} stale" if n_stale else ""
-    agents_cards = "".join(_agent_card(a, viewer) for a in agents) or \
-        '<div class=why style="padding:4px 2px">No agents enrolled yet.</div>'
-    agents_html = (
-        '<section class="pane grp" data-pane="grp:agents" id=agentsec>'
-        '<button class=paneh onclick="togglePane(\'grp:agents\')">'
-        f'<span class=pt>Agents</span><span class=pcount id=agentcount>{scount}</span>'
-        '<span class=pdot></span><span class=pchev>&#9662;</span></button>'
-        f'<div class=pbody><div class=cards id=agentcards>{agents_cards}</div></div></section>')
-
-    # Guaranteed replication pairs render as ONE merged card (source + off-site copy) in their own group.
-    pairs_html = ""
-    if pair_views:
-        pv = sorted(pair_views, key=lambda v: (SEV_ORDER.get(v["severity"], 9), v["r"]["name"]))
-        inner = "".join(_pair_card(v, capable, viewer) for v in pv)
-        pairs_html = ('<section class="pane grp" data-pane="grp:replication">'
-                      '<button class=paneh onclick="togglePane(\'grp:replication\')">'
-                      '<span class=pt>Replication</span><span class=pdot></span>'
-                      '<span class=pchev>&#9662;</span></button>'
-                      f'<div class=pbody><div class=cards>{inner}</div></div></section>')
     dry_html = "" if viewer else (
         '<label class=drysw title="When on, every action runs a safe dry-run probe (native -n / read-only) instead of executing">'
         '<input type=checkbox id=drychk onchange="setDry(this.checked)"><span>Dry-run</span></label>')
@@ -2149,7 +2176,7 @@ def index(request: Request):
         <div class=gauge-cap>Busiest pool<span>{glabel} · {gpct}% used</span></div></div>
       <div class=railsec><h3>Coverage gaps</h3><div id=gapsbody>{gaps_html}</div></div>
     </div>
-    <div class=main>{agents_html}{pairs_html}{cards}
+    <div class=main>{agents_tabs_html}
       <div class="pane actpane" data-pane=acts>
         <button class=paneh onclick="togglePane('acts')"><span class=pt>Activity</span><span class=pcount id=actcount></span><span class=pdot></span><span class=pchev>&#9662;</span></button>
         <div class=pbody><div id=actlog><span class=amsg>idle - actions stream here.</span></div></div></div></div>
