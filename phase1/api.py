@@ -549,7 +549,7 @@ def timeline(days: int = 14):
 # The API never touches ZFS/borg/disks. Agents (local + remote) do all host work and talk HTTP.
 import subprocess
 NOTIFY_SH = os.environ.get("NOTIFY_SH", str(HERE.parent / "phase0" / "notify.sh"))
-ALLOWED_ACTIONS = {"snapshot", "sync", "scrub",
+ALLOWED_ACTIONS = {"snapshot", "sync", "scrub", "pull",
                    "recover-points", "recover-search", "recover-deleted", "restore"}
 STATUS_INGEST_COLS = ["snap_age_src_s","snap_age_dst_s","repl_lag_s","pool_health","pool_cap_pct",
     "last_scrub_ts","usedbysnapshots","compressratio","key_status","archive_count","dedup_ratio",
@@ -751,18 +751,26 @@ async def create_action(request: Request):
     for k in ("path", "dest", "version"):
         if body.get(k) is not None:
             opts[k] = str(body[k])
+    agent_sel = body.get("agent")   # disambiguate a name shared by two agents (e.g. a replication pair)
     with db() as conn:
-        # Targets are identified per (agent, name); this by-name lookup assumes no two agents report an
-        # ACTIONABLE target with the same name (true for normal fleets). If that ever happens, add an
-        # agent selector to this endpoint and scope the lookup by (agent, name). Same caveat for acks.
-        r = conn.execute("SELECT id,type,source,dest,enabled,agent FROM targets WHERE name=? "
-                         "ORDER BY (agent IS NULL), id LIMIT 1", (target,)).fetchone()
+        # Targets are identified per (agent, name). A by-name lookup is enough for a unique name; pass
+        # `agent` to scope it when two agents report the same name (a replication pair: home's zfs-repl
+        # and the vault's zfs-local both named e.g. "Pics"). "pull" MUST be scoped to the vault half.
+        if agent_sel:
+            r = conn.execute("SELECT id,type,source,dest,enabled,agent FROM targets WHERE name=? AND agent=?",
+                             (target, agent_sel)).fetchone()
+        else:
+            r = conn.execute("SELECT id,type,source,dest,enabled,agent FROM targets WHERE name=? "
+                             "ORDER BY (agent IS NULL), id LIMIT 1", (target,)).fetchone()
         if not r or not r["enabled"]:
-            raise HTTPException(404, f"unknown/disabled target '{target}'")
+            raise HTTPException(404, f"unknown/disabled target '{target}'"
+                                     + (f" for agent '{agent_sel}'" if agent_sel else ""))
         if action == "sync" and r["type"] != "zfs-repl":
             raise HTTPException(400, "sync only valid for zfs-repl targets")
         if action == "scrub" and r["type"] != "zfs-local":
             raise HTTPException(400, "scrub only valid for zfs-local targets")
+        if action == "pull" and r["type"] != "zfs-local":
+            raise HTTPException(400, "pull only valid for a zfs-local replica (the off-site copy)")
         if (action == "snapshot" or action in RECOVER_ACTIONS) and not r["source"]:
             raise HTTPException(400, "action requires a dataset-backed target")
         if action == "restore" and not opts.get("version"):
@@ -1330,6 +1338,12 @@ async function actPrompt(target, action, field, msg){
   if(!(await confirmRun(b, action+' '+target+' ['+(v||'(all)')+']'))) return;
   post(b);
 }
+async function replicateNow(name, agent, dry){
+  // Queue an on-demand pull of this set on the off-site agent (reuses the intent flow + activity log).
+  var b={target:name, action:'pull', agent:agent, requested_by:'ui', dryrun:!!dry||!!window.CAIRN_DRY};
+  if(!(await confirmRun(b, 'pull "'+name+'" from home now'))) return;
+  post(b);
+}
 async function updateAgent(name){
   if(!confirm('Update agent "'+name+'" to the latest version?\\nIt fetches new code and restarts, keeping every setting.')) return;
   try{ await fetch('/api/v1/backup/agents/'+encodeURIComponent(name)+'/update',{method:'POST'}); }
@@ -1769,9 +1783,11 @@ PAIR_ICON = (  # two linked nodes with an arrow: source -> off-site copy (data r
     '<circle cx="5" cy="12" r="2.6"/><circle cx="19" cy="12" r="2.6"/>'
     '<path d="M7.6 12h8.8"/><path d="M14 9.2l2.6 2.8-2.6 2.8"/></svg>')
 
-def _pair_card(v):
+def _pair_card(v, capable=frozenset(), viewer=False):
     """One merged card for a guaranteed replication pair: the source->dest relationship up top, then
-    each half (the sending agent + the off-site copy) with its own severity and snapshot freshness."""
+    each half (the sending agent + the off-site copy) with its own severity and snapshot freshness.
+    If the off-site agent is execute-capable, an admin gets a 'Replicate now' button that queues an
+    on-demand pull on that agent."""
     R = v["r"]; L = v["l"]; sev = SEVCLS.get(v["severity"], "unk")
     name = _esc(R["name"])
     subtitle = f'{_esc(R.get("source") or "")} &rarr; {_esc(v["dataset"])}'
@@ -1794,11 +1810,19 @@ def _pair_card(v):
                 f'<div class=phinfo><b>{_esc(row.get("agent") or "?")}</b> '
                 f'<span class=psev>{_esc(sevw)}</span> <span class=prole>{role}</span>'
                 f'<small>{_esc(row.get("source") or "")}<br>newest snapshot {age}{ks}</small></div></div>')
+    # On-demand pull: only when the off-site (L) agent can execute, and never for a read-only viewer.
+    act_html = ""
+    if not viewer and L.get("agent") in capable:
+        act_html = ('<div class="cact"><button class=pri onclick="replicateNow('
+                    f"'{_esc(L['name'])}','{_esc(L['agent'])}')\">Replicate now</button>"
+                    '<button onclick="replicateNow('
+                    f"'{_esc(L['name'])}','{_esc(L['agent'])}',true)\">dry-run</button></div>")
     return (f'<div class="card pair {sev}" data-t="{name}"><div class=ch>'
             f'<span class=cn>{PAIR_ICON}{name}</span><span class=chr>'
+            f'<span class="cbusy" title="pull running"></span>'
             f'<span class=pbadge>replication pair</span><span class=cs>{_esc(v["severity"])}</span></span></div>'
             f'<div class=src>{subtitle}</div>'
-            f'<div class=phalves>{half(R, "source")}{half(L, "off-site copy")}</div></div>')
+            f'<div class=phalves>{half(R, "source")}{half(L, "off-site copy")}</div>{act_html}</div>')
 
 def _card(r, can_act, viewer=False):
     nm = r["name"]; n = _esc(nm); sev = SEVCLS.get(r["severity"], "unk")
@@ -2082,7 +2106,7 @@ def index(request: Request):
     pairs_html = ""
     if pair_views:
         pv = sorted(pair_views, key=lambda v: (SEV_ORDER.get(v["severity"], 9), v["r"]["name"]))
-        inner = "".join(_pair_card(v) for v in pv)
+        inner = "".join(_pair_card(v, capable, viewer) for v in pv)
         pairs_html = ('<section class="pane grp" data-pane="grp:replication">'
                       '<button class=paneh onclick="togglePane(\'grp:replication\')">'
                       '<span class=pt>Replication</span><span class=pdot></span>'

@@ -1221,6 +1221,18 @@ def build_command(action, t, opts=None):
             return None, f"'scrub' not allowed for type '{typ}'"
         pool = (src or "").split("/")[0]
         return (["zpool", "scrub", pool], None) if pool else (None, "no pool for scrub")
+    if action == "pull":
+        # Vault-side on-demand replication: pull THIS replica's set from home via the restricted key.
+        # The set name is the target name (replication.conf SET names == the dataset targets), and the
+        # runner only pulls a SET that exists in this host's own replication.conf - so the wire can't
+        # make it pull anything unconfigured.
+        name = t.get("name")
+        if not name:
+            return None, "pull needs a target name"
+        runner = str(HERE.parent / "replication" / "vault-pull.sh")
+        if not os.path.isfile(runner):
+            return None, "no replication runner (this host isn't a pull vault)"
+        return [runner, "--only", name], None
 
     # ---- Phase 4: recovery-point catalog (httm) + guarded restore ----
     # All read-only or copy-only; paths validated to stay within the target's dataset.
@@ -1287,6 +1299,8 @@ def build_dryrun(action, t, opts=None):
         return (["zpool", "status", pool], None) if pool else (None, "no pool for scrub")
     if action == "snapshot":
         return None, f"'zfs snapshot' has no dry-run - would create {src}@cairn-manual-<timestamp>"
+    if action == "pull":
+        return None, f"would pull the '{t.get('name')}' replication set from home now (syncoid, resumable)"
     if action in ("recover-points", "recover-search", "recover-deleted"):
         return build_command(action, t, opts)                          # read-only anyway
     if action == "restore":
