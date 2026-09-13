@@ -1353,7 +1353,8 @@ def build_command(action, t, opts=None):
             staging = opts.get("dest") or os.path.join(mp, ".bm-restores")
             sp, err = _validate_under(staging, mp) if not opts.get("dest") else (staging, None)
             dest = os.path.join(sp if not err else staging, os.path.basename(rp) + f".restored-{time.strftime('%Y%m%dT%H%M%S')}")
-            return ["cp", "-a", "--no-clobber", "--", rp, dest], None
+            # -v so stdout carries "'<src>' -> '<dest>'": the UI parses that to show where it landed.
+            return ["cp", "-av", "--no-clobber", "--", rp, dest], None
     return None, f"unknown action '{action}'"
 
 def build_dryrun(action, t, opts=None):

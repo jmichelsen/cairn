@@ -139,7 +139,15 @@ def do_execute(cfg):
             body = {"ok": rc == 0, "output": out.strip()[-1800:], "cmd": " ".join(cmd), "dryrun": True}
         else:
             rc, so, se = C.run(cmd, timeout=TIMEOUT)
-            body = {"ok": rc == 0, "output": (so + se).strip()[-1500:], "cmd": " ".join(cmd)}
+            full = (so + se).strip()
+            # Recovery LISTINGS are JSON / tab-separated tables that the dashboard parses, so they must
+            # arrive whole and from the START (tail-truncated JSON is unparseable). Keep the head with a
+            # generous cap for those; every other action keeps the compact last-1500 for the activity log.
+            if action in ("recover-points", "recover-search", "recover-deleted"):
+                out = full[:200000]
+            else:
+                out = full[-1500:]
+            body = {"ok": rc == 0, "output": out, "cmd": " ".join(cmd)}
         api_call("POST", f"/api/v1/backup/intents/{iid}/result", body)
         print(f"  intent {iid} {target} {action}{' [dry]' if dry else ''} -> {'ok' if rc == 0 else 'FAIL'}")
     return len(intents)

@@ -36,6 +36,23 @@ def test_snapshot_is_bare_zfs_snapshot():
     assert err is None and cmd[:2] == ["zfs", "snapshot"] and cmd[2].startswith("mcz@cairn-manual-")
 
 
+def test_recover_points_is_readonly_snapshot_list():
+    cmd, err = collector.build_command("recover-points", {"name": "p", "type": "zfs-local",
+                                                          "source": "pool/ds"}, {})
+    assert err is None and cmd[:3] == ["zfs", "list", "-Hp"] and cmd[-1] == "pool/ds"
+
+
+def test_restore_is_verbose_copy_only(monkeypatch):
+    # restore must copy (never move/overwrite) and be verbose so stdout reveals the dest path.
+    monkeypatch.setattr(collector, "run", _canned("/mnt/pool\n"))   # _mountpoint lookup
+    cmd, err = collector.build_command(
+        "restore", {"name": "p", "type": "zfs-local", "source": "pool"},
+        {"version": "/mnt/pool/.zfs/snapshot/s1/file.txt"})
+    assert err is None
+    assert cmd[:4] == ["cp", "-av", "--no-clobber", "--"] and cmd[-2].endswith("file.txt")
+    assert "/.bm-restores/" in cmd[-1] and ".restored-" in cmd[-1]
+
+
 # ---- zpool_scrub_progress --------------------------------------------------------------------
 _INPROG = """  pool: iwolf
  state: ONLINE
