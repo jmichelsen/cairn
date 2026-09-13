@@ -161,6 +161,42 @@ esac; shift; done
 { [ "$ADD_VAULT" = 1 ] || [ "$RECONFIGURE" = 1 ] || [ "$REPLICATION" = 1 ]; } && [ -z "$ROLE" ] && ROLE=home
 detect_pkg
 
+# ---------------- update: a fast, role-agnostic path that skips preflight entirely ----------------
+self_update_code() {
+  # Refresh the code in $HERE, NEVER touching config/ (user settings). git pull for a checkout, else a
+  # GitHub tarball for an rsync-provisioned copy (e.g. a vault). Best-effort: warn, never die.
+  local url="${CAIRN_REPO_URL:-https://github.com/jmichelsen/cairn}"
+  if [ -d "$HERE/.git" ]; then
+    say "Updating code (git) in $HERE"
+    if git -C "$HERE" pull --ff-only >/dev/null 2>&1; then
+      ok "code updated to $(git -C "$HERE" rev-parse --short HEAD 2>/dev/null)"
+    else warn "git pull --ff-only failed (local changes or diverged) - code NOT updated; resolve by hand"; fi
+  else
+    say "Updating code (tarball) from $url"
+    command -v curl >/dev/null 2>&1 || { warn "curl missing - cannot fetch update"; return 0; }
+    local tb; tb="$(mktemp -d)"
+    if curl -fsSL "$url/archive/refs/heads/main.tar.gz" -o "$tb/c.tgz" \
+       && tar -xzf "$tb/c.tgz" -C "$HERE" --strip-components=1 --exclude='*/config'; then
+      ok "code updated from tarball (config preserved)"
+    else warn "couldn't fetch/apply $url tarball - code NOT updated"; fi
+    rm -rf "$tb"
+  fi
+}
+update_agent() {
+  # Fetch new code, keep the EXISTING unit + config exactly as-is (every setting preserved), restart.
+  local unit="$HOME/.config/systemd/user/cairn-agent.service"
+  [ -f "$unit" ] || die "no agent unit at $unit - run a full install first (this flag only updates an existing agent)"
+  local was; was="$(cat "$HERE/VERSION" 2>/dev/null || echo '?')"
+  self_update_code
+  systemctl --user daemon-reload
+  systemctl --user restart cairn-agent.service
+  sleep 3
+  if systemctl --user is-active --quiet cairn-agent.service; then
+    ok "agent updated ${was} -> $(cat "$HERE/VERSION" 2>/dev/null || echo '?') and restarted"
+  else warn "agent not active after update - check: systemctl --user status cairn-agent"; fi
+}
+[ "$UPDATE" = 1 ] && { update_agent; exit 0; }
+
 # ---------------- self-bootstrap (so `curl … | bash` works without a manual clone) ----------------
 # When piped from curl, the repo files aren't beside us - fetch them, then re-exec from the clone.
 CAIRN_REPO="${CAIRN_REPO:-https://github.com/jmichelsen/cairn.git}"   # public mirror; GitLab origin is private
@@ -647,49 +683,9 @@ EOF
   say "VAULT setup complete - it should appear in home's Agents card within one poll interval (~${shown_int}s)"
 }
 
-self_update_code() {
-  # Refresh the code in $HERE, NEVER touching config/ (user settings). git pull for a checkout, else a
-  # GitHub tarball for an rsync-provisioned copy (e.g. a vault). Best-effort: warn, never die.
-  local url="${CAIRN_REPO_URL:-https://github.com/jmichelsen/cairn}"
-  if [ -d "$HERE/.git" ]; then
-    say "Updating code (git) in $HERE"
-    if git -C "$HERE" pull --ff-only >/dev/null 2>&1; then
-      ok "code updated to $(git -C "$HERE" rev-parse --short HEAD 2>/dev/null)"
-    else warn "git pull --ff-only failed (local changes or diverged) - code NOT updated; resolve by hand"; fi
-  else
-    say "Updating code (tarball) from $url"
-    command -v curl >/dev/null 2>&1 || { warn "curl missing - cannot fetch update"; return 0; }
-    local tb; tb="$(mktemp -d)"
-    if curl -fsSL "$url/archive/refs/heads/main.tar.gz" -o "$tb/c.tgz" \
-       && tar -xzf "$tb/c.tgz" -C "$HERE" --strip-components=1 --exclude='*/config'; then
-      ok "code updated from tarball (config preserved)"
-    else warn "couldn't fetch/apply $url tarball - code NOT updated"; fi
-    rm -rf "$tb"
-  fi
-}
-
-update_agent() {
-  # Non-interactive update: fetch new code, keep the EXISTING unit + config exactly as-is (do not
-  # regenerate them, so every setting is preserved), then restart so the new code runs.
-  local unit="$HOME/.config/systemd/user/cairn-agent.service"
-  [ -f "$unit" ] || die "no agent unit at $unit - run a full install first (this flag only updates an existing agent)"
-  local was; was="$(cat "$HERE/VERSION" 2>/dev/null || echo '?')"
-  self_update_code
-  systemctl --user daemon-reload
-  systemctl --user restart cairn-agent.service
-  sleep 3
-  if systemctl --user is-active --quiet cairn-agent.service; then
-    ok "agent updated ${was} -> $(cat "$HERE/VERSION" 2>/dev/null || echo '?') and restarted"
-  else warn "agent not active after update - check: systemctl --user status cairn-agent"; fi
-}
-
-if [ "$UPDATE" = 1 ]; then
-  update_agent
-else
 case "$ROLE" in
   home)  if [ "$ADD_VAULT" = 1 ]; then add_vault_only
          elif [ "$REPLICATION" = 1 ]; then add_replication_only
          else install_home; fi ;;
   vault) install_vault ;;
 esac
-fi
