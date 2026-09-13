@@ -629,7 +629,8 @@ def agent_states(conn, now=None):
         ver = a["agent_version"]
         out.append(dict(name=a["name"], can_execute=bool(a["can_execute"]), last_report_ts=last,
                         report_interval=due, age_s=age, severity=sev, stale_after=stale_after,
-                        version=ver, outdated=bool(ver and ver != CAIRN_VERSION)))
+                        version=ver, outdated=bool(ver and ver != CAIRN_VERSION),
+                        server_version=CAIRN_VERSION))
     return out
 
 def _reap_agents(conn, now):
@@ -1606,6 +1607,20 @@ async function refreshAgents(){                          // agent liveness (dead
     c.className='card '+cls+(c.classList.contains('agenttab')?' agenttab':'')+(c.classList.contains('active')?' active':'');
     var cs=c.querySelector('.cs'); if(cs) cs.textContent=_AGSTATE[a.severity]||a.severity;
     var ls=c.querySelector('[acls=ls]'); if(ls) ls.textContent=a.last_report_ts?relTime(a.last_report_ts):'never';
+    // re-render the version cell so a successful self-update clears the "update to X" button (and a
+    // server bump re-adds it) without needing a full page reload
+    var vspan=c.querySelector('[data-ver]');
+    if(vspan && a.version){
+      var vh=esc(a.version);
+      if(a.outdated && a.server_version){
+        vh += ' ' + (window.CAIRN_VIEWER
+          ? '<span class=verold>update to '+esc(a.server_version)+'</span>'
+          : '<button class=verbtn onclick="event.stopPropagation();updateAgent(\''+esc(a.name)+'\')" '
+            +'title="fetch the latest code on this agent and restart it, keeping every setting">'
+            +'update to '+esc(a.server_version)+'</button>');
+      }
+      vspan.innerHTML=vh;
+    }
     if(a.severity!=='OK') stale++;
   });
   var cnt=document.getElementById('agentcount'); if(cnt) cnt.textContent=stale?(stale+' stale'):'';
@@ -1768,9 +1783,9 @@ def _agent_card(a, viewer=False, tab=None, active=False):
                f'title="fetch the latest code on this agent and restart it, keeping every setting">'
                f'update to {_esc(CAIRN_VERSION)}</button>')
         ver_html = (f'<div class=jrow><span class=jk>version</span>'
-                    f'<span class=jv>{_esc(ver)} {upd}</span></div>')
+                    f'<span class=jv data-ver>{_esc(ver)} {upd}</span></div>')
     elif ver:
-        ver_html = f'<div class=jrow><span class=jk>version</span><span class=jv>{_esc(ver)}</span></div>'
+        ver_html = f'<div class=jrow><span class=jk>version</span><span class=jv data-ver>{_esc(ver)}</span></div>'
     else:
         ver_html = ""
     cls = f"card {sev}" + (f" agenttab{' active' if active else ''}" if tab else "")
@@ -2213,6 +2228,7 @@ def index(request: Request):
         '<input type=checkbox id=drychk onchange="setDry(this.checked)"><span>Dry-run</span></label>')
     ro_badge = '<span class=robadge title="read-only account - viewing only">read-only</span>' if viewer else ""
     return _shell(f"""
+  <script>window.CAIRN_VIEWER={'true' if viewer else 'false'};</script>
   <div class=topbar2><h2 class=applogo>Cairn</h2>
     <div class=seg role=tablist>
       <button data-h=steel onclick="setHero('steel')">Summary</button>
