@@ -62,3 +62,32 @@ def test_card_scrub_button_active_when_idle():
     row = _row("iwolf", caps={"snapshot": True, "scrub": True}, scrub={"state": "finished"})
     h = api._card(row, can_act=True, viewer=False)
     assert "data-scrub disabled" not in h and ">Scrub<" in h
+
+
+# ---- hide / unhide ---------------------------------------------------------------------------
+def test_card_has_hide_button_for_admin_not_viewer():
+    row = dict(_row("mcz", caps={"snapshot": True, "scrub": True}))
+    row["target_id"] = 123
+    assert ">Hide<" in api._card(dict(row), can_act=True, viewer=False)
+    assert ">Hide<" not in api._card(dict(row), can_act=False, viewer=True)
+
+
+def _seed_target(name="junkpool", agent="local"):
+    with api.db() as conn:
+        tid = conn.execute(
+            "INSERT INTO targets(name,type,source,agent,enabled) VALUES(?,?,?,?,1) RETURNING id",
+            (name, "zfs-local", name, agent)).fetchone()[0]
+        conn.commit()
+    return tid
+
+
+def test_hide_then_unhide_roundtrip():
+    tid = _seed_target("hidepool")
+    api.hide_target(tid)
+    with api.db() as conn:
+        assert conn.execute("SELECT enabled FROM targets WHERE id=?", (tid,)).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM target_retired WHERE name=?", ("hidepool",)).fetchone()[0] == 1
+    api.unhide_target(tid)
+    with api.db() as conn:
+        assert conn.execute("SELECT enabled FROM targets WHERE id=?", (tid,)).fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM target_retired WHERE name=?", ("hidepool",)).fetchone()[0] == 0
