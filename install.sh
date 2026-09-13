@@ -78,7 +78,12 @@ ensure_opt() {  # optional tool: offer to install, but WARN (never die) if missi
   local chk="$1" key="$2" why="$3"; eval "$chk" 2>/dev/null && { ok "$key ready"; return 0; }
   local p; p="$(pkgname "$key")"
   if [ -z "$PKG" ]; then warn "no package manager - install '$key' manually ($why)"; return 0; fi
-  if [ "$YES" = 1 ] || askyn "install '$p'? (enables: $why)" y; then
+  # "optional" means install what THIS host actually uses. A non-interactive run (--yes, e.g. an
+  # update) must NOT pull every backup tool onto a host that doesn't use it, so default a MISSING
+  # optional tool to NO there. Tools already present are handled above and are unaffected. To add one
+  # non-interactively, install it first (then it shows "ready") or run the installer interactively.
+  if [ "$YES" = 1 ]; then warn "skipped '$key' (not installed; --yes adds no optional tools) - $why"; return 0; fi
+  if askyn "install '$p'? (enables: $why)" y; then
     if prime_sudo && _pkg_do "$p" && eval "$chk" 2>/dev/null; then ok "$key ready"; else
       warn "'$key' not installed - $why unavailable until it is present"; fi
   else warn "skipped '$key' - $why unavailable until installed"; fi
@@ -90,8 +95,9 @@ ensure_httm() {  # httm is NOT in a distro repo (Rust tool), but its GitHub rele
   if [ "$arch" = x86_64 ] || [ "$arch" = amd64 ]; then
     case "$PKG" in apt-get) ext=.deb;; dnf|yum|zypper) ext=.rpm;; esac
   fi
-  if [ -n "$ext" ] && command -v curl >/dev/null 2>&1 \
-     && { [ "$YES" = 1 ] || askyn "install httm (recovery-point catalog) from its GitHub releases?" y; }; then
+  # httm is optional: a non-interactive run (--yes) does not add it (see ensure_opt rationale).
+  if [ -n "$ext" ] && [ "$YES" != 1 ] && command -v curl >/dev/null 2>&1 \
+     && askyn "install httm (recovery-point catalog) from its GitHub releases?" y; then
     local api url tmpd rc=1
     api="$(curl -fsSL -H 'Accept: application/vnd.github+json' -A cairn-install \
            https://api.github.com/repos/kimono-koans/httm/releases/latest 2>/dev/null)"
@@ -607,7 +613,11 @@ EOF
   local vsd=""; [ "$SMART_DETAIL" = 1 ] && vsd="--smart-detail"
   [ -z "$vsd" ] && { askyn "enable SMART attribute-table detail on this vault (per-disk model/temp/health; installs smartmontools + a scoped smartctl sudo wrapper)?" n && vsd="--smart-detail"; }
   if [ -n "$vsd" ]; then
-    ensure_opt "command -v smartctl >/dev/null 2>&1 || command -v /usr/sbin/smartctl >/dev/null 2>&1" smartmontools "per-disk SMART attribute detail"
+    # SMART detail was explicitly requested, so its smartmontools dependency installs even under --yes
+    # (unlike the general optional toolchain, which --yes skips). Best-effort: warn, never die.
+    if ! { command -v smartctl >/dev/null 2>&1 || command -v /usr/sbin/smartctl >/dev/null 2>&1; }; then
+      prime_sudo && _pkg_do smartmontools && ok "smartmontools ready" || warn "couldn't install smartmontools - SMART detail needs it"
+    fi
     sudo env CAIRN_USER="$USER" bash -c "'$HERE/phase1/grant-access.sh' --smart-detail"
     local vunit="$HOME/.config/systemd/user/cairn-agent.service"
     grep -q '^Environment=CAIRN_SMART_DETAIL=' "$vunit" || sed -i '/^ExecStart=/i Environment=CAIRN_SMART_DETAIL=1' "$vunit"
