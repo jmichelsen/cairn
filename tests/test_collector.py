@@ -137,3 +137,67 @@ def test_delegated_everyone(monkeypatch):
 def test_delegated_unreadable_is_false(monkeypatch):
     monkeypatch.setattr(collector, "run", lambda *a, **k: (1, "", "permission denied"))
     assert collector.zfs_delegated("ds", "snapshot", "jmichelsen") is False
+
+
+# ---- recovery walk / manifest reduction --------------------------------------------------------
+def test_recovery_walk_is_bounded_readonly(monkeypatch):
+    monkeypatch.setattr(collector, "run", _canned("/mnt/pool\n"))   # _mountpoint lookup
+    cmd, err = collector.build_recovery_walk("deleted", {"name": "p", "type": "zfs-local",
+                                                         "source": "pool/ds"})
+    assert err is None
+    assert cmd[0] == "httm" and cmd[-1] == "/mnt/pool"
+    for flag in ("--deleted=only", "--recursive", "--one-filesystem", "--no-live", "--json"):
+        assert flag in cmd
+
+
+def test_recovery_walk_rejects_unknown_kind():
+    cmd, err = collector.build_recovery_walk("points", {"name": "p", "source": "pool"})
+    assert cmd is None and "unknown recovery-walk kind" in err
+
+
+_DELJSON = """{
+  "/mnt/pool/a.txt": [
+    {"path":"/mnt/pool/.zfs/snapshot/s1/a.txt","metadata":{"size":"10 bytes","modify_time":"Mon Sep 07 01:00:00 2026"}},
+    {"path":"/mnt/pool/.zfs/snapshot/s3/a.txt","metadata":{"size":"30 bytes","modify_time":"Wed Sep 09 01:00:00 2026"}},
+    {"path":"/mnt/pool/.zfs/snapshot/s2/a.txt","metadata":{"size":"20 bytes","modify_time":"Tue Sep 08 01:00:00 2026"}}
+  ],
+  "/mnt/pool/b.txt": [
+    {"path":"/mnt/pool/.zfs/snapshot/s1/b.txt","metadata":{"size":"5 bytes","modify_time":"Mon Sep 07 01:00:00 2026"}}
+  ]
+}"""
+
+
+def test_reduce_keeps_newest_version_per_file():
+    js, count = collector.reduce_deleted_manifest(_DELJSON)
+    import json as _j
+    out = _j.loads(js)
+    assert count == 2
+    # a.txt: newest is s3 (Sep 09) regardless of list order
+    assert out["/mnt/pool/a.txt"]["path"].endswith("/s3/a.txt")
+    assert out["/mnt/pool/a.txt"]["versions"] == 3
+    assert out["/mnt/pool/b.txt"]["path"].endswith("/s1/b.txt")
+
+
+def test_reduce_handles_empty_and_garbage():
+    assert collector.reduce_deleted_manifest("") == ("{}", 0)
+    assert collector.reduce_deleted_manifest("not json") == ("{}", 0)
+    assert collector.reduce_deleted_manifest("{}") == ("{}", 0)
+
+
+def test_reduce_parses_concatenated_objects_and_caps():
+    # httm's recursive json is a STREAM of pretty-printed objects joined by "}\n{", not one object.
+    import json as _j
+
+    def _obj(i):
+        day = (i % 9) + 1
+        return _j.dumps({f"/mnt/pool/f{i}.txt": [
+            {"path": f"/mnt/pool/.zfs/snapshot/s1/f{i}.txt",
+             "metadata": {"size": "1 bytes", "modify_time": f"Mon Sep 0{day} 01:00:00 2026"}}]}, indent=2)
+
+    stream = "\n".join(_obj(i) for i in range(10))
+    js, total = collector.reduce_deleted_manifest(stream, cap=3)
+    out = _j.loads(js)
+    assert total == 10 and len(out) == 3          # all 10 parsed from the stream, capped to 3
+    # newest-first: the top entry must carry the max day present (day 9, from i=8)
+    first = next(iter(out.values()))
+    assert first["modify_time"].split()[2] == "09"

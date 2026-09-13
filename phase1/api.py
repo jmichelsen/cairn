@@ -8,7 +8,7 @@ dashboard, and the token-authed vault endpoints (report + intent poll/result).
 Run:  uvicorn api:app --host 127.0.0.1 --port 8929
 Env:  CAIRN_DB, CAIRN_API_TOKEN (vault/agent bearer token; hash-at-rest is a deploy hardening)
 """
-import hashlib, hmac, json, os, re, sqlite3, time
+import gzip, hashlib, hmac, json, os, re, sqlite3, time
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -39,7 +39,8 @@ SEVCLS = {"CRIT": "crit", "WARN": "warn", "UNKNOWN": "unk", "OK": "ok"}  # sever
 # be revoked without touching the others. Bootstrap: CAIRN_ADMIN_TOKEN (plaintext env) is hashed
 # into the store at startup; mint per-agent tokens via POST /tokens or the cairn-token CLI.
 import hashlib as _hashlib, secrets as _secrets
-AGENT_PATHS = ("/api/v1/backup/report", "/api/v1/backup/intents")  # + /intents/{id}/result
+AGENT_PATHS = ("/api/v1/backup/report", "/api/v1/backup/intents",
+               "/api/v1/backup/agent/")  # agent-only: report, intents/{id}/result, recovery walk push/due
 ADMIN_ONLY_PATHS = ("/api/v1/backup/tokens",)  # sensitive even on GET - never for a viewer
 ACCESS_TTL = int(os.environ.get("CAIRN_ACCESS_TTL", str(24 * 3600)))  # access-token lifetime (s)
 SESSION_TTL = int(os.environ.get("CAIRN_SESSION_TTL", str(7 * 24 * 3600)))  # password-login session (s)
@@ -272,6 +273,17 @@ def _init_db():
                 except sqlite3.OperationalError:
                     pass  # already exists
             _migrate_targets_identity(c)   # re-key targets: UNIQUE(name) -> UNIQUE(agent,name)
+            # Nightly recovery manifests (agent-walked "deleted files" per dataset). gz is a gzipped
+            # JSON blob and may be NULL (a failed walk records only walked_ts so it isn't retried until
+            # the next interval, keeping any prior good manifest).
+            c.execute("""CREATE TABLE IF NOT EXISTS recovery_manifests (
+                target_id   INTEGER NOT NULL,
+                kind        TEXT NOT NULL,
+                gz          BLOB,
+                entry_count INTEGER,
+                raw_bytes   INTEGER,
+                walked_ts   INTEGER NOT NULL,
+                PRIMARY KEY (target_id, kind))""")
 _init_db()
 HAS_ADMIN = _seed_tokens() > 0   # false => middleware returns 503 until CAIRN_ADMIN_TOKEN is set
 
@@ -777,6 +789,9 @@ RECOVER_ACTIONS = {"recover-points", "recover-search", "recover-deleted", "resto
 # when snapshots are created/pruned, so a few minutes is safe and spares the slow httm walk. Override
 # with CAIRN_RECOVER_CACHE_TTL (seconds); 0 disables reuse.
 RECOVER_CACHE_TTL = int(os.environ.get("CAIRN_RECOVER_CACHE_TTL", "600"))
+# How stale a per-dataset "deleted files" manifest may get before the agent re-walks it. The agent polls
+# for due datasets each loop but only walks those older than this, so a nightly cadence is the default.
+RECOVER_WALK_INTERVAL = int(os.environ.get("CAIRN_RECOVER_WALK_INTERVAL", "86400"))
 
 @app.post("/api/v1/backup/intents/{iid}/result")
 async def intent_result(iid: int, request: Request):
@@ -895,6 +910,70 @@ def list_actions(limit: int = 20, target: str = None):
                 "SELECT i.*, t.name AS target FROM intents i LEFT JOIN targets t ON t.id=i.target_id "
                 "ORDER BY i.created_ts DESC LIMIT ?", (limit,)).fetchall()]
     return {"actions": rows}
+
+# ---------------- recovery manifests: agent-walked "deleted files" cache per dataset --------------
+@app.get("/api/v1/backup/agent/recovery-due")
+def recovery_due(agent: str):
+    """Datasets this agent should (re)walk: enabled zfs-local targets whose deleted-manifest is missing
+    or older than RECOVER_WALK_INTERVAL. Missing ones first, then the stalest."""
+    cutoff = int(time.time()) - RECOVER_WALK_INTERVAL
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT t.name, t.source FROM targets t "
+            "LEFT JOIN recovery_manifests m ON m.target_id=t.id AND m.kind='deleted' "
+            "WHERE t.agent=? AND t.enabled=1 AND t.type='zfs-local' AND t.source IS NOT NULL "
+            "AND (m.walked_ts IS NULL OR m.walked_ts < ?) "
+            "ORDER BY (m.walked_ts IS NULL) DESC, m.walked_ts ASC", (agent, cutoff)).fetchall()
+    return {"targets": [dict(r) for r in rows]}
+
+@app.post("/api/v1/backup/agent/recovery-manifest")
+async def recovery_manifest_push(request: Request):
+    """An agent pushes a freshly-walked manifest (gzipped JSON, base64). A failed walk (ok=false) records
+    only walked_ts so it isn't retried until the next interval, preserving any prior good manifest."""
+    body = await _json(request)
+    target = body.get("target"); kind = body.get("kind") or "deleted"
+    now = int(time.time())
+    with db() as conn:
+        r = conn.execute("SELECT id FROM targets WHERE name=? ORDER BY (agent IS NULL), id LIMIT 1",
+                         (target,)).fetchone()
+        if not r:
+            raise HTTPException(404, f"unknown target '{target}'")
+        if not body.get("ok"):
+            conn.execute(
+                "INSERT INTO recovery_manifests(target_id,kind,gz,entry_count,raw_bytes,walked_ts) "
+                "VALUES(?,?,NULL,NULL,NULL,?) ON CONFLICT(target_id,kind) DO UPDATE SET walked_ts=excluded.walked_ts",
+                (r["id"], kind, now))
+            conn.commit()
+            return {"ok": True, "stored": False}
+        gz = _b64.b64decode(body.get("gz_b64") or "")
+        conn.execute(
+            "INSERT INTO recovery_manifests(target_id,kind,gz,entry_count,raw_bytes,walked_ts) "
+            "VALUES(?,?,?,?,?,?) ON CONFLICT(target_id,kind) DO UPDATE SET "
+            "gz=excluded.gz, entry_count=excluded.entry_count, raw_bytes=excluded.raw_bytes, "
+            "walked_ts=excluded.walked_ts",
+            (r["id"], kind, gz, int(body.get("entry_count") or 0), int(body.get("raw_bytes") or 0),
+             int(body.get("walked_ts") or now)))
+        conn.commit()
+    return {"ok": True, "stored": True}
+
+@app.get("/api/v1/backup/recovery-manifest")
+def recovery_manifest_get(target: str, kind: str = "deleted"):
+    """The dashboard reads a stored manifest (decompressed) to render the recovery browser instantly."""
+    with db() as conn:
+        r = conn.execute("SELECT id FROM targets WHERE name=? ORDER BY (agent IS NULL), id LIMIT 1",
+                         (target,)).fetchone()
+        if not r:
+            raise HTTPException(404, f"unknown target '{target}'")
+        m = conn.execute("SELECT gz, entry_count, raw_bytes, walked_ts FROM recovery_manifests "
+                         "WHERE target_id=? AND kind=?", (r["id"], kind)).fetchone()
+    if not m or m["gz"] is None:
+        return {"present": False}
+    try:
+        manifest = json.loads(gzip.decompress(m["gz"]).decode() or "{}")
+    except Exception:
+        manifest = {}
+    return {"present": True, "walked_ts": m["walked_ts"], "entry_count": m["entry_count"],
+            "raw_bytes": m["raw_bytes"], "manifest": manifest}
 
 PREVIEWABLE = {"snapshot", "sync", "scrub", "recover-points"}  # build_command touches no ZFS for these
 
@@ -1849,21 +1928,22 @@ async function pollAction(id){                          // resolve to {state,out
 }
 async function openRecover(target, kind, refresh){
   var path=null;
-  if(kind!=='points'){
-    if(refresh && _recLast){ path=_recLast.path; }      // re-scan the same path, no re-prompt
-    else {
-      var msg = kind==='deleted' ? 'Deleted files under (path relative to dataset root; blank = whole dataset):'
-                                 : 'List versions of (path relative to dataset root):';
-      path=prompt(msg); if(path===null) return;
-    }
+  if(kind==='versions'){                                 // only Versions needs a single-file path
+    if(refresh && _recLast){ path=_recLast.path; }
+    else { path=prompt('List versions of (path relative to dataset root):'); if(path===null) return; }
   }
   _recTarget=target; _recLast={target:target, kind:kind, path:path}; _recCachedTs=0;
   var titles={points:'Restore points', versions:'File versions', deleted:'Deleted files'};
   document.getElementById('rectitle').textContent=titles[kind]+' \\u00b7 '+target+(path?(' / '+path):'');
   var rb=document.getElementById('recrefresh'); if(rb) rb.hidden=false;
   var body=document.getElementById('recbody');
-  body.innerHTML='<div class=hempty>scanning '+esc(target)+(kind==='deleted'?' (recursive, may take a moment)':'')+'\\u2026</div>';
   openRec();
+  if(kind==='deleted' && !refresh){                      // serve the nightly manifest first (instant)
+    var mj=null;
+    try{ mj=await (await fetch('/api/v1/backup/recovery-manifest?target='+encodeURIComponent(target)+'&kind=deleted')).json(); }catch(e){}
+    if(mj && mj.present){ renderDeletedManifest(mj.manifest||{}, mj.walked_ts, mj.entry_count||0); return; }
+  }
+  body.innerHTML='<div class=hempty>scanning '+esc(target)+(kind==='deleted'?' (recursive, may take a moment)':'')+'\\u2026</div>';
   var action = kind==='points'?'recover-points' : kind==='deleted'?'recover-deleted':'recover-search';
   var b={target:target, action:action, requested_by:'ui'}; if(path) b.path=path; if(refresh) b.refresh=true;
   var r,j;
@@ -1908,6 +1988,25 @@ function renderVersions(txt, kind){
   });
   if(!blocks.length){ body.innerHTML=recBanner()+'<div class=hempty>'+(kind==='deleted'?'No deleted files found in snapshots under that path.':'No other versions found for that path.')+'</div>'; return; }
   body.innerHTML=recBanner()+'<p class=recnote>Restore copies a version into the dataset\\u2019s <code>.bm-restores/</code> staging dir \\u2014 your live files are never touched.</p>'+blocks.join('');
+}
+function renderDeletedManifest(m, walkedTs, total){
+  // manifest = { "<deleted path>": {path,size,modify_time,versions} } - newest version per file, already
+  // newest-first from the server and capped there. Each row restores that last snapshot version. Refresh
+  // re-runs a live whole-dataset walk. `total` is the full count before the cap (may exceed shown rows).
+  var body=document.getElementById('recbody'); _recVers=[];
+  var keys=Object.keys(m||{});   // server order = newest-modified first; don't re-sort
+  var when='walked '+relTime(walkedTs)+' \\u00b7 Refresh to re-scan';
+  if(!keys.length){ body.innerHTML='<p class=reccached>'+when+'</p><div class=hempty>No deleted files found in snapshots.</div>'; return; }
+  var rows=keys.map(function(k){
+    var e=m[k]||{}; _recVers.push(e.path||'');
+    return '<tr><td class=recfp>'+esc(k)+'</td><td class=recsize>'+esc(e.size||'')+'</td><td>'+esc(e.modify_time||'')
+      +'</td><td class=recact><button class=recrestore data-vi="'+(_recVers.length-1)+'" onclick="doRestore(this)">Restore</button></td></tr>';
+  }).join('');
+  var shown=keys.length, capped=(total && total>shown);
+  body.innerHTML='<p class=reccached>'+when+' \\u00b7 '+(capped?('showing newest '+shown+' of '+total+' deleted files'):(shown+' deleted file'+(shown==1?'':'s')))+'</p>'
+    +'<p class=recnote>Restore copies the file\\u2019s last snapshot version into <code>.bm-restores/</code> \\u2014 live files untouched.'
+    +(capped?' Use <b>Versions</b> for a specific file not listed here.':'')+'</p>'
+    +'<div class=rectblwrap><table class=rectbl><thead><tr><th>Deleted file</th><th>Size</th><th>Last modified</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
 async function doRestore(btn){
   var vp=_recVers[parseInt(btn.getAttribute('data-vi'),10)]; if(vp==null) return;
