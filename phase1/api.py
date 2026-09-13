@@ -1407,7 +1407,7 @@ async function poll(id, key, dry, target){
     var cls = st==='done'?'ok' : (st==='failed'||st==='stalled')?'crit' : 'warn';
     var res={}; try{res=JSON.parse(j.result||'{}')}catch(e){}
     if(!target) target=j.target;
-    setRow(key,{title:tag+'#'+id+' '+(j.target||'')+' '+(j.action||''), state:st+(dry?' · dry':''),
+    setRow(key,{title:tag+'#'+id+' '+(j.target||'')+' '+(j.action||''), state:actState(j.action,st)+(dry?' · dry':''),
                 cls:cls, spin:!done, out: done?(res.output||''):undefined, expand: done&&cls==='crit'});
     if(done){ panePing('acts'); break; }             // completion is worth surfacing when collapsed
     await new Promise(s=>setTimeout(s,2000));
@@ -1446,6 +1446,10 @@ function esc(s){return (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g
 function relTime(ts){ if(!ts) return ''; var s=Math.max(0, Date.now()/1000 - ts);
   if(s<90) return Math.round(s)+'s ago'; if(s<5400) return Math.round(s/60)+'m ago';
   if(s<172800) return Math.round(s/3600)+'h ago'; return Math.round(s/86400)+'d ago';}
+// `zpool scrub` returns as soon as it STARTS the async scrub, so a scrub intent completes ("done")
+// while the scrub itself runs for hours. Label it "started" so it doesn't read as "finished" - the
+// real progress lives on the pool card's scrub bar.
+function actState(action, st){ return (action==='scrub' && st==='done') ? 'started' : st; }
 function renderHist(x){
   var st=x.state||'?';
   var cls = st==='done'?'ok' : st==='failed'?'crit' : (st==='pending'||st==='claimed')?'warn':'unk';
@@ -1454,7 +1458,7 @@ function renderHist(x){
   var dry = out.indexOf('[DRYRUN]')===0 ? '<span class=hdry>dry</span>' : '';
   var when = relTime(x.result_ts||x.claimed_ts||x.created_ts);
   return '<div class=hrow><span class="hd '+cls+'"></span>'+
-    '<span class=ha>'+esc(x.action)+' · '+esc(st)+dry+'</span>'+
+    '<span class=ha>'+esc(x.action)+' · '+esc(actState(x.action,st))+dry+'</span>'+
     '<span class=ht>'+when+'</span>'+
     (out?'<div class=hcmd>'+esc(out)+'</div>':'')+'</div>';
 }
@@ -1550,7 +1554,7 @@ async function loadStream(){
       var res={}; try{res=JSON.parse(x.result||'{}')}catch(e){}
       var dry=false; try{dry=!!JSON.parse(x.opts||'{}').dryrun}catch(e){}
       var key='srv'+x.id, tag=dry?'[dry] ':'';
-      setRow(key,{title:tag+'#'+x.id+' '+(x.target||'')+' '+(x.action||''), state:st+(dry?' · dry':''),
+      setRow(key,{title:tag+'#'+x.id+' '+(x.target||'')+' '+(x.action||''), state:actState(x.action,st)+(dry?' · dry':''),
                   cls:cls, spin:!done, dry:dry, out: done?(res.output||''):undefined, expand:false});
       if(!done){ cardBusy(x.target, +1); poll(x.id, key, dry, x.target); }   // resume + mark card busy
     }
@@ -1607,20 +1611,11 @@ async function refreshAgents(){                          // agent liveness (dead
     c.className='card '+cls+(c.classList.contains('agenttab')?' agenttab':'')+(c.classList.contains('active')?' active':'');
     var cs=c.querySelector('.cs'); if(cs) cs.textContent=_AGSTATE[a.severity]||a.severity;
     var ls=c.querySelector('[acls=ls]'); if(ls) ls.textContent=a.last_report_ts?relTime(a.last_report_ts):'never';
-    // re-render the version cell so a successful self-update clears the "update to X" button (and a
-    // server bump re-adds it) without needing a full page reload
+    // when an agent reports the current version, drop any lingering "update to X" button/badge
+    // (the reported bug). Rebuilding the button in JS is avoided on purpose - a newly-outdated
+    // agent (server bump while the page is open) gets its button on the next full reload.
     var vspan=c.querySelector('[data-ver]');
-    if(vspan && a.version){
-      var vh=esc(a.version);
-      if(a.outdated && a.server_version){
-        vh += ' ' + (window.CAIRN_VIEWER
-          ? '<span class=verold>update to '+esc(a.server_version)+'</span>'
-          : '<button class=verbtn onclick="event.stopPropagation();updateAgent(\''+esc(a.name)+'\')" '
-            +'title="fetch the latest code on this agent and restart it, keeping every setting">'
-            +'update to '+esc(a.server_version)+'</button>');
-      }
-      vspan.innerHTML=vh;
-    }
+    if(vspan && a.version && !a.outdated){ vspan.textContent=a.version; }
     if(a.severity!=='OK') stale++;
   });
   var cnt=document.getElementById('agentcount'); if(cnt) cnt.textContent=stale?(stale+' stale'):'';
@@ -2234,7 +2229,6 @@ def index(request: Request):
         '<input type=checkbox id=drychk onchange="setDry(this.checked)"><span>Dry-run</span></label>')
     ro_badge = '<span class=robadge title="read-only account - viewing only">read-only</span>' if viewer else ""
     return _shell(f"""
-  <script>window.CAIRN_VIEWER={'true' if viewer else 'false'};</script>
   <div class=topbar2><h2 class=applogo>Cairn</h2>
     <div class=seg role=tablist>
       <button data-h=steel onclick="setHero('steel')">Summary</button>
