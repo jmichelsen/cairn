@@ -83,10 +83,39 @@ ensure_opt() {  # optional tool: offer to install, but WARN (never die) if missi
       warn "'$key' not installed - $why unavailable until it is present"; fi
   else warn "skipped '$key' - $why unavailable until installed"; fi
 }
-ensure_httm() {  # httm is NOT in Debian apt (Rust tool); check + point at the real install path
+ensure_httm() {  # httm is NOT in a distro repo (Rust tool), but its GitHub releases ship a .deb/.rpm.
   command -v httm >/dev/null 2>&1 && { ok "httm ready"; return 0; }
+  # Pick the package type this distro+arch can install directly (releases are x86_64/amd64 only).
+  local ext="" arch; arch="$(uname -m)"
+  if [ "$arch" = x86_64 ] || [ "$arch" = amd64 ]; then
+    case "$PKG" in apt-get) ext=.deb;; dnf|yum|zypper) ext=.rpm;; esac
+  fi
+  if [ -n "$ext" ] && command -v curl >/dev/null 2>&1 \
+     && { [ "$YES" = 1 ] || askyn "install httm (recovery-point catalog) from its GitHub releases?" y; }; then
+    local api url tmpd rc=1
+    api="$(curl -fsSL -H 'Accept: application/vnd.github+json' -A cairn-install \
+           https://api.github.com/repos/kimono-koans/httm/releases/latest 2>/dev/null)"
+    url="$(printf '%s' "$api" | python3 -c "import sys,json
+ext=sys.argv[1]; d=json.load(sys.stdin)
+c=[a['browser_download_url'] for a in d.get('assets',[])
+   if a['name'].endswith(ext) and ('amd64' in a['name'] or 'x86_64' in a['name'])]
+print(c[0] if c else '')" "$ext" 2>/dev/null)"
+    if [ -n "$url" ]; then
+      tmpd="$(mktemp -d)"; local f="$tmpd/httm$ext"
+      if curl -fsSL -o "$f" "$url"; then
+        say "installing httm from $(basename "$url")"
+        case "$ext" in
+          .deb) sudo dpkg -i "$f" >/dev/null 2>&1 || sudo apt-get -f install -y >/dev/null 2>&1 || true ;;
+          .rpm) sudo "$PKG" install -y "$f" >/dev/null 2>&1 || sudo rpm -i "$f" >/dev/null 2>&1 || true ;;
+        esac
+      fi
+      rm -rf "$tmpd"
+    fi
+    command -v httm >/dev/null 2>&1 && { ok "httm installed ($(httm --version 2>/dev/null | head -1))"; return 0; }
+    warn "httm auto-install did not complete (network/permissions?) - falling back to manual"
+  fi
   warn "httm not found - the recovery-point catalog (points / deleted-file / version search) needs it"
-  info "httm is not in apt: install a .deb from https://github.com/kimono-koans/httm/releases, or 'cargo install httm'"
+  info "install a .deb/.rpm from https://github.com/kimono-koans/httm/releases, or 'cargo install httm'"
 }
 # docker CLI access: daemon is root; if this user isn't in the docker group, install-time docker runs
 # via sudo (and we add the user to the group for future sudoless use - takes effect next login).
