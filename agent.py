@@ -16,7 +16,7 @@ Env: CAIRN_API_URL, CAIRN_API_TOKEN, CAIRN_AGENT_NAME, CAIRN_TARGETS, CAIRN_CAN_
      CAIRN_INTERVAL, CAIRN_DRYRUN(0/1), CAIRN_ACTION_TIMEOUT
 Run: agent.py [--once]
 """
-import json, os, sys, time, urllib.request, urllib.error
+import base64, gzip, json, os, sys, time, urllib.request, urllib.error
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -42,6 +42,10 @@ CAN_EXEC = _e("CAIRN_CAN_EXECUTE", "0") == "1"
 INTERVAL = int(_e("CAIRN_INTERVAL", "900"))
 DRYRUN   = _e("CAIRN_DRYRUN", "0") == "1"
 TIMEOUT  = int(_e("CAIRN_ACTION_TIMEOUT", "7200"))
+# Nightly recovery-manifest walk: how many datasets to walk per loop (spreads the fleet / first fill),
+# and the per-dataset walk timeout. The API decides WHICH datasets are due, so this is a no-op most loops.
+RECOVER_WALK_MAX     = int(_e("CAIRN_RECOVER_WALK_MAX", "2"))
+RECOVER_WALK_TIMEOUT = int(_e("CAIRN_RECOVER_WALK_TIMEOUT", "900"))
 # Identify with a real User-Agent. urllib's default ("Python-urllib/X.Y") is a known-bot signature
 # that CDNs/WAFs in front of the API (e.g. Cloudflare) reject with 403, so always send our own.
 UA       = _e("CAIRN_USER_AGENT", "cairn-agent/1.0")
@@ -152,6 +156,38 @@ def do_execute(cfg):
         print(f"  intent {iid} {target} {action}{' [dry]' if dry else ''} -> {'ok' if rc == 0 else 'FAIL'}")
     return len(intents)
 
+def do_recovery_walk(cfg):
+    """Nightly-cadence 'deleted files' manifest builder. The API returns only the datasets whose manifest
+    is missing or stale (walk interval), so this is a no-op most loops. For each, walk with httm (bounded
+    to this dataset via --one-filesystem), reduce to the newest version per file, gzip, and push. Walking
+    is read-only; the manifest turns the otherwise-slow on-demand deleted scan into an instant lookup."""
+    tmap = {t["name"]: t for t in cfg.get("targets", [])}
+    due = (api_call("GET", f"/api/v1/backup/agent/recovery-due?agent={NAME}") or {}).get("targets", [])
+    walked = 0
+    for d in due[:RECOVER_WALK_MAX]:
+        t = tmap.get(d.get("name"))
+        if not t:
+            continue
+        cmd, err = C.build_recovery_walk("deleted", t)
+        if err or not cmd:
+            api_call("POST", "/api/v1/backup/agent/recovery-manifest",
+                     {"target": d.get("name"), "kind": "deleted", "ok": False, "error": err or "no command"})
+            continue
+        rc, so, se = C.run(cmd, timeout=RECOVER_WALK_TIMEOUT)
+        if rc != 0:
+            api_call("POST", "/api/v1/backup/agent/recovery-manifest",
+                     {"target": t["name"], "kind": "deleted", "ok": False, "error": (se or so).strip()[-500:]})
+            continue
+        manifest, count = C.reduce_deleted_manifest(so)
+        raw = manifest.encode()
+        api_call("POST", "/api/v1/backup/agent/recovery-manifest",
+                 {"target": t["name"], "kind": "deleted", "ok": True,
+                  "gz_b64": base64.b64encode(gzip.compress(raw)).decode(),
+                  "entry_count": count, "raw_bytes": len(raw), "walked_ts": int(time.time())})
+        walked += 1
+        print(f"  recovery walk {t['name']} -> {count} deleted file(s), {len(raw)}B raw")
+    return walked
+
 def main():
     once = "--once" in sys.argv
     cfg = yaml.safe_load(Path(TARGETS).read_text())
@@ -177,6 +213,12 @@ def main():
                 print(f"poll failed: HTTP {e.code}")
             except Exception as e:
                 print(f"execute failed: {e}")
+            try:
+                w = do_recovery_walk(cfg)
+                if w:
+                    print(f"recovery: refreshed {w} manifest(s)")
+            except Exception as e:
+                print(f"recovery walk failed: {e}")
         if once:
             break
         time.sleep(INTERVAL)

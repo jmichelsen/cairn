@@ -1398,6 +1398,68 @@ def build_dryrun(action, t, opts=None):
         return None, "would copy the chosen snapshot version into the staging dir (copy-only, never overwrites live)"
     return None, f"no dry-run for '{action}'"
 
+def build_recovery_walk(kind, t):
+    """argv for a per-dataset recovery-manifest walk (read-only). 'deleted' = files gone from live but
+    still in snapshots. --recursive to cover the tree, --one-filesystem so a parent dataset's walk does
+    NOT descend into child datasets (each child dataset walks itself -> smaller, non-overlapping blobs),
+    --no-live so only snapshot versions are returned."""
+    if kind != "deleted":
+        return None, f"unknown recovery-walk kind '{kind}'"
+    src = t.get("source")
+    if not src:
+        return None, "recovery walk requires a dataset-backed target"
+    mp, err = _mountpoint(src)
+    if err:
+        return None, err
+    return ["httm", "--deleted=only", "--recursive", "--one-filesystem", "--no-live", "--json", mp], None
+
+def reduce_deleted_manifest(raw_json, cap=2000):
+    """Collapse httm's deleted-files output to ONE (newest) version per path, newest-modified first,
+    capped to `cap` entries, so the stored manifest stays small (a dataset can have tens of thousands of
+    deleted-in-snapshot files, e.g. after an rmlint pass).
+
+    httm's RECURSIVE json is a STREAM of concatenated pretty-printed objects (one per directory), not a
+    single object, so we raw_decode successively and merge. Each object is
+    {"<path>": [ {"path":..., "metadata":{"size":..., "modify_time":...}}, ... ]}.
+    Returns (json_string, total_found): json holds up to `cap` newest entries as
+    {"<path>": {"path","size","modify_time","versions"}}; total_found is the full count before the cap.
+    Newest is by parsed modify_time (httm format "Tue Sep 08 08:35:48 2026"), -1 when it won't parse."""
+    import datetime
+
+    def _mt(v):
+        s = ((v or {}).get("metadata") or {}).get("modify_time") or ""
+        try:
+            return datetime.datetime.strptime(s, "%a %b %d %H:%M:%S %Y").timestamp()
+        except (ValueError, TypeError):
+            return -1.0
+
+    text = raw_json or ""
+    dec = json.JSONDecoder()
+    merged, i, n = {}, 0, len(text)
+    while i < n:
+        while i < n and text[i] in " \t\r\n":   # skip whitespace between concatenated objects
+            i += 1
+        if i >= n:
+            break
+        try:
+            obj, i = dec.raw_decode(text, i)
+        except ValueError:
+            break   # partial/garbage tail - stop, keep what parsed
+        if isinstance(obj, dict):
+            for path, vers in obj.items():
+                if isinstance(vers, list) and vers:
+                    merged.setdefault(path, []).extend(vers)
+
+    rows = []
+    for path, vers in merged.items():
+        newest = max(vers, key=_mt)
+        md = newest.get("metadata") or {}
+        rows.append((_mt(newest), path, {"path": newest.get("path") or "", "size": md.get("size") or "",
+                                         "modify_time": md.get("modify_time") or "", "versions": len(vers)}))
+    rows.sort(key=lambda r: r[0], reverse=True)   # newest-modified first (most likely recovery targets)
+    out = {path: rec for _, path, rec in rows[:cap]}
+    return json.dumps(out), len(rows)
+
 def _mountpoint(ds):
     rc, out, _ = run(["zfs", "get", "-H", "-o", "value", "mountpoint", ds])
     mp = out.strip()
