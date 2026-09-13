@@ -28,6 +28,7 @@ WORKDIR /app
 COPY phase0 /app/phase0
 COPY phase1 /app/phase1
 COPY agent.py /app/agent.py
+COPY VERSION /app/VERSION
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh /app/agent.py /app/phase0/*.sh 2>/dev/null || true
 

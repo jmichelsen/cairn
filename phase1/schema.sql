@@ -83,7 +83,9 @@ CREATE INDEX IF NOT EXISTS idx_vault_reports_ts ON vault_reports(agent, ts);
 CREATE TABLE IF NOT EXISTS agents (
   name         TEXT PRIMARY KEY,
   can_execute  INTEGER DEFAULT 0,
-  last_report_ts INTEGER
+  last_report_ts INTEGER,
+  report_interval INTEGER,
+  agent_version   TEXT              -- the cairn version this agent is running (from its VERSION file)
 );
 
 -- Auth credentials, HASH-AT-REST: only sha256(secret) is stored, never the secret.
