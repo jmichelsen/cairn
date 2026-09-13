@@ -1729,13 +1729,16 @@ def _acts(r, can_act, viewer=False):
         main = ""
         if r.get("source"):   # snapshot any dataset-backed volume (pool root or child dataset)
             main += f"<button class=pri onclick=\"act('{n}','snapshot',true)\">Snapshot</button>"
-        sc = (json.loads(r.get("detail_json") or "{}")).get("scrub") or {}
-        if sc.get("state") == "in_progress":
-            pct = sc.get("pct")
-            lbl = f"Scrubbing… {pct:.0f}%" if isinstance(pct, (int, float)) else "Scrubbing…"
-            main += f'<button class=scrubbtn data-scrub disabled>{lbl}</button>'
-        else:
-            main += f'<button class=scrubbtn data-scrub onclick="act(\'{n}\',\'scrub\',true)">Scrub</button>'
+        # Scrub is a whole-POOL operation, so only offer it on a pool root - a child dataset would
+        # silently scrub its entire parent pool (duplicating the pool card's own button).
+        if r.get("source") and "/" not in r["source"]:
+            sc = (json.loads(r.get("detail_json") or "{}")).get("scrub") or {}
+            if sc.get("state") == "in_progress":
+                pct = sc.get("pct")
+                lbl = f"Scrubbing… {pct:.0f}%" if isinstance(pct, (int, float)) else "Scrubbing…"
+                main += f'<button class=scrubbtn data-scrub disabled>{lbl}</button>'
+            else:
+                main += f'<button class=scrubbtn data-scrub onclick="act(\'{n}\',\'scrub\',true)">Scrub</button>'
     else:
         return ""
     return f'<div class="cact">{main}</div>{rec}'
