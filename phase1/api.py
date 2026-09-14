@@ -42,6 +42,15 @@ import hashlib as _hashlib, secrets as _secrets
 AGENT_PATHS = ("/api/v1/backup/report", "/api/v1/backup/intents",
                "/api/v1/backup/agent/")  # agent-only: report, intents/{id}/result, recovery walk push/due
 ADMIN_ONLY_PATHS = ("/api/v1/backup/tokens",)  # sensitive even on GET - never for a viewer
+# A dedicated, single-purpose secret CI uses to push pipeline status to /api/v1/ci/status. Scoped to
+# ONLY that route (compared in-handler), so it can set a badge but do nothing else - safe to hand to
+# GitLab CI variables. Unset => the push route is closed (badges still render "unknown").
+CI_TOKEN = os.environ.get("CAIRN_CI_TOKEN", "")
+# Which badge names may be served over the PUBLIC (unauthenticated) /badge/*.svg route. Only the
+# public GitHub repo's own CI ('tests') belongs here. cairn-deploy is an internal-only pipeline and
+# must never be reachable publicly - its status is pushed to the store and shown on the AUTHED
+# dashboard (inlined), but a public /badge/deploy.svg 404s so it can't leak even by a guessed URL.
+CI_PUBLIC_BADGES = {x.strip() for x in os.environ.get("CAIRN_PUBLIC_BADGES", "tests").split(",") if x.strip()}
 ACCESS_TTL = int(os.environ.get("CAIRN_ACCESS_TTL", str(24 * 3600)))  # access-token lifetime (s)
 SESSION_TTL = int(os.environ.get("CAIRN_SESSION_TTL", str(7 * 24 * 3600)))  # password-login session (s)
 
@@ -137,8 +146,13 @@ async def auth_gate(request: Request, call_next):
     admin only. The resolved role is stashed on request.state.role for the dashboard to render
     read-only. 401 = not signed in (HTML GET redirects to /login); 403 = signed in but read-only."""
     p = request.url.path
-    if p in ("/login", "/logout", "/favicon.ico", "/api/v1/backup/enroll"):
-        return await call_next(request)   # /enroll authenticates via the enrollment secret itself
+    if p in ("/login", "/logout", "/favicon.ico", "/api/v1/backup/enroll", "/api/v1/ci/status") \
+            or p.startswith("/badge/"):
+        # /enroll and /ci/status self-authenticate on their own shared secret (enrollment secret /
+        # CAIRN_CI_TOKEN). /badge/*.svg is intentionally PUBLIC and unauthenticated - it is the one
+        # route GitHub's image proxy fetches anonymously so the private GitLab pipeline status can be
+        # surfaced on the public README (it exposes only a name + pass/fail).
+        return await call_next(request)
     if not HAS_ADMIN:
         return JSONResponse({"detail": "no admin token configured - set CAIRN_ADMIN_TOKEN and restart"},
                             status_code=503)
@@ -284,6 +298,15 @@ def _init_db():
                 raw_bytes   INTEGER,
                 walked_ts   INTEGER NOT NULL,
                 PRIMARY KEY (target_id, kind))""")
+            # CI pipeline status broker: one row per badge name (e.g. 'tests', 'deploy'), latest wins.
+            # CI pushes here (POST /api/v1/ci/status); /badge/{name}.svg renders it. Lets the private
+            # GitLab pipelines surface their status publicly without making the pipelines public.
+            c.execute("""CREATE TABLE IF NOT EXISTS ci_status (
+                name       TEXT PRIMARY KEY,
+                status     TEXT NOT NULL,
+                ref        TEXT,
+                url        TEXT,
+                updated_ts INTEGER NOT NULL)""")
 _init_db()
 HAS_ADMIN = _seed_tokens() > 0   # false => middleware returns 503 until CAIRN_ADMIN_TOKEN is set
 
@@ -320,6 +343,97 @@ def latest_status(conn):
 
 
 # ---------------- read-only views ----------------
+# ---------------- CI status broker + public badge ----------------
+# Colors follow the shields.io convention so the badges read the way people expect on a README.
+_BADGE_COLORS = {
+    "success": "#4c1", "passed": "#4c1", "passing": "#4c1", "ok": "#4c1", "green": "#4c1",
+    "failed": "#e05d44", "failing": "#e05d44", "error": "#e05d44", "red": "#e05d44",
+    "running": "#007ec6", "pending": "#dfb317", "yellow": "#dfb317",
+    "canceled": "#9f9f9f", "cancelled": "#9f9f9f", "skipped": "#9f9f9f",
+}
+_BADGE_DEFAULT_COLOR = "#9f9f9f"  # unknown / anything unrecognized -> grey
+
+def _badge_color(status):
+    return _BADGE_COLORS.get((status or "").strip().lower(), _BADGE_DEFAULT_COLOR)
+
+def _badge_text_width(s):
+    # Rough px width at 11px Verdana - wide-ish chars get 7, narrow ones less. Good enough to keep the
+    # text inside the pill without pulling in a font-metrics table.
+    narrow, wide = set("iljI.,:;'!|"), set("mwMW@")
+    return sum(4 if c in narrow else 9 if c in wide else 7 for c in (s or ""))
+
+def _badge_svg(label, message, color):
+    """A self-contained flat (shields-style) SVG badge - no external fetch, embeds cleanly via <img>."""
+    lp, mp = 12, 12  # horizontal padding per side, per segment
+    lw = _badge_text_width(label) + lp
+    mw = _badge_text_width(message) + mp
+    total = lw + mw
+    # text anchored at segment center; *10 because we scale text by 0.1 for crisp sub-pixel positioning
+    lx, mx = lw * 5, (lw + mw / 2) * 10
+    lt, mt = _esc(label), _esc(message)
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{total}" height="20" '
+        f'role="img" aria-label="{lt}: {mt}">'
+        f'<title>{lt}: {mt}</title>'
+        f'<linearGradient id="s" x2="0" y2="100%"><stop offset="0" stop-color="#bbb" stop-opacity=".1"/>'
+        f'<stop offset="1" stop-opacity=".1"/></linearGradient>'
+        f'<clipPath id="r"><rect width="{total}" height="20" rx="3" fill="#fff"/></clipPath>'
+        f'<g clip-path="url(#r)">'
+        f'<rect width="{lw}" height="20" fill="#555"/>'
+        f'<rect x="{lw}" width="{mw}" height="20" fill="{color}"/>'
+        f'<rect width="{total}" height="20" fill="url(#s)"/></g>'
+        f'<g fill="#fff" text-anchor="middle" '
+        f'font-family="Verdana,DejaVu Sans,Geneva,sans-serif" font-size="11">'
+        f'<text x="{lx}" y="15" fill="#010101" fill-opacity=".3">{lt}</text>'
+        f'<text x="{lx}" y="14">{lt}</text>'
+        f'<text x="{mx/10:.0f}" y="15" fill="#010101" fill-opacity=".3">{mt}</text>'
+        f'<text x="{mx/10:.0f}" y="14">{mt}</text>'
+        f'</g></svg>')
+
+@app.get("/badge/{name}.svg")
+def ci_badge(name: str):
+    """PUBLIC (see auth_gate) - but ONLY for names in CI_PUBLIC_BADGES; any other name 404s so an
+    internal-only pipeline (cairn-deploy) can't leak its status via a guessed URL. Renders the stored
+    status as an SVG badge (unknown until CI has pushed once). no-cache so GitHub's image proxy
+    re-fetches a fresh badge after each pipeline."""
+    if name not in CI_PUBLIC_BADGES:
+        return Response("not found", status_code=404, media_type="text/plain")
+    with db() as conn:
+        r = conn.execute("SELECT status FROM ci_status WHERE name=?", (name,)).fetchone()
+    status = (r["status"] if r else "unknown")
+    svg = _badge_svg(name, status, _badge_color(status))
+    return Response(svg, media_type="image/svg+xml",
+                    headers={"Cache-Control": "no-cache, max-age=0"})
+
+@app.post("/api/v1/ci/status")
+async def ci_status_push(request: Request):
+    """CI pushes {name, status, ref?, url?}. Self-authed on CAIRN_CI_TOKEN (bypasses the role gate).
+    Closed (401) when no CI token is configured on the server."""
+    tok = _extract_token(request)
+    if not CI_TOKEN or not tok or not hmac.compare_digest(tok, CI_TOKEN):
+        return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    body = await _json(request)
+    name = (body.get("name") or "").strip()
+    if not re.match(r"^[a-z0-9_-]{1,32}$", name):
+        return JSONResponse({"detail": "bad name (a-z0-9_- , <=32)"}, status_code=400)
+    status = ((body.get("status") or "unknown").strip() or "unknown")[:32]
+    ref = (body.get("ref") or "")[:120]
+    url = (body.get("url") or "")[:300]
+    now = int(time.time())
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO ci_status(name,status,ref,url,updated_ts) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(name) DO UPDATE SET status=excluded.status, ref=excluded.ref, "
+            "url=excluded.url, updated_ts=excluded.updated_ts", (name, status, ref, url, now))
+        conn.commit()
+    return {"ok": True, "name": name, "status": status}
+
+@app.get("/api/v1/ci/status")
+def ci_status_list():
+    with db() as conn:
+        return {"status": [dict(r) for r in conn.execute(
+            "SELECT name,status,ref,url,updated_ts FROM ci_status ORDER BY name").fetchall()]}
+
 @app.get("/api/v1/backup/health")
 def health():
     with db() as conn:
@@ -1547,6 +1661,7 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .sumverd .vs{color:var(--mut);font-size:12.5px;margin-top:6px}
 .sumverd.ok{color:var(--ok)} .sumverd.warn{color:var(--warn)} .sumverd.crit{color:var(--crit)} .sumverd.unk{color:var(--unk)}
 .sumchips{display:flex;gap:9px;flex-wrap:wrap}
+.cibadge{display:inline-flex;text-decoration:none} .cibadge svg{display:block}
 .sumchip{display:inline-flex;align-items:center;gap:7px;background:var(--surf);border:1px solid var(--line);
   border-radius:9px;padding:7px 12px;font:12px "Red Hat Text",sans-serif;color:var(--mut);cursor:pointer;
   appearance:none;-webkit-appearance:none}
@@ -2574,6 +2689,27 @@ def _heatmap(order_names):
         out += f'<tr><td class="hname">{_esc(name)}</td>{cells}</tr>'
     return out, f"{days[0]} → {days[-1]}"
 
+def _ci_badges_html(names=("tests", "deploy")):
+    """Inline the CI status badges for the AUTHED dashboard - both the public 'tests' and the
+    internal-only 'deploy'. Rendered server-side (not via the public /badge route) so 'deploy' never
+    needs a public URL; each links to its stored (private GitLab) pipeline for the signed-in admin."""
+    with db() as conn:
+        rows = {r["name"]: r for r in conn.execute(
+            "SELECT name,status,url FROM ci_status").fetchall()}
+    parts = []
+    for name in names:
+        r = rows.get(name)
+        status = r["status"] if r else "unknown"
+        svg = _badge_svg(name, status, _badge_color(status))
+        url = r["url"] if (r and r["url"]) else ""
+        if url:
+            parts.append(f'<a class=cibadge href="{_esc(url)}" target=_blank rel=noopener '
+                         f'title="{_esc(name)} pipeline">{svg}</a>')
+        else:
+            parts.append(f'<span class=cibadge title="{_esc(name)}: no pipeline yet">{svg}</span>')
+    return ('<div class=sumci style="display:flex;gap:6px;align-items:center;margin-left:14px">'
+            + "".join(parts) + '</div>')
+
 def _hero_steel(rows, h, gpct, glabel):
     """Steel-style summary header: verdict + 3-2-1 badge / capacity / restore-points tiles.
     An alternative to the 14-day heatmap hero (toggled client-side)."""
@@ -2621,6 +2757,7 @@ def _hero_steel(rows, h, gpct, glabel):
     <div class=sumband>
       <div class="sumverd {vcls}" id=sumverd>{shield}<div><div class=vt>{verdict}</div><div class=vs>{vsub}</div></div></div>
       <div class=sumchips>{chips}</div>
+      {_ci_badges_html()}
       <div class=sumasof>as of<br><b>{ts}</b></div>
     </div>
     <div class=sumtiles>
