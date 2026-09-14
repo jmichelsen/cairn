@@ -158,7 +158,7 @@ Buttons per dataset target: **Points / Deleted / Versions**, plus `restore` via 
 | `recover-points` | `zfs list -t snapshot` | **fast** - no snapshot automount; the quick "when can I recover from" browse |
 | `recover-search {path}` | `httm --json --recursive <mp>/<path>` | versions of a file/dir across snapshots |
 | `recover-deleted {path?}` | `httm --deleted=only --recursive --json …` | files gone from live but present in snapshots |
-| `restore {version, dest?}` | `cp -a --no-clobber` snapshot→staging | **copy-only**, never overwrites live; defaults to `<mp>/.bm-restores/` |
+| `restore {version, dest?}` | `cp -av --no-clobber` snapshot→staging | **copy-only**, never overwrites live; defaults to `<mp>/.cairn-restores/` |
 
 Guardrails: user-supplied paths are joined onto the target's dataset mountpoint and **rejected if
 they escape it** (`../`, absolute paths outside the dataset); restore is copy-only to staging.
