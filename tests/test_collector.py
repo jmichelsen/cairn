@@ -202,3 +202,18 @@ def test_reduce_parses_concatenated_objects_and_caps():
     # newest-first: the top entry must carry the max day present (day 9, from i=8)
     first = next(iter(out.values()))
     assert first["modify_time"].split()[2] == "09"
+
+
+def test_reduce_accepts_future_array_form():
+    # the recursive framing is undocumented; be robust if a future httm emits a top-level ARRAY of the
+    # per-directory objects instead of concatenating them.
+    import json as _j
+    arr = _j.dumps([
+        {"/mnt/pool/a.txt": [{"path": "/s/a.txt",
+                              "metadata": {"size": "1 bytes", "modify_time": "Mon Sep 08 01:00:00 2026"}}]},
+        {"/mnt/pool/b.txt": [{"path": "/s/b.txt",
+                              "metadata": {"size": "2 bytes", "modify_time": "Mon Sep 09 01:00:00 2026"}}]},
+    ])
+    js, total = collector.reduce_deleted_manifest(arr)
+    out = _j.loads(js)
+    assert total == 2 and set(out) == {"/mnt/pool/a.txt", "/mnt/pool/b.txt"}
