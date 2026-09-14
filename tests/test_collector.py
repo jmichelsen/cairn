@@ -252,6 +252,19 @@ def test_scan_files_respects_cap(tmp_path):
     assert len(files) == 2 and trunc is True
 
 
+def test_build_dirtree_folders_only(monkeypatch, tmp_path):
+    (tmp_path / "docs").mkdir(); (tmp_path / "docs" / "2020").mkdir()
+    (tmp_path / "pics").mkdir()
+    (tmp_path / "a.txt").write_text("x")     # a file: not in the tree
+    (tmp_path / ".zfs").mkdir()              # skipped
+    monkeypatch.setattr(collector, "run", lambda *a, **k: (0, str(tmp_path) + "\n", ""))
+    res, err = collector.build_dirtree({"source": "p"}, cap=1000)
+    assert err is None
+    assert set(res["tree"]) == {"docs", "pics"}          # files + .zfs excluded
+    assert set(res["tree"]["docs"]) == {"2020"} and res["tree"]["pics"] == {}
+    assert res["truncated"] is False and res["count"] == 3
+
+
 def test_reduce_accepts_future_array_form():
     # the recursive framing is undocumented; be robust if a future httm emits a top-level ARRAY of the
     # per-directory objects instead of concatenating them.

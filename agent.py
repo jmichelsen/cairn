@@ -51,8 +51,9 @@ TIMEOUT  = int(_e("CAIRN_ACTION_TIMEOUT", "7200"))
 RECOVER_WALK_HOURS   = _e("CAIRN_RECOVER_WALK_HOURS", "1-6")
 RECOVER_WALK_MAX     = int(_e("CAIRN_RECOVER_WALK_MAX", "1"))
 RECOVER_WALK_TIMEOUT = int(_e("CAIRN_RECOVER_WALK_TIMEOUT", "900"))
-# Nightly VERSIONS manifest (httm-per-file is heavier than the deleted walk), so bound it hard: cap the
-# files enumerated and a total wall-clock budget per dataset. Coverage past that is filled by "Scan here".
+# Nightly the agent seeds a CHEAP directory tree (folders only, no httm) so Versions opens into real
+# folders to browse; version history is scanned per-folder ON DEMAND. VERS_* bound those on-demand scans.
+DIRTREE_CAP          = int(_e("CAIRN_DIRTREE_CAP", "20000"))
 VERS_SCAN_CAP        = int(_e("CAIRN_VERS_SCAN_CAP", "6000"))
 VERS_SHOW_CAP        = int(_e("CAIRN_VERS_SHOW_CAP", "1200"))
 VERS_BUDGET          = int(_e("CAIRN_VERS_BUDGET", "300"))
@@ -164,6 +165,14 @@ def do_execute(cfg):
                                                              "truncated": bool(result.get("truncated"))})})
             print(f"  intent {iid} {target} recover-versions -> {'FAIL' if err else str(result.get('total'))+' file(s)'}")
             continue
+        if action == "recover-dirtree":
+            # build the cheap folder tree NOW (first Versions open before any nightly walk). Stores the
+            # dirtree manifest; the intent result is a small summary the UI ignores (it reads the manifest).
+            dok, dcount, derr = _dirtree_and_push(t)
+            api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                     {"ok": dok, "output": (f"folders: {dcount}" if dok else (derr or "dirtree failed"))})
+            print(f"  intent {iid} {target} recover-dirtree -> {'ok' if dok else 'FAIL'} ({dcount})")
+            continue
         if action == "recover-walk":
             # explicit UI refresh: walk this dataset now (bypassing the off-peak window) and STORE the
             # manifest, so the scan is kept, not discarded. The intent result is just a small summary.
@@ -213,15 +222,20 @@ def _push_versions_manifest(t, rel, result):
               "files": result.get("files") or {}, "truncated": bool(result.get("truncated")),
               "total": result.get("total") or 0})
 
-def _versions_and_push(t):
-    """Nightly: build the whole-dataset versions tree (bounded by a wall-clock budget) and store it as the
-    versions manifest, so Versions always opens into a browsable tree seeded off-peak."""
-    result, err = C.scan_versions(t, "", scan_cap=VERS_SCAN_CAP, show_cap=VERS_SHOW_CAP,
-                                  timeout=RECOVER_WALK_TIMEOUT, budget=VERS_BUDGET)
+def _dirtree_and_push(t):
+    """Nightly: build the CHEAP directory tree (folders only, no httm) and store it as the 'dirtree'
+    manifest, so Versions opens into real folders to browse. Version history is scanned per-folder later."""
+    result, err = C.build_dirtree(t, cap=DIRTREE_CAP)
     if err or not result:
+        api_call("POST", "/api/v1/backup/agent/recovery-manifest",
+                 {"target": t["name"], "kind": "dirtree", "ok": False, "error": err or "no result"})
         return False, 0, (err or "no result")
-    _push_versions_manifest(t, "", result)
-    return True, result.get("total") or 0, None
+    raw = json.dumps(result).encode()
+    api_call("POST", "/api/v1/backup/agent/recovery-manifest",
+             {"target": t["name"], "kind": "dirtree", "ok": True,
+              "gz_b64": base64.b64encode(gzip.compress(raw)).decode(),
+              "entry_count": result.get("count") or 0, "raw_bytes": len(raw), "walked_ts": int(time.time())})
+    return True, result.get("count") or 0, None
 
 def _walk_and_push(t):
     """Walk ONE dataset's deleted files (httm, bounded to this dataset via --one-filesystem), reduce to
@@ -263,10 +277,10 @@ def do_recovery_walk(cfg):
         ok, count, _ = _walk_and_push(t)
         if ok:
             print(f"  recovery walk {t['name']} -> {count} deleted file(s)")
-        vok, vcount, _ = _versions_and_push(t)             # also seed the browsable versions tree
-        if vok:
-            print(f"  versions walk {t['name']} -> {vcount} file(s) with history")
-        if ok or vok:
+        dok, dcount, _ = _dirtree_and_push(t)              # cheap folder tree for the Versions browser
+        if dok:
+            print(f"  dirtree walk {t['name']} -> {dcount} folder(s)")
+        if ok or dok:
             walked += 1
     return walked
 

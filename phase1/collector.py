@@ -1515,6 +1515,49 @@ def _scan_files(base, cap):
                 continue
     return files, truncated, scanned
 
+def build_dirtree(t, cap=20000):
+    """CHEAP directory structure (folders only - no files, no httm) for navigation. os.scandir dirs on one
+    filesystem, skipping .zfs and the restore staging dirs. Returns (result, err); result = {tree, count,
+    truncated} where tree is a nested {dirname: subtree}. This is what seeds the Versions browser so you
+    navigate real folders instead of guessing a path; version history is scanned per-folder on demand."""
+    src = t.get("source")
+    if not src:
+        return None, "dirtree requires a dataset-backed target"
+    mp, err = _mountpoint(src)
+    if err:
+        return None, err
+    try:
+        base_dev = os.stat(mp).st_dev
+    except OSError as e:
+        return None, str(e)
+    root = {}
+    stack = [(mp, root)]
+    count, truncated = 0, False
+    while stack and count < cap:
+        d, node = stack.pop()
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            continue
+        for e in entries:
+            if e.name in (".zfs", ".cairn-restores", ".bm-restores"):
+                continue
+            try:
+                if e.is_symlink() or not e.is_dir(follow_symlinks=False):
+                    continue
+                if e.stat(follow_symlinks=False).st_dev != base_dev:   # don't cross into child datasets
+                    continue
+            except OSError:
+                continue
+            child = {}
+            node[e.name] = child
+            stack.append((e.path, child))
+            count += 1
+            if count >= cap:
+                truncated = True
+                break
+    return {"tree": root, "count": count, "truncated": truncated}, None
+
 def _reduce_versions(merged, mp, show_cap, ver_cap):
     """Pure: turn {abs_path: [version dicts]} (merged httm --json output) into the browsable result. Keep
     only files that have real HISTORY (at least one snapshot version, i.e. a version path != the live
