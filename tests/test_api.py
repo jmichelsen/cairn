@@ -91,3 +91,17 @@ def test_hide_then_unhide_roundtrip():
     with api.db() as conn:
         assert conn.execute("SELECT enabled FROM targets WHERE id=?", (tid,)).fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM target_retired WHERE name=?", ("hidepool",)).fetchone()[0] == 0
+
+
+# ---- versions manifest merge ------------------------------------------------------------------
+def test_versions_manifest_merge_by_subtree():
+    import gzip as _gz
+    tid = _seed_target("vmerge")
+    with api.db() as conn:
+        api._merge_versions_manifest(conn, tid, "", {"a/x": [1], "a/y": [1], "b/z": [1]}, False, 1)
+        api._merge_versions_manifest(conn, tid, "a", {"x": [1], "new": [1]}, False, 2)  # replace a/* only
+        conn.commit()
+        gz = conn.execute("SELECT gz FROM recovery_manifests WHERE target_id=? AND kind='versions'",
+                          (tid,)).fetchone()[0]
+    files = json.loads(_gz.decompress(gz).decode())["files"]
+    assert set(files) == {"a/x", "a/new", "b/z"}   # a/y dropped, a/new added, b/z untouched

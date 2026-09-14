@@ -51,6 +51,11 @@ TIMEOUT  = int(_e("CAIRN_ACTION_TIMEOUT", "7200"))
 RECOVER_WALK_HOURS   = _e("CAIRN_RECOVER_WALK_HOURS", "1-6")
 RECOVER_WALK_MAX     = int(_e("CAIRN_RECOVER_WALK_MAX", "1"))
 RECOVER_WALK_TIMEOUT = int(_e("CAIRN_RECOVER_WALK_TIMEOUT", "900"))
+# Nightly VERSIONS manifest (httm-per-file is heavier than the deleted walk), so bound it hard: cap the
+# files enumerated and a total wall-clock budget per dataset. Coverage past that is filled by "Scan here".
+VERS_SCAN_CAP        = int(_e("CAIRN_VERS_SCAN_CAP", "6000"))
+VERS_SHOW_CAP        = int(_e("CAIRN_VERS_SHOW_CAP", "1200"))
+VERS_BUDGET          = int(_e("CAIRN_VERS_BUDGET", "300"))
 
 def _in_walk_window():
     """True if now (agent-local time) is inside RECOVER_WALK_HOURS. Supports a wrapping window (22-6)."""
@@ -145,12 +150,18 @@ def do_execute(cfg):
         if action == "recover-versions":
             # folder-wide version history: enumerate files ourselves + batch through httm (httm --recursive
             # panics for versions outside interactive mode). Result goes back as the intent output JSON.
-            result, err = C.scan_versions(t, opts.get("path") or "", timeout=RECOVER_WALK_TIMEOUT)
+            rel = opts.get("path") or ""
+            result, err = C.scan_versions(t, rel, scan_cap=VERS_SCAN_CAP, show_cap=VERS_SHOW_CAP,
+                                          timeout=RECOVER_WALK_TIMEOUT, budget=VERS_BUDGET)
             if err:
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err})
             else:
+                _push_versions_manifest(t, rel, result)   # store/merge the tree; the UI reads it back
+                # return only a small summary (the full tree can exceed the intent-result cap; it lives
+                # in the manifest now, which the dashboard re-fetches once this completes).
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result",
-                         {"ok": True, "output": json.dumps(result)})
+                         {"ok": True, "output": json.dumps({"path": rel, "total": result.get("total") or 0,
+                                                             "truncated": bool(result.get("truncated"))})})
             print(f"  intent {iid} {target} recover-versions -> {'FAIL' if err else str(result.get('total'))+' file(s)'}")
             continue
         if action == "recover-walk":
@@ -193,6 +204,25 @@ def do_execute(cfg):
         print(f"  intent {iid} {target} {action}{' [dry]' if dry else ''} -> {'ok' if rc == 0 else 'FAIL'}")
     return len(intents)
 
+def _push_versions_manifest(t, rel, result):
+    """Store/refresh the browsable VERSIONS manifest for this dataset. The API merges by path: a
+    whole-dataset scan (rel='') replaces it; a subpath scan replaces just that subtree - so a manual
+    'Scan here' is kept, not thrown away, and reopening Versions shows a live tree, never an empty box."""
+    api_call("POST", "/api/v1/backup/agent/recovery-manifest",
+             {"target": t["name"], "kind": "versions", "ok": True, "path": rel or "",
+              "files": result.get("files") or {}, "truncated": bool(result.get("truncated")),
+              "total": result.get("total") or 0})
+
+def _versions_and_push(t):
+    """Nightly: build the whole-dataset versions tree (bounded by a wall-clock budget) and store it as the
+    versions manifest, so Versions always opens into a browsable tree seeded off-peak."""
+    result, err = C.scan_versions(t, "", scan_cap=VERS_SCAN_CAP, show_cap=VERS_SHOW_CAP,
+                                  timeout=RECOVER_WALK_TIMEOUT, budget=VERS_BUDGET)
+    if err or not result:
+        return False, 0, (err or "no result")
+    _push_versions_manifest(t, "", result)
+    return True, result.get("total") or 0, None
+
 def _walk_and_push(t):
     """Walk ONE dataset's deleted files (httm, bounded to this dataset via --one-filesystem), reduce to
     the newest version per file, gzip, and push it as the stored manifest. Read-only. Returns (ok, count,
@@ -232,8 +262,12 @@ def do_recovery_walk(cfg):
             continue
         ok, count, _ = _walk_and_push(t)
         if ok:
-            walked += 1
             print(f"  recovery walk {t['name']} -> {count} deleted file(s)")
+        vok, vcount, _ = _versions_and_push(t)             # also seed the browsable versions tree
+        if vok:
+            print(f"  versions walk {t['name']} -> {vcount} file(s) with history")
+        if ok or vok:
+            walked += 1
     return walked
 
 def main():
