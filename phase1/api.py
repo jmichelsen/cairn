@@ -624,7 +624,8 @@ NOTIFY_SH = os.environ.get("NOTIFY_SH", str(HERE.parent / "phase0" / "notify.sh"
 ALLOWED_ACTIONS = {"snapshot", "sync", "scrub", "pull",
                    "recover-points", "recover-search", "recover-deleted", "restore",
                    "recover-walk",       # on-demand deleted-files walk that FILLS the stored manifest
-                   "recover-versions"}   # folder-wide file version history (enumerate + batch httm)
+                   "recover-versions",   # folder-wide file version history (enumerate + batch httm)
+                   "recover-dirtree"}    # cheap folder tree (os.scandir dirs) that seeds the browser
 STATUS_INGEST_COLS = ["snap_age_src_s","snap_age_dst_s","repl_lag_s","pool_health","pool_cap_pct",
     "last_scrub_ts","usedbysnapshots","compressratio","key_status","archive_count","dedup_ratio",
     "logical_size","physical_size","last_check_ts","last_check_result","lock_state","handler_type",
@@ -865,7 +866,7 @@ async def create_action(request: Request):
             raise HTTPException(400, "recover-walk only valid for zfs-local targets")
         if action == "pull" and r["type"] != "zfs-local":
             raise HTTPException(400, "pull only valid for a zfs-local replica (the off-site copy)")
-        if (action == "snapshot" or action in RECOVER_ACTIONS or action == "recover-walk") and not r["source"]:
+        if (action == "snapshot" or action in RECOVER_ACTIONS or action in ("recover-walk", "recover-dirtree")) and not r["source"]:
             raise HTTPException(400, "action requires a dataset-backed target")
         if action == "restore" and not opts.get("version"):
             raise HTTPException(400, "restore requires a 'version' (snapshot file path from a search)")
@@ -921,18 +922,19 @@ def list_actions(limit: int = 20, target: str = None):
 # ---------------- recovery manifests: agent-walked "deleted files" cache per dataset --------------
 @app.get("/api/v1/backup/agent/recovery-due")
 def recovery_due(agent: str):
-    """Datasets this agent should (re)walk: enabled zfs-local targets whose deleted OR versions manifest is
-    missing or older than RECOVER_WALK_INTERVAL (both are refreshed together). Missing first, then stalest."""
+    """Datasets this agent should (re)walk: enabled zfs-local targets whose deleted-files OR dir-tree
+    manifest is missing or older than RECOVER_WALK_INTERVAL (both are refreshed together, both cheap-ish).
+    The versions manifest is NOT nightly - it fills on demand as folders are scanned. Missing first."""
     cutoff = int(time.time()) - RECOVER_WALK_INTERVAL
     with db() as conn:
         rows = conn.execute(
             "SELECT t.name, t.source FROM targets t "
             "LEFT JOIN recovery_manifests md ON md.target_id=t.id AND md.kind='deleted' "
-            "LEFT JOIN recovery_manifests mv ON mv.target_id=t.id AND mv.kind='versions' "
+            "LEFT JOIN recovery_manifests mt ON mt.target_id=t.id AND mt.kind='dirtree' "
             "WHERE t.agent=? AND t.enabled=1 AND t.type='zfs-local' AND t.source IS NOT NULL "
-            "AND (md.walked_ts IS NULL OR md.walked_ts < ? OR mv.walked_ts IS NULL OR mv.walked_ts < ?) "
-            "ORDER BY (md.walked_ts IS NULL OR mv.walked_ts IS NULL) DESC, "
-            "min(COALESCE(md.walked_ts,0), COALESCE(mv.walked_ts,0)) ASC",
+            "AND (md.walked_ts IS NULL OR md.walked_ts < ? OR mt.walked_ts IS NULL OR mt.walked_ts < ?) "
+            "ORDER BY (md.walked_ts IS NULL OR mt.walked_ts IS NULL) DESC, "
+            "min(COALESCE(md.walked_ts,0), COALESCE(mt.walked_ts,0)) ASC",
             (agent, cutoff, cutoff)).fetchall()
     return {"targets": [dict(r) for r in rows]}
 
@@ -1293,6 +1295,10 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .recdir .recdn{font-family:"Roboto Mono",monospace;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .recdir .recdc{flex:none;font:600 10px/1 "Roboto Mono",monospace;color:var(--acc2);background:var(--heatbg);border-radius:20px;padding:3px 8px}
 .recfp .recfi{margin-right:7px}
+.recscanbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0 6px;padding:11px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.recscanbtn{font-size:12px;font-weight:600;cursor:pointer;color:#fff;background:var(--acc);border:1px solid var(--acc);border-radius:8px;padding:7px 14px}
+.recscanbtn:hover{filter:brightness(1.08)}
+.recscanhint{font-size:11.5px;color:var(--mut)}
 .card.pair .pbadge{font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);border:1px solid var(--line);border-radius:5px;padding:1px 6px;margin-right:8px}
 .picn{width:15px;height:15px;vertical-align:-2px;margin-right:7px;color:var(--mut)}
 .phalves{display:flex;flex-direction:column;gap:10px;margin-top:11px}
@@ -1977,11 +1983,16 @@ async function reconAct(btn, action, tid, pair){
 // Points  = the dataset's snapshots (restore points).   Versions = one file's history across snapshots.
 // Deleted = files gone from live but still in snapshots. Restore = copy a chosen version to staging.
 var _recTarget=null, _recVers=[], _recLast=null, _recCachedTs=0;
-// client-side tree browser over a versions scan result (no round-trips to drill; "Scan here" re-scans)
-var _recTree=null, _recCwd=[], _recScanRoot='', _recScanMeta=null, _recDirs=[];
+// Versions browser: navigate the cheap nightly DIR tree client-side; scan a folder for file history on
+// demand (_recVersFiles = files-with-history from scans, keyed by path relative to the dataset root).
+var _recDirTree=null, _recVersFiles={}, _recScanned={}, _recCwd=[], _recScanMeta=null, _recDirs=[];
 function openRec(){ document.getElementById('recmodal').hidden=false; }
 function closeRec(){ document.getElementById('recmodal').hidden=true; }
-function recRefresh(){ if(_recLast) openRecover(_recLast.target, _recLast.kind, true); }
+function recRefresh(){
+  if(!_recLast) return;
+  if(_recLast.kind==='versions'){ scanFolder(_recCurPath()); return; }   // re-scan the current folder
+  openRecover(_recLast.target, _recLast.kind, true);
+}
 function recBanner(){   // "cached Nm ago" line when the listing was reused, else nothing
   return _recCachedTs ? '<p class=reccached>cached '+relTime(_recCachedTs)+' \\u00b7 Refresh to re-scan</p>' : '';
 }
@@ -2006,19 +2017,39 @@ async function openRecover(target, kind, refresh){
   openRec();
   if(kind==='deleted'){ _recLast={target:target, kind:'deleted', path:null}; if(rb) rb.hidden=false; await openDeleted(target, refresh); return; }
   if(kind==='points'){ _recLast={target:target, kind:'points', path:null}; if(rb) rb.hidden=false; await pointsScan(target); return; }
-  // versions: open straight into the nightly-seeded tree if we have one; a Refresh re-scans
-  if(refresh && _recLast && _recLast.kind==='versions'){ await versionsScan(target, _recLast.path||'', true); return; }
+  // versions: browse the dataset's real folders (cheap nightly dir tree); scan a folder for history on demand
+  _recLast={target:target, kind:'versions', path:''};
+  if(rb) rb.hidden=false;
+  await openVersions(target, refresh);
+}
+async function loadRecManifest(target, kind){
+  try{ return await (await fetch('/api/v1/backup/recovery-manifest?target='+encodeURIComponent(target)+'&kind='+kind)).json(); }
+  catch(e){ return null; }
+}
+async function openVersions(target, refresh){
   var body=document.getElementById('recbody');
-  body.innerHTML='<div class=hempty>loading\\u2026</div>';
-  var vm=null; try{ vm=await (await fetch('/api/v1/backup/recovery-manifest?target='+encodeURIComponent(target)+'&kind=versions')).json(); }catch(e){}
-  if(vm && vm.present && vm.manifest && Object.keys((vm.manifest.files)||{}).length){
-    _recLast={target:target, kind:'versions', path:''}; _recCachedTs=vm.walked_ts||0;
-    if(rb) rb.hidden=false;
-    renderFileVersions(vm.manifest);                     // browse the seeded tree; Scan here refreshes it
-    return;
+  if(!refresh){
+    var dt=await loadRecManifest(target,'dirtree');
+    if(dt && dt.present && dt.manifest && dt.manifest.tree){ showVersions(dt, await loadRecManifest(target,'versions')); return; }
   }
-  if(rb) rb.hidden=true;                                  // no seeded tree yet -> guided form
-  versionsForm(target, (_recLast && _recLast.kind==='versions') ? (_recLast.path||'') : '');
+  // no folder list yet (or refresh) - build it now (cheap: just directories) then browse
+  body.innerHTML='<div class=hempty>building the folder list for '+esc(target)+'\\u2026</div>';
+  var r,j;
+  try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:target, action:'recover-dirtree', requested_by:'ui'})}); j=await r.json(); }
+  catch(e){ body.innerHTML='<div class=hempty>request failed: '+esc(String(e))+'</div>'; return; }
+  if(!r.ok){ body.innerHTML='<div class=hempty>rejected: '+esc(j.detail||('HTTP '+r.status))+'</div>'; return; }
+  var out; try{ out=await pollAction(j.id, 300); }
+  catch(e){ body.innerHTML='<div class=hempty>Still building the folder list \\u2014 reopen Versions shortly.</div>'; return; }
+  var dt2=await loadRecManifest(target,'dirtree');
+  if(dt2 && dt2.present && dt2.manifest && dt2.manifest.tree){ showVersions(dt2, await loadRecManifest(target,'versions')); }
+  else { body.innerHTML='<div class=hempty>Could not build the folder list.</div>'; }
+}
+function showVersions(dt, vm){
+  _recDirTree = dt.manifest.tree || {};
+  _recScanMeta = {truncated:!!(dt.manifest && dt.manifest.truncated), count:(dt.manifest && dt.manifest.count)||0};
+  _recVersFiles = (vm && vm.present && vm.manifest && vm.manifest.files) ? vm.manifest.files : {};
+  _recCwd = []; _recCachedTs = dt.walked_ts || 0;
+  renderVersionsView();
 }
 async function pointsScan(target){
   var body=document.getElementById('recbody');
@@ -2033,39 +2064,25 @@ async function pointsScan(target){
   if(out.state!=='done'){ body.innerHTML='<div class=hempty>scan '+esc(out.state)+':</div><pre class=recpre>'+esc(out.output||'(no output)')+'</pre>'; return; }
   renderPoints(out.output);
 }
-function versionsForm(target, prefill){
+async function scanFolder(path){
+  // scan ONE folder's files for older versions (httm, on demand); the result merges into the versions
+  // manifest, and we reload it so the browsed tree shows this folder's files. Stays where you are.
+  var target=_recTarget;
   var body=document.getElementById('recbody');
-  body.innerHTML='<form class=recform onsubmit="submitVersions(event)">'
-    +'<label class=recflabel>Folder or file to scan <span>(relative to the dataset root)</span></label>'
-    +'<div class=recfrow><input id=recpath class=recinput type=text placeholder="e.g. Photos/2019   \\u00b7   blank = whole dataset" value="'+esc(prefill||'')+'"><button class=recscan type=submit>Scan</button></div>'
-    +'<p class=recfhint>Finds every file under it that has older snapshot versions, so you can pick one to restore. A big tree takes longer \\u2014 narrow the path to speed it up.</p></form>';
-  var el=document.getElementById('recpath'); if(el) el.focus();
-}
-function submitVersions(ev){ if(ev) ev.preventDefault(); versionsScan(_recTarget, (document.getElementById('recpath').value||'').trim(), true); }
-async function versionsScan(target, path, refresh){
-  _recLast={target:target, kind:'versions', path:path}; _recCachedTs=0;
-  document.getElementById('rectitle').textContent='File versions \\u00b7 '+target+(path?(' / '+path):'');
-  var rb=document.getElementById('recrefresh'); if(rb) rb.hidden=false;
-  var body=document.getElementById('recbody');
-  body.innerHTML='<div class=hempty>scanning '+esc(path?(target+' / '+path):(target+' (whole dataset)'))+' for file versions\\u2026<br>this can take a while on a large folder.</div>';
-  var b={target:target, action:'recover-versions', requested_by:'ui'}; if(path) b.path=path; if(refresh) b.refresh=true;
+  body.innerHTML='<div class=hempty>scanning '+esc(path?(target+' / '+path):(target+' (dataset root)'))+' for older versions\\u2026</div>';
+  var b={target:target, action:'recover-versions', requested_by:'ui', refresh:true}; if(path) b.path=path;
   var r,j;
   try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); j=await r.json(); }
   catch(e){ body.innerHTML='<div class=hempty>request failed: '+esc(String(e))+'</div>'; return; }
   if(!r.ok){ body.innerHTML='<div class=hempty>rejected: '+esc(j.detail||('HTTP '+r.status))+'</div>'; return; }
-  if(j.cached){ _recCachedTs=j.cached_ts||0; }
   var out; try{ out=await pollAction(j.id, 300); }
-  catch(e){ body.innerHTML='<div class=hempty>Scan still running \\u2014 reopen Versions shortly.</div>'; return; }
+  catch(e){ body.innerHTML='<div class=hempty>Scan still running \\u2014 reopen this folder shortly.</div>'; return; }
   if(out.state!=='done'){ body.innerHTML='<div class=hempty>scan '+esc(out.state)+':</div><pre class=recpre>'+esc(out.output||'(no output)')+'</pre>'; return; }
-  // the scan stored/merged the tree into the manifest; read it back and open there, drilled to the path
-  var vm=null; try{ vm=await (await fetch('/api/v1/backup/recovery-manifest?target='+encodeURIComponent(target)+'&kind=versions')).json(); }catch(e){}
-  if(vm && vm.present && vm.manifest){
-    _recCachedTs=0; renderFileVersions(vm.manifest);
-    if(path){ _recCwd=path.split('/').filter(Boolean); renderVersionsView(); }   // stay where you scanned
-    return;
-  }
-  var summ={}; try{ summ=JSON.parse(out.output||'{}'); }catch(e){}
-  body.innerHTML='<div class=hempty>Scan complete'+(summ.total!=null?(' \\u2014 '+summ.total+' file(s) with history'):'')+', but the tree could not be loaded. Reopen Versions.</div>';
+  var vm=await loadRecManifest(target,'versions');
+  if(vm && vm.present && vm.manifest && vm.manifest.files){ _recVersFiles=vm.manifest.files; }
+  _recScanned[path||'']=1;                                 // mark this folder scanned (even if 0 changes)
+  _recCwd = path ? path.split('/').filter(Boolean) : [];  // stay where you scanned
+  renderVersionsView();
 }
 async function openDeleted(target, refresh){
   // Deleted is manifest-backed. Normal open serves the stored manifest instantly; a Refresh (or the very
@@ -2106,58 +2123,49 @@ function renderPoints(txt){
   body.innerHTML=recBanner()+'<p class=recnote>'+lines.length+' restore point'+(lines.length==1?'':'s')+'. To recover files from one, use <b>Versions</b> (one file\\u2019s history) or <b>Deleted</b> (files no longer live).</p>'
     +'<div class=rectblwrap><table class=rectbl><thead><tr><th>Snapshot</th><th>Created</th><th>Age</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
-function renderFileVersions(d){
-  // d = {path, files:{ relpath: [ {path,size,modify_time,live} ] }, total, shown, truncated}. Build a
-  // tree from the returned paths so the flat scan can be BROWSED folder-by-folder, all client-side; the
-  // path bar tracks where you are, and "Scan here" re-scans that folder (e.g. to expand a capped result).
-  _recScanRoot = d.path || '';
-  _recScanMeta = {total:d.total||0, shown:d.shown||0, truncated:!!d.truncated};
-  _recTree = _recBuildTree(d.files||{});
-  _recCwd = [];
-  renderVersionsView();
-}
-function _recBuildTree(files){
-  var root={d:{}, f:{}};
-  Object.keys(files).forEach(function(rel){
-    var segs=rel.split('/'); var fname=segs.pop(); var n=root;
-    segs.forEach(function(s){ if(!s) return; if(!n.d[s]) n.d[s]={d:{}, f:{}}; n=n.d[s]; });
-    n.f[fname]=files[rel];
-  });
-  return root;
-}
-function _recNodeAt(cwd){ var n=_recTree||{d:{},f:{}}; for(var i=0;i<cwd.length;i++){ n=(n.d[cwd[i]]||{d:{},f:{}}); } return n; }
-function _recCount(n){ var c=Object.keys(n.f).length; Object.keys(n.d).forEach(function(k){ c+=_recCount(n.d[k]); }); return c; }
-function _recCurPath(){
-  var base=_recScanRoot?_recScanRoot.split('/').filter(Boolean):[];
-  return base.concat(_recCwd).join('/');
+function _recDirNodeAt(cwd){ var n=_recDirTree||{}; for(var i=0;i<cwd.length;i++){ n=(n[cwd[i]]||{}); } return n; }
+function _recCurPath(){ return _recCwd.join('/'); }
+function _recFilesUnder(cp){   // count of known files-with-history at or below a folder (from scans)
+  var pfx=cp?cp+'/':''; var c=0;
+  for(var k in _recVersFiles){ if(k===cp || k.indexOf(pfx)===0) c++; }
+  return c;
 }
 function recCd(btn){ var name=_recDirs[parseInt(btn.getAttribute('data-di'),10)]; if(name==null) return; _recCwd.push(name); renderVersionsView(); }
 function recCdTo(i){ _recCwd = (i<0) ? [] : _recCwd.slice(0, i+1); renderVersionsView(); }
 function renderVersionsView(){
   var body=document.getElementById('recbody'); _recVers=[]; _recDirs=[];
-  var node=_recNodeAt(_recCwd);
+  var node=_recDirNodeAt(_recCwd);
   var cp=_recCurPath();
-  // persistent path bar: current location, editable; Scan here re-scans it on the agent
-  var html='<form class=recform onsubmit="submitVersions(event)"><div class=recfrow>'
-    +'<input id=recpath class=recinput type=text value="'+esc(cp)+'" placeholder="blank = whole dataset">'
-    +'<button class=recscan type=submit>Scan here</button></div></form>';
-  // breadcrumb within the current scan (client-side nav)
-  var crumbs='<span class=reccrumb0 onclick="recCdTo(-1)">'+(_recScanRoot?esc(_recScanRoot):'dataset root')+'</span>';
+  // breadcrumb (client-side folder nav over the cheap dir tree)
+  var crumbs='<span class=reccrumb0 onclick="recCdTo(-1)">dataset root</span>';
   _recCwd.forEach(function(seg,i){ crumbs+='<span class=recsep>/</span><span class=reccrumbi data-ci="'+i+'" onclick="recCdTo('+i+')">'+esc(seg)+'</span>'; });
-  html+='<div class=reccrumb>'+crumbs+'</div>'+recBanner();
+  var html='<div class=reccrumb>'+crumbs+'</div>'+recBanner();
   if(_recScanMeta && _recScanMeta.truncated){
-    html+='<p class=recnote>This scan was capped at '+_recScanMeta.shown+' of '+_recScanMeta.total+' files with history. Drill into a folder and press <b>Scan here</b> for its full contents.</p>';
+    html+='<p class=recnote>The folder list was capped at '+_recScanMeta.count+' folders. Deep/large trees may be incomplete.</p>';
   }
-  var dirs=Object.keys(node.d).sort(function(a,b){return a.toLowerCase()<b.toLowerCase()?-1:1;});
-  var files=Object.keys(node.f).sort(function(a,b){return a.toLowerCase()<b.toLowerCase()?-1:1;});
-  if(!dirs.length && !files.length){ body.innerHTML=html+'<div class=hempty>No files with older versions here.</div>'; return; }
+  // scan this folder for older versions (the httm part, on demand)
+  var scanned=!!_recScanned[cp];
+  html+='<div class=recscanbar><button class=recscanbtn onclick="scanFolder(_recCurPath())">'
+    +(scanned?'Re-scan this folder for versions':'Scan this folder for older versions')+'</button>'
+    +'<span class=recscanhint>looks for files here that changed since a snapshot</span></div>';
+  // files-with-history directly in this folder (from prior scans)
+  var levelFiles={};
+  for(var k in _recVersFiles){ var slash=k.lastIndexOf('/'); var dir=slash>=0?k.slice(0,slash):''; if(dir===cp) levelFiles[k.slice(slash+1)]=_recVersFiles[k]; }
+  var dirs=Object.keys(node).sort(function(a,b){return a.toLowerCase()<b.toLowerCase()?-1:1;});
+  var fnames=Object.keys(levelFiles).sort(function(a,b){return a.toLowerCase()<b.toLowerCase()?-1:1;});
+  if(!dirs.length && !fnames.length){
+    html+='<div class=hempty>'+(scanned?'No files with older versions in this folder.':'Empty folder, or not scanned yet.')+'</div>';
+    body.innerHTML=html; return;
+  }
   html+='<div class=rectree>';
   dirs.forEach(function(name){
     _recDirs.push(name);
-    html+='<div class=recdir data-di="'+(_recDirs.length-1)+'" onclick="recCd(this)"><span class=recdi>\\ud83d\\udcc1</span><span class=recdn>'+esc(name)+'</span><span class=recdc>'+_recCount(node.d[name])+'</span></div>';
+    var sub=cp?cp+'/'+name:name; var cnt=_recFilesUnder(sub);
+    html+='<div class=recdir data-di="'+(_recDirs.length-1)+'" onclick="recCd(this)"><span class=recdi>\\ud83d\\udcc1</span><span class=recdn>'+esc(name)+'</span>'
+      +(cnt?'<span class=recdc>'+cnt+'</span>':'')+'</div>';
   });
-  files.forEach(function(name){
-    var vers=node.f[name]||[];
+  fnames.forEach(function(name){
+    var vers=levelFiles[name]||[];
     var rows=vers.map(function(v){
       var act;
       if(v.live){ act='<span class=reclive>live</span>'; }
