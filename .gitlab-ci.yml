@@ -14,8 +14,9 @@ lint-and-test:
     - if: '$CI_COMMIT_BRANCH'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
   script:
-    # ci.Dockerfile bakes nodejs (for check_js's `node --check`) + pip deps as cached layers and runs the
-    # checks (py_compile + check_js + pytest) in its final layer; a failed build IS a failed test. BuildKit
-    # inline cache + --cache-from reuse the deps across runs, so this is seconds once warm (the same host
-    # daemon / cairn-ci:latest tag the deploy pipeline warms).
-    - DOCKER_BUILDKIT=1 docker build --progress=plain --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from cairn-ci:latest -t cairn-ci:latest -f ci.Dockerfile .
+    # The Dockerfile's `ci` target adds nodejs (for check_js's `node --check`) + pytest and runs the checks
+    # (py_compile + check_js + pytest) as its final layer; a failed build IS a failed test. It shares the
+    # `deps` base with the production `runtime` target, so CI tests the exact versions prod ships. BuildKit
+    # inline cache + --cache-from reuse the deps across runs, so this is seconds once warm (same host daemon
+    # / cairn-ci:latest tag the deploy pipeline warms).
+    - DOCKER_BUILDKIT=1 docker build --progress=plain --target ci --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from cairn-ci:latest -t cairn-ci:latest -f Dockerfile .
