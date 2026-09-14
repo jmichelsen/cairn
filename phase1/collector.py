@@ -1435,7 +1435,9 @@ def reduce_deleted_manifest(raw_json, cap=2000):
 
     httm's RECURSIVE json is a STREAM of concatenated pretty-printed objects (one per directory), not a
     single object, so we raw_decode successively and merge. Each object is
-    {"<path>": [ {"path":..., "metadata":{"size":..., "modify_time":...}}, ... ]}.
+    {"<path>": [ {"path":..., "metadata":{"size":..., "modify_time":...}}, ... ]}. This framing is
+    UNDOCUMENTED (the README only shows a single-file --json giving one object), so we also accept a single
+    object and a top-level array of such objects - if a future httm switches form, this still works.
     Returns (json_string, total_found): json holds up to `cap` newest entries as
     {"<path>": {"path","size","modify_time","versions"}}; total_found is the full count before the cap.
     Newest is by parsed modify_time (httm format "Tue Sep 08 08:35:48 2026"), -1 when it won't parse."""
@@ -1460,10 +1462,12 @@ def reduce_deleted_manifest(raw_json, cap=2000):
             obj, i = dec.raw_decode(text, i)
         except ValueError:
             break   # partial/garbage tail - stop, keep what parsed
-        if isinstance(obj, dict):
-            for path, vers in obj.items():
-                if isinstance(vers, list) and vers:
-                    merged.setdefault(path, []).extend(vers)
+        # accept a per-directory object (today), or a future top-level array of such objects
+        for chunk in (obj if isinstance(obj, list) else [obj]):
+            if isinstance(chunk, dict):
+                for path, vers in chunk.items():
+                    if isinstance(vers, list) and vers:
+                        merged.setdefault(path, []).extend(vers)
 
     rows = []
     for path, vers in merged.items():
