@@ -304,8 +304,10 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
     # (snapshot needs zfs delegation; scrub needs a pool root + the provisioned sudo wrapper).
     user, groups = _whoami()
     wrapper = os.environ.get("CAIRN_ZPOOL_WRAPPER", "/opt/cairn/phase1/zpool-scrub.sh")
+    _mp, _mperr = _mountpoint(ds)      # file-level recovery (Deleted/Versions/Restore) needs a real mount
     caps = {"snapshot": zfs_delegated(ds, "snapshot", user, groups),
-            "scrub": (ds == pool) and can_sudo(wrapper)}
+            "scrub": (ds == pool) and can_sudo(wrapper),
+            "recoverable": _mperr is None}   # e.g. an unmounted pool (mountpoint=none) can't be browsed
     st["detail_json"] = json.dumps(dict(reasons=reasons, snap_count=len(snaps),
                                         scrub=scrub_info, caps=caps))
     return [st]
