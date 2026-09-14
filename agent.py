@@ -142,6 +142,15 @@ def do_execute(cfg):
             api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                      {"ok": False, "output": f"agent '{NAME}' does not manage target '{target}'"})
             continue
+        if action == "recover-walk":
+            # explicit UI refresh: walk this dataset now (bypassing the off-peak window) and STORE the
+            # manifest, so the scan is kept, not discarded. The intent result is just a small summary.
+            ok, count, err = _walk_and_push(t)
+            api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                     {"ok": ok, "output": (f"manifest refreshed: {count} deleted file(s)" if ok
+                                           else (err or "walk failed"))})
+            print(f"  intent {iid} {target} recover-walk -> {'ok' if ok else 'FAIL'} ({count})")
+            continue
         cmd, err = C.build_command(action, t, opts)
         if err:
             api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err})
@@ -173,11 +182,34 @@ def do_execute(cfg):
         print(f"  intent {iid} {target} {action}{' [dry]' if dry else ''} -> {'ok' if rc == 0 else 'FAIL'}")
     return len(intents)
 
+def _walk_and_push(t):
+    """Walk ONE dataset's deleted files (httm, bounded to this dataset via --one-filesystem), reduce to
+    the newest version per file, gzip, and push it as the stored manifest. Read-only. Returns (ok, count,
+    err). Used by both the nightly walk and the on-demand 'recover-walk' intent, so a manual refresh fills
+    the manifest instead of throwing the scan away."""
+    cmd, err = C.build_recovery_walk("deleted", t)
+    if err or not cmd:
+        api_call("POST", "/api/v1/backup/agent/recovery-manifest",
+                 {"target": t["name"], "kind": "deleted", "ok": False, "error": err or "no command"})
+        return False, 0, (err or "no command")
+    rc, so, se = C.run(cmd, timeout=RECOVER_WALK_TIMEOUT)
+    if rc != 0:
+        e = (se or so).strip()[-500:]
+        api_call("POST", "/api/v1/backup/agent/recovery-manifest",
+                 {"target": t["name"], "kind": "deleted", "ok": False, "error": e})
+        return False, 0, e
+    manifest, count = C.reduce_deleted_manifest(so)
+    raw = manifest.encode()
+    api_call("POST", "/api/v1/backup/agent/recovery-manifest",
+             {"target": t["name"], "kind": "deleted", "ok": True,
+              "gz_b64": base64.b64encode(gzip.compress(raw)).decode(),
+              "entry_count": count, "raw_bytes": len(raw), "walked_ts": int(time.time())})
+    return True, count, None
+
 def do_recovery_walk(cfg):
     """Nightly-cadence 'deleted files' manifest builder. The API returns only the datasets whose manifest
-    is missing or stale (walk interval), so this is a no-op most loops. For each, walk with httm (bounded
-    to this dataset via --one-filesystem), reduce to the newest version per file, gzip, and push. Walking
-    is read-only; the manifest turns the otherwise-slow on-demand deleted scan into an instant lookup."""
+    is missing or stale (walk interval), so this is a no-op most loops. Off-peak-gated (the disk-heavy
+    walk stays off the pool during the day); an explicit UI 'recover-walk' bypasses this and runs now."""
     if not _in_walk_window():
         return 0                       # off-peak only: stay off the disks during the day
     tmap = {t["name"]: t for t in cfg.get("targets", [])}
@@ -187,24 +219,10 @@ def do_recovery_walk(cfg):
         t = tmap.get(d.get("name"))
         if not t:
             continue
-        cmd, err = C.build_recovery_walk("deleted", t)
-        if err or not cmd:
-            api_call("POST", "/api/v1/backup/agent/recovery-manifest",
-                     {"target": d.get("name"), "kind": "deleted", "ok": False, "error": err or "no command"})
-            continue
-        rc, so, se = C.run(cmd, timeout=RECOVER_WALK_TIMEOUT)
-        if rc != 0:
-            api_call("POST", "/api/v1/backup/agent/recovery-manifest",
-                     {"target": t["name"], "kind": "deleted", "ok": False, "error": (se or so).strip()[-500:]})
-            continue
-        manifest, count = C.reduce_deleted_manifest(so)
-        raw = manifest.encode()
-        api_call("POST", "/api/v1/backup/agent/recovery-manifest",
-                 {"target": t["name"], "kind": "deleted", "ok": True,
-                  "gz_b64": base64.b64encode(gzip.compress(raw)).decode(),
-                  "entry_count": count, "raw_bytes": len(raw), "walked_ts": int(time.time())})
-        walked += 1
-        print(f"  recovery walk {t['name']} -> {count} deleted file(s), {len(raw)}B raw")
+        ok, count, _ = _walk_and_push(t)
+        if ok:
+            walked += 1
+            print(f"  recovery walk {t['name']} -> {count} deleted file(s)")
     return walked
 
 def main():
