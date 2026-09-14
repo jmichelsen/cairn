@@ -896,6 +896,24 @@ async def create_action(request: Request):
                     return {"id": c["id"], "state": "done", "target": target, "action": action,
                             "agent": r["agent"], "opts": opts, "cached": True,
                             "cached_ts": c["result_ts"]}
+        # Collapse rapid duplicate clicks: recovery actions are slow and the Activity log updates on a
+        # delay, so a user who sees nothing appear tends to re-click. If an identical intent (same target,
+        # action and path) is already pending/claimed, reuse it instead of piling up a backlog. Restore is
+        # excluded (each is a distinct copy).
+        if action in ("recover-points", "recover-search", "recover-deleted", "recover-versions",
+                      "recover-walk", "recover-dirtree"):
+            want_path = opts.get("path") or ""
+            for e in conn.execute(
+                    "SELECT id, opts FROM intents WHERE target_id=? AND action=? "
+                    "AND state IN ('pending','claimed') ORDER BY id DESC LIMIT 25",
+                    (r["id"], action)).fetchall():
+                try:
+                    same = (json.loads(e["opts"] or "{}").get("path") or "") == want_path
+                except (ValueError, TypeError):
+                    same = False
+                if same:
+                    return {"id": e["id"], "state": "pending", "target": target, "action": action,
+                            "agent": r["agent"], "opts": opts, "deduped": True}
         cur = conn.execute(
             "INSERT INTO intents(target_id,action,opts,state,requested_by,created_ts) "
             "VALUES(?,?,?,'pending',?,strftime('%s','now'))",
@@ -1252,6 +1270,7 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .modalhd .rechdbtns{display:flex;align-items:center;gap:10px}
 .recrefresh{border:1px solid var(--line);background:var(--surf);color:var(--acc);border-radius:7px;padding:4px 11px;font-size:11px;font-weight:600;cursor:pointer}
 .recrefresh:hover{border-color:var(--acc)}
+.recrefresh:disabled,.recscanbtn:disabled{opacity:.5;cursor:progress}
 .recnote{margin:0 0 12px;font-size:12px;color:var(--mut);line-height:1.5}
 .recnote code{font-family:"Roboto Mono",monospace;font-size:11px;background:var(--heatbg);padding:1px 5px;border-radius:4px}
 .reccached{font-size:11px;color:var(--mut);margin:0 0 12px}
@@ -1987,9 +2006,11 @@ var _recTarget=null, _recVers=[], _recLast=null, _recCachedTs=0;
 // demand (_recVersFiles = files-with-history from scans, keyed by path relative to the dataset root).
 var _recDirTree=null, _recVersFiles={}, _recScanned={}, _recCwd=[], _recScanMeta=null, _recDirs=[];
 function openRec(){ document.getElementById('recmodal').hidden=false; }
-function closeRec(){ document.getElementById('recmodal').hidden=true; }
+function closeRec(){ document.getElementById('recmodal').hidden=true; recBusy(false); }
+var _recBusy=false;
+function recBusy(on){ _recBusy=on; var b=document.getElementById('recrefresh'); if(b) b.disabled=on; }
 function recRefresh(){
-  if(!_recLast) return;
+  if(!_recLast || _recBusy) return;                                     // ignore repeat clicks while busy
   if(_recLast.kind==='versions'){ scanFolder(_recCurPath()); return; }   // re-scan the current folder
   openRecover(_recLast.target, _recLast.kind, true);
 }
@@ -2010,17 +2031,20 @@ async function pollAction(id, maxTries){                // resolve to {state,out
   throw new Error('timed out');
 }
 async function openRecover(target, kind, refresh){
+  if(_recBusy) return;                                    // a scan is already in flight
   _recTarget=target; _recCachedTs=0;
   var titles={points:'Restore points', versions:'File versions', deleted:'Deleted files'};
   document.getElementById('rectitle').textContent=titles[kind]+' \\u00b7 '+target;
   var rb=document.getElementById('recrefresh');
-  openRec();
-  if(kind==='deleted'){ _recLast={target:target, kind:'deleted', path:null}; if(rb) rb.hidden=false; await openDeleted(target, refresh); return; }
-  if(kind==='points'){ _recLast={target:target, kind:'points', path:null}; if(rb) rb.hidden=false; await pointsScan(target); return; }
-  // versions: browse the dataset's real folders (cheap nightly dir tree); scan a folder for history on demand
-  _recLast={target:target, kind:'versions', path:''};
-  if(rb) rb.hidden=false;
-  await openVersions(target, refresh);
+  openRec(); recBusy(true);
+  try{
+    if(kind==='deleted'){ _recLast={target:target, kind:'deleted', path:null}; if(rb) rb.hidden=false; await openDeleted(target, refresh); return; }
+    if(kind==='points'){ _recLast={target:target, kind:'points', path:null}; if(rb) rb.hidden=false; await pointsScan(target); return; }
+    // versions: browse the dataset's real folders (cheap nightly dir tree); scan a folder on demand
+    _recLast={target:target, kind:'versions', path:''};
+    if(rb) rb.hidden=false;
+    await openVersions(target, refresh);
+  } finally { recBusy(false); }
 }
 async function loadRecManifest(target, kind){
   try{ return await (await fetch('/api/v1/backup/recovery-manifest?target='+encodeURIComponent(target)+'&kind='+kind)).json(); }
@@ -2067,22 +2091,26 @@ async function pointsScan(target){
 async function scanFolder(path){
   // scan ONE folder's files for older versions (httm, on demand); the result merges into the versions
   // manifest, and we reload it so the browsed tree shows this folder's files. Stays where you are.
+  if(_recBusy) return;                                    // one scan at a time (avoids duplicate intents)
+  recBusy(true);
   var target=_recTarget;
   var body=document.getElementById('recbody');
-  body.innerHTML='<div class=hempty>scanning '+esc(path?(target+' / '+path):(target+' (dataset root)'))+' for older versions\\u2026</div>';
-  var b={target:target, action:'recover-versions', requested_by:'ui', refresh:true}; if(path) b.path=path;
-  var r,j;
-  try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); j=await r.json(); }
-  catch(e){ body.innerHTML='<div class=hempty>request failed: '+esc(String(e))+'</div>'; return; }
-  if(!r.ok){ body.innerHTML='<div class=hempty>rejected: '+esc(j.detail||('HTTP '+r.status))+'</div>'; return; }
-  var out; try{ out=await pollAction(j.id, 300); }
-  catch(e){ body.innerHTML='<div class=hempty>Scan still running \\u2014 reopen this folder shortly.</div>'; return; }
-  if(out.state!=='done'){ body.innerHTML='<div class=hempty>scan '+esc(out.state)+':</div><pre class=recpre>'+esc(out.output||'(no output)')+'</pre>'; return; }
-  var vm=await loadRecManifest(target,'versions');
-  if(vm && vm.present && vm.manifest && vm.manifest.files){ _recVersFiles=vm.manifest.files; }
-  _recScanned[path||'']=1;                                 // mark this folder scanned (even if 0 changes)
-  _recCwd = path ? path.split('/').filter(Boolean) : [];  // stay where you scanned
-  renderVersionsView();
+  body.innerHTML='<div class=hempty>scanning '+esc(path?(target+' / '+path):(target+' (dataset root)'))+' for older versions\\u2026<br>queued for the agent \\u2014 this can take a minute.</div>';
+  try{
+    var b={target:target, action:'recover-versions', requested_by:'ui', refresh:true}; if(path) b.path=path;
+    var r,j;
+    try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); j=await r.json(); }
+    catch(e){ body.innerHTML='<div class=hempty>request failed: '+esc(String(e))+'</div>'; return; }
+    if(!r.ok){ body.innerHTML='<div class=hempty>rejected: '+esc(j.detail||('HTTP '+r.status))+'</div>'; return; }
+    var out; try{ out=await pollAction(j.id, 300); }
+    catch(e){ body.innerHTML='<div class=hempty>Scan still running \\u2014 reopen this folder shortly.</div>'; return; }
+    if(out.state!=='done'){ body.innerHTML='<div class=hempty>scan '+esc(out.state)+':</div><pre class=recpre>'+esc(out.output||'(no output)')+'</pre>'; return; }
+    var vm=await loadRecManifest(target,'versions');
+    if(vm && vm.present && vm.manifest && vm.manifest.files){ _recVersFiles=vm.manifest.files; }
+    _recScanned[path||'']=1;                               // mark this folder scanned (even if 0 changes)
+    _recCwd = path ? path.split('/').filter(Boolean) : []; // stay where you scanned
+    renderVersionsView();
+  } finally { recBusy(false); }
 }
 async function openDeleted(target, refresh){
   // Deleted is manifest-backed. Normal open serves the stored manifest instantly; a Refresh (or the very
