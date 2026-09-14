@@ -1581,7 +1581,10 @@ def scan_versions(t, rel, scan_cap=1500, show_cap=300, ver_cap=15, timeout=900):
             for p, vers in o.items():
                 if isinstance(vers, list):
                     merged.setdefault(p, []).extend(vers)
-    fdict, total = _reduce_versions(merged, mp, show_cap, ver_cap)
+    # key files relative to the SCANNED folder (not the mountpoint) so the dashboard tree starts cleanly
+    # at the scan root; for a single-file scan, relative to its parent so the filename shows.
+    treebase = base if os.path.isdir(base) else os.path.dirname(base)
+    fdict, total = _reduce_versions(merged, treebase, show_cap, ver_cap)
     return {"path": rel or "", "files": fdict, "total": total, "shown": len(fdict),
             "truncated": truncated or (total > len(fdict)), "scanned": scanned}, None
 
