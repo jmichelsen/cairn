@@ -158,11 +158,13 @@ def test_ci_status_roundtrip_and_badge_render():
     assert names.get("tests") == "passed"
 
 
-def test_deploy_status_stored_but_not_public():
+def test_deploy_status_stored_but_never_public():
+    # cairn-deploy status is stored (available via the authed /api/v1/ci/status) but must never be
+    # served over the public badge route, even after it has a value.
     with api.db() as conn:
         conn.execute("INSERT INTO ci_status(name,status,url,updated_ts) VALUES('deploy','failed','',7) "
                      "ON CONFLICT(name) DO UPDATE SET status='failed',updated_ts=7")
         conn.commit()
-    assert api.ci_badge("deploy").status_code == 404          # still not public
-    html = api._ci_badges_html()                              # but present on the authed dashboard
-    assert "deploy" in html and "failed" in html
+    assert api.ci_badge("deploy").status_code == 404
+    names = {r["name"]: r["status"] for r in api.ci_status_list()["status"]}
+    assert names.get("deploy") == "failed"

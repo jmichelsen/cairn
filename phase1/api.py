@@ -1661,7 +1661,8 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .sumverd .vs{color:var(--mut);font-size:12.5px;margin-top:6px}
 .sumverd.ok{color:var(--ok)} .sumverd.warn{color:var(--warn)} .sumverd.crit{color:var(--crit)} .sumverd.unk{color:var(--unk)}
 .sumchips{display:flex;gap:9px;flex-wrap:wrap}
-.cibadge{display:inline-flex;text-decoration:none} .cibadge svg{display:block}
+.cfoot{text-align:center;color:var(--mut);font-size:11.5px;padding:16px 24px 22px}
+.cfoot a{color:var(--mut)} .cfoot a:hover{color:var(--acc)}
 .sumchip{display:inline-flex;align-items:center;gap:7px;background:var(--surf);border:1px solid var(--line);
   border-radius:9px;padding:7px 12px;font:12px "Red Hat Text",sans-serif;color:var(--mut);cursor:pointer;
   appearance:none;-webkit-appearance:none}
@@ -2689,27 +2690,6 @@ def _heatmap(order_names):
         out += f'<tr><td class="hname">{_esc(name)}</td>{cells}</tr>'
     return out, f"{days[0]} → {days[-1]}"
 
-def _ci_badges_html(names=("tests", "deploy")):
-    """Inline the CI status badges for the AUTHED dashboard - both the public 'tests' and the
-    internal-only 'deploy'. Rendered server-side (not via the public /badge route) so 'deploy' never
-    needs a public URL; each links to its stored (private GitLab) pipeline for the signed-in admin."""
-    with db() as conn:
-        rows = {r["name"]: r for r in conn.execute(
-            "SELECT name,status,url FROM ci_status").fetchall()}
-    parts = []
-    for name in names:
-        r = rows.get(name)
-        status = r["status"] if r else "unknown"
-        svg = _badge_svg(name, status, _badge_color(status))
-        url = r["url"] if (r and r["url"]) else ""
-        if url:
-            parts.append(f'<a class=cibadge href="{_esc(url)}" target=_blank rel=noopener '
-                         f'title="{_esc(name)} pipeline">{svg}</a>')
-        else:
-            parts.append(f'<span class=cibadge title="{_esc(name)}: no pipeline yet">{svg}</span>')
-    return ('<div class=sumci style="display:flex;gap:6px;align-items:center;margin-left:14px">'
-            + "".join(parts) + '</div>')
-
 def _hero_steel(rows, h, gpct, glabel):
     """Steel-style summary header: verdict + 3-2-1 badge / capacity / restore-points tiles.
     An alternative to the 14-day heatmap hero (toggled client-side)."""
@@ -2757,7 +2737,6 @@ def _hero_steel(rows, h, gpct, glabel):
     <div class=sumband>
       <div class="sumverd {vcls}" id=sumverd>{shield}<div><div class=vt>{verdict}</div><div class=vs>{vsub}</div></div></div>
       <div class=sumchips>{chips}</div>
-      {_ci_badges_html()}
       <div class=sumasof>as of<br><b>{ts}</b></div>
     </div>
     <div class=sumtiles>
@@ -2776,7 +2755,10 @@ def _shell(inner):
             f"<link rel=icon href=/favicon.ico>"
             f"<title>Cairn</title>{FONTS}{PAGE_STYLE}</head><body>"
             f"<div class=panel>{inner}"
-            f"<form id=lo method=post action=/logout hidden></form></div>{PAGE_SCRIPT}</body></html>")
+            f"<form id=lo method=post action=/logout hidden></form>"
+            f'<footer class=cfoot>Cairn v{_esc(CAIRN_VERSION)} &middot; '
+            f'<a href="https://github.com/jmichelsen/cairn" target=_blank rel=noopener>source on GitHub</a>'
+            f"</footer></div>{PAGE_SCRIPT}</body></html>")
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
