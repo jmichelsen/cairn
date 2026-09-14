@@ -117,3 +117,52 @@ def test_versions_manifest_merge_by_subtree():
                           (tid,)).fetchone()[0]
     files = json.loads(_gz.decompress(gz).decode())["files"]
     assert set(files) == {"a/x", "a/new", "b/z"}   # a/y dropped, a/new added, b/z untouched
+
+
+# ---- CI status broker + public badge ----------------------------------------------------------
+def test_badge_color_mapping():
+    assert api._badge_color("passed") == "#4c1"
+    assert api._badge_color("SUCCESS") == "#4c1"      # case-insensitive
+    assert api._badge_color("failed") == "#e05d44"
+    assert api._badge_color("running") == "#007ec6"
+    assert api._badge_color("whatever") == api._BADGE_DEFAULT_COLOR
+    assert api._badge_color(None) == api._BADGE_DEFAULT_COLOR
+
+
+def test_badge_svg_is_well_formed_and_reflects_status():
+    import xml.dom.minidom as _x
+    svg = api._badge_svg("tests", "passed", api._badge_color("passed"))
+    _x.parseString(svg)                     # raises on malformed XML
+    assert "tests" in svg and "passed" in svg and "#4c1" in svg
+
+
+def test_public_badge_only_serves_allowlisted_names():
+    # 'tests' is public (default allowlist); 'deploy' is internal-only and must 404 publicly.
+    ok = api.ci_badge("tests")
+    assert ok.status_code == 200 and ok.media_type == "image/svg+xml"
+    assert api.ci_badge("deploy").status_code == 404
+    assert api.ci_badge("nope").status_code == 404
+
+
+def test_ci_status_roundtrip_and_badge_render():
+    now = 12345
+    with api.db() as conn:
+        conn.execute("INSERT INTO ci_status(name,status,ref,url,updated_ts) VALUES(?,?,?,?,?) "
+                     "ON CONFLICT(name) DO UPDATE SET status=excluded.status,updated_ts=excluded.updated_ts",
+                     ("tests", "passed", "main", "https://gl/x/-/pipelines/1", now))
+        conn.commit()
+    body = api.ci_badge("tests").body.decode()
+    assert "passed" in body and "#4c1" in body
+    # the store round-trips through the list endpoint
+    names = {r["name"]: r["status"] for r in api.ci_status_list()["status"]}
+    assert names.get("tests") == "passed"
+
+
+def test_deploy_status_stored_but_not_public():
+    with api.db() as conn:
+        conn.execute("INSERT INTO ci_status(name,status,url,updated_ts) VALUES('deploy','failed','',7) "
+                     "ON CONFLICT(name) DO UPDATE SET status='failed',updated_ts=7")
+        conn.commit()
+    assert api.ci_badge("deploy").status_code == 404          # still not public
+    html = api._ci_badges_html()                              # but present on the authed dashboard
+    assert "deploy" in html and "failed" in html

@@ -1,7 +1,6 @@
 # Cairn
 
-[![tests](https://gitlab.com/mclife-hosted/cairn/badges/main/pipeline.svg?key_text=tests&key_width=44)](https://gitlab.com/mclife-hosted/cairn/-/commits/main)
-[![deploy](https://gitlab.com/mclife-hosted/cairn-deploy/badges/main/pipeline.svg?key_text=deploy&key_width=52)](https://gitlab.com/mclife-hosted/cairn-deploy/-/commits/main)
+[![tests](https://cairn.mclife.cc/badge/tests.svg)](https://github.com/jmichelsen/cairn/commits/main)
 
 *A cairn marks the safe path and endures the weather - so you always know your way back to your data.*
 

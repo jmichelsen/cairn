@@ -1,10 +1,18 @@
 # CI for the Cairn OSS repo. github.com/jmichelsen/cairn is the public mirror; this pipeline runs on
-# the GitLab origin (mclife-hosted/cairn) and its status is surfaced on the GitHub README via badges.
+# the GitLab origin (mclife-hosted/cairn) - which stays PRIVATE. Its status reaches the public GitHub
+# README not via GitLab's own badge (that needs public pipelines) but through Cairn itself: the
+# `report-*` jobs below POST the result to cairn (POST /api/v1/ci/status), and the README embeds
+# https://cairn.mclife.cc/badge/tests.svg. Cairn is the public status broker; GitLab stays closed.
 #
 # It guards the two things that have silently broken the dashboard: a Python-escaping slip in the
 # inline JS (which kills every button with no server error - see tools/check_js.py), and regressions
 # in the server-side rendering / collector logic (the unit tests). Runs on every push and MR.
-stages: [test]
+#
+# Required CI/CD variables (Settings > CI/CD > Variables, masked):
+#   CAIRN_CI_TOKEN  - the single-purpose token cairn accepts on /api/v1/ci/status (also set as
+#                     CAIRN_CI_TOKEN in cairn's own deploy env so the container knows its hash).
+#   CAIRN_URL       - base URL of the cairn control plane, e.g. https://cairn.mclife.cc
+stages: [test, report]
 
 lint-and-test:
   stage: test
@@ -20,3 +28,36 @@ lint-and-test:
     # inline cache + --cache-from reuse the deps across runs, so this is seconds once warm (same host daemon
     # / cairn-ci:latest tag the deploy pipeline warms).
     - DOCKER_BUILDKIT=1 docker build --progress=plain --target ci --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from cairn-ci:latest -t cairn-ci:latest -f Dockerfile .
+
+# Push the pipeline result to Cairn so it can serve the public /badge/tests.svg. A separate stage with
+# two jobs (on_success / on_failure) reports either outcome; both are best-effort (|| true) so a
+# transient cairn hiccup never fails an otherwise-green pipeline. GIT_STRATEGY: none - no checkout needed.
+.report:
+  stage: report
+  image: docker:27-cli
+  tags: [mclife-deploy]
+  variables: { GIT_STRATEGY: none }
+  before_script:
+    - apk add --no-cache curl >/dev/null
+
+report-pass:
+  extends: .report
+  rules:
+    - if: '$CI_COMMIT_BRANCH || $CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_success
+  script:
+    - >
+      curl -fsS -m 15 -X POST "$CAIRN_URL/api/v1/ci/status"
+      -H "x-backup-token: $CAIRN_CI_TOKEN" -H "Content-Type: application/json"
+      -d "{\"name\":\"tests\",\"status\":\"passed\",\"ref\":\"$CI_COMMIT_REF_NAME\",\"url\":\"$CI_PIPELINE_URL\"}" || true
+
+report-fail:
+  extends: .report
+  rules:
+    - if: '$CI_COMMIT_BRANCH || $CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_failure
+  script:
+    - >
+      curl -fsS -m 15 -X POST "$CAIRN_URL/api/v1/ci/status"
+      -H "x-backup-token: $CAIRN_CI_TOKEN" -H "Content-Type: application/json"
+      -d "{\"name\":\"tests\",\"status\":\"failed\",\"ref\":\"$CI_COMMIT_REF_NAME\",\"url\":\"$CI_PIPELINE_URL\"}" || true
