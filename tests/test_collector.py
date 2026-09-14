@@ -204,6 +204,54 @@ def test_reduce_parses_concatenated_objects_and_caps():
     assert first["modify_time"].split()[2] == "09"
 
 
+def test_reduce_versions_keeps_history_drops_live_only():
+    merged = {
+        "/mnt/pool/a.txt": [
+            {"path": "/mnt/pool/a.txt", "metadata": {"size": "3", "modify_time": "Wed Sep 09 01:00:00 2026"}},
+            {"path": "/mnt/pool/.zfs/snapshot/s1/a.txt",
+             "metadata": {"size": "2", "modify_time": "Mon Sep 07 01:00:00 2026"}},
+        ],
+        "/mnt/pool/b.txt": [   # only a live version -> nothing to restore -> dropped
+            {"path": "/mnt/pool/b.txt", "metadata": {"size": "1", "modify_time": "Mon Sep 07 01:00:00 2026"}},
+        ],
+    }
+    files, total = collector._reduce_versions(merged, "/mnt/pool", 100, 10)
+    assert total == 1 and set(files) == {"a.txt"}          # relative to mountpoint, b.txt dropped
+    vs = files["a.txt"]
+    assert vs[0]["live"] is True and vs[0]["modify_time"].startswith("Wed")   # newest-first
+    assert any(not v["live"] for v in vs)                  # a restorable snapshot version is present
+
+
+def test_reduce_versions_caps_files_and_versions():
+    merged = {}
+    for i in range(10):
+        merged[f"/mnt/pool/f{i}.txt"] = [
+            {"path": f"/mnt/pool/f{i}.txt", "metadata": {"size": "1", "modify_time": "Wed Sep 09 01:00:00 2026"}},
+            {"path": f"/mnt/pool/.zfs/snapshot/s1/f{i}.txt",
+             "metadata": {"size": "1", "modify_time": "Mon Sep 07 01:00:00 2026"}},
+        ]
+    files, total = collector._reduce_versions(merged, "/mnt/pool", 3, 1)
+    assert total == 10 and len(files) == 3                 # file show-cap
+    assert all(len(v) == 1 for v in files.values())        # per-file version cap
+
+
+def test_scan_files_enumerates_and_skips(tmp_path):
+    (tmp_path / "a.txt").write_text("x")
+    sub = tmp_path / "sub"; sub.mkdir(); (sub / "b.txt").write_text("y")
+    zfs = tmp_path / ".zfs"; zfs.mkdir(); (zfs / "hidden.txt").write_text("z")
+    bm = tmp_path / ".bm-restores"; bm.mkdir(); (bm / "r.txt").write_text("w")
+    files, trunc, scanned = collector._scan_files(str(tmp_path), 100)
+    assert sorted(os.path.basename(f) for f in files) == ["a.txt", "b.txt"]   # .zfs + .bm-restores skipped
+    assert trunc is False
+
+
+def test_scan_files_respects_cap(tmp_path):
+    for i in range(5):
+        (tmp_path / f"f{i}").write_text("x")
+    files, trunc, scanned = collector._scan_files(str(tmp_path), 2)
+    assert len(files) == 2 and trunc is True
+
+
 def test_reduce_accepts_future_array_form():
     # the recursive framing is undocumented; be robust if a future httm emits a top-level ARRAY of the
     # per-directory objects instead of concatenating them.

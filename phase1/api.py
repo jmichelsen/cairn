@@ -623,7 +623,8 @@ import subprocess
 NOTIFY_SH = os.environ.get("NOTIFY_SH", str(HERE.parent / "phase0" / "notify.sh"))
 ALLOWED_ACTIONS = {"snapshot", "sync", "scrub", "pull",
                    "recover-points", "recover-search", "recover-deleted", "restore",
-                   "recover-walk"}  # on-demand deleted-files walk that FILLS the stored manifest
+                   "recover-walk",       # on-demand deleted-files walk that FILLS the stored manifest
+                   "recover-versions"}   # folder-wide file version history (enumerate + batch httm)
 STATUS_INGEST_COLS = ["snap_age_src_s","snap_age_dst_s","repl_lag_s","pool_health","pool_cap_pct",
     "last_scrub_ts","usedbysnapshots","compressratio","key_status","archive_count","dedup_ratio",
     "logical_size","physical_size","last_check_ts","last_check_result","lock_state","handler_type",
@@ -785,7 +786,8 @@ def poll_intents(agent: str):
 
 # Recovery actions (httm/zfs listing + copy-only restore). Defined here so intent_result can size the
 # stored result: a listing must be kept whole to stay parseable, everything else stays compact.
-RECOVER_ACTIONS = {"recover-points", "recover-search", "recover-deleted", "restore"}
+RECOVER_ACTIONS = {"recover-points", "recover-search", "recover-deleted", "restore",
+                   "recover-versions"}
 # How long a recovery LISTING is reused before a click re-runs the scan. Snapshot history changes only
 # when snapshots are created/pruned, so a few minutes is safe and spares the slow httm walk. Override
 # with CAIRN_RECOVER_CACHE_TTL (seconds); 0 disables reuse.
@@ -804,9 +806,11 @@ async def intent_result(iid: int, request: Request):
     with db() as conn:
         r = conn.execute("SELECT i.action, t.name AS target FROM intents i "
                          "LEFT JOIN targets t ON t.id=i.target_id WHERE i.id=?", (iid,)).fetchone()
-        # Recovery listings can be large (many snapshots / a recursive deleted scan); store them intact
-        # so the browser can parse them. Other actions keep the small cap that bounds DB growth.
-        cap = 262144 if (r and r["action"] in RECOVER_ACTIONS) else 4000
+        # Recovery listings can be large (many snapshots / a deleted scan / folder-wide versions); store
+        # them INTACT so the browser can parse them (a truncated JSON is unparseable). recover-versions
+        # can carry many files x versions, so it gets a bigger ceiling. Other actions keep the small cap.
+        act = r["action"] if r else None
+        cap = 1048576 if act == "recover-versions" else (262144 if act in RECOVER_ACTIONS else 4000)
         conn.execute("UPDATE intents SET state=?,result=?,result_ts=? WHERE id=?",
                      (state, json.dumps(body)[:cap], int(time.time()), iid))
         conn.commit()
@@ -1227,6 +1231,17 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .recfail{color:var(--crit);font-size:11px;word-break:break-all}
 .recwait{color:var(--mut);font-size:11px}
 .recpre{white-space:pre-wrap;word-break:break-word;font-size:11px;max-height:40vh;overflow:auto;background:var(--heatbg);padding:10px;border-radius:8px}
+.recform{margin:2px 0 4px}
+.recflabel{display:block;font-size:12.5px;font-weight:600;color:var(--ink);margin-bottom:8px}
+.recflabel span{font-weight:400;color:var(--mut)}
+.recfrow{display:flex;gap:8px}
+.recinput{flex:1;min-width:0;font:13px "Roboto Mono",monospace;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--surf);color:var(--ink)}
+.recinput:focus{outline:2px solid var(--acc);outline-offset:0;border-color:var(--acc)}
+.recscan{flex:none;font-size:12px;font-weight:600;cursor:pointer;color:#fff;background:var(--acc);border:1px solid var(--acc);border-radius:8px;padding:0 16px}
+.recscan:hover{filter:brightness(1.08)}
+.recfhint{margin:10px 0 0;font-size:11.5px;color:var(--mut);line-height:1.5}
+.recnewscan{display:inline-block;margin:0 0 12px;font-size:11.5px;font-weight:600;cursor:pointer;color:var(--acc);background:none;border:0;padding:0}
+.recnewscan:hover{text-decoration:underline}
 .card.pair .pbadge{font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);border:1px solid var(--line);border-radius:5px;padding:1px 6px;margin-right:8px}
 .picn{width:15px;height:15px;vertical-align:-2px;margin-right:7px;color:var(--mut)}
 .phalves{display:flex;flex-direction:column;gap:10px;margin-top:11px}
@@ -1931,31 +1946,57 @@ async function pollAction(id, maxTries){                // resolve to {state,out
   throw new Error('timed out');
 }
 async function openRecover(target, kind, refresh){
-  var path=null;
-  if(kind==='versions'){                                 // only Versions needs a single-file path
-    if(refresh && _recLast){ path=_recLast.path; }
-    else { path=prompt('List versions of (path relative to dataset root):'); if(path===null) return; }
-  }
-  _recTarget=target; _recLast={target:target, kind:kind, path:path}; _recCachedTs=0;
+  _recTarget=target; _recCachedTs=0;
   var titles={points:'Restore points', versions:'File versions', deleted:'Deleted files'};
-  document.getElementById('rectitle').textContent=titles[kind]+' \\u00b7 '+target+(path?(' / '+path):'');
+  document.getElementById('rectitle').textContent=titles[kind]+' \\u00b7 '+target;
+  var rb=document.getElementById('recrefresh');
+  openRec();
+  if(kind==='deleted'){ _recLast={target:target, kind:'deleted', path:null}; if(rb) rb.hidden=false; await openDeleted(target, refresh); return; }
+  if(kind==='points'){ _recLast={target:target, kind:'points', path:null}; if(rb) rb.hidden=false; await pointsScan(target); return; }
+  // versions: guided form first (no cryptic prompt); a Refresh re-runs the last scan
+  if(refresh && _recLast && _recLast.kind==='versions'){ await versionsScan(target, _recLast.path||'', true); return; }
+  if(rb) rb.hidden=true;                                  // nothing scanned yet -> nothing to refresh
+  versionsForm(target, (_recLast && _recLast.kind==='versions') ? (_recLast.path||'') : '');
+}
+async function pointsScan(target){
+  var body=document.getElementById('recbody');
+  body.innerHTML='<div class=hempty>scanning '+esc(target)+'\\u2026</div>';
+  var r,j;
+  try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:target, action:'recover-points', requested_by:'ui'})}); j=await r.json(); }
+  catch(e){ body.innerHTML='<div class=hempty>request failed: '+esc(String(e))+'</div>'; return; }
+  if(!r.ok){ body.innerHTML='<div class=hempty>rejected: '+esc(j.detail||('HTTP '+r.status))+'</div>'; return; }
+  if(j.cached){ _recCachedTs=j.cached_ts||0; }
+  var out; try{ out=await pollAction(j.id); }
+  catch(e){ body.innerHTML='<div class=hempty>scan did not finish: '+esc(String(e))+'</div>'; return; }
+  if(out.state!=='done'){ body.innerHTML='<div class=hempty>scan '+esc(out.state)+':</div><pre class=recpre>'+esc(out.output||'(no output)')+'</pre>'; return; }
+  renderPoints(out.output);
+}
+function versionsForm(target, prefill){
+  var body=document.getElementById('recbody');
+  body.innerHTML='<form class=recform onsubmit="submitVersions(event)">'
+    +'<label class=recflabel>Folder or file to scan <span>(relative to the dataset root)</span></label>'
+    +'<div class=recfrow><input id=recpath class=recinput type=text placeholder="e.g. Photos/2019   \\u00b7   blank = whole dataset" value="'+esc(prefill||'')+'"><button class=recscan type=submit>Scan</button></div>'
+    +'<p class=recfhint>Finds every file under it that has older snapshot versions, so you can pick one to restore. A big tree takes longer \\u2014 narrow the path to speed it up.</p></form>';
+  var el=document.getElementById('recpath'); if(el) el.focus();
+}
+function submitVersions(ev){ if(ev) ev.preventDefault(); versionsScan(_recTarget, (document.getElementById('recpath').value||'').trim()); }
+async function versionsScan(target, path, refresh){
+  _recLast={target:target, kind:'versions', path:path}; _recCachedTs=0;
+  document.getElementById('rectitle').textContent='File versions \\u00b7 '+target+(path?(' / '+path):'');
   var rb=document.getElementById('recrefresh'); if(rb) rb.hidden=false;
   var body=document.getElementById('recbody');
-  openRec();
-  if(kind==='deleted'){ await openDeleted(target, refresh); return; }
-  // points / versions stay live (points is cheap + freshness-sensitive; versions is per-file + fast)
-  body.innerHTML='<div class=hempty>scanning '+esc(target)+'\\u2026</div>';
-  var action = kind==='points' ? 'recover-points' : 'recover-search';
-  var b={target:target, action:action, requested_by:'ui'}; if(path) b.path=path; if(refresh) b.refresh=true;
+  body.innerHTML='<div class=hempty>scanning '+esc(path?(target+' / '+path):(target+' (whole dataset)'))+' for file versions\\u2026<br>this can take a while on a large folder.</div>';
+  var b={target:target, action:'recover-versions', requested_by:'ui'}; if(path) b.path=path; if(refresh) b.refresh=true;
   var r,j;
   try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); j=await r.json(); }
   catch(e){ body.innerHTML='<div class=hempty>request failed: '+esc(String(e))+'</div>'; return; }
   if(!r.ok){ body.innerHTML='<div class=hempty>rejected: '+esc(j.detail||('HTTP '+r.status))+'</div>'; return; }
-  if(j.cached){ _recCachedTs=j.cached_ts||0; }           // reused a recent scan (see recBanner)
-  var out; try{ out=await pollAction(j.id); }
-  catch(e){ body.innerHTML='<div class=hempty>scan did not finish: '+esc(String(e))+'</div>'; return; }
+  if(j.cached){ _recCachedTs=j.cached_ts||0; }
+  var out; try{ out=await pollAction(j.id, 300); }
+  catch(e){ body.innerHTML='<div class=hempty>Scan still running \\u2014 reopen Versions shortly.</div>'; return; }
   if(out.state!=='done'){ body.innerHTML='<div class=hempty>scan '+esc(out.state)+':</div><pre class=recpre>'+esc(out.output||'(no output)')+'</pre>'; return; }
-  if(kind==='points') renderPoints(out.output); else renderVersions(out.output, kind);
+  var data; try{ data=JSON.parse(out.output||'{}'); }catch(e){ body.innerHTML='<div class=hempty>could not parse the scan result</div>'; return; }
+  renderFileVersions(data);
 }
 async function openDeleted(target, refresh){
   // Deleted is manifest-backed. Normal open serves the stored manifest instantly; a Refresh (or the very
@@ -1996,25 +2037,28 @@ function renderPoints(txt){
   body.innerHTML=recBanner()+'<p class=recnote>'+lines.length+' restore point'+(lines.length==1?'':'s')+'. To recover files from one, use <b>Versions</b> (one file\\u2019s history) or <b>Deleted</b> (files no longer live).</p>'
     +'<div class=rectblwrap><table class=rectbl><thead><tr><th>Snapshot</th><th>Created</th><th>Age</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
-function renderVersions(txt, kind){
+function renderFileVersions(d){
+  // d = {path, files:{ relpath: [ {path,size,modify_time,live} ] }, total, shown, truncated} from the
+  // agent's folder scan. Browse files that have older versions; each non-live version has a Restore.
   var body=document.getElementById('recbody'); _recVers=[];
-  var data; try{ data=JSON.parse(txt||'{}'); }
-  catch(e){ body.innerHTML='<div class=hempty>could not parse the scan result:</div><pre class=recpre>'+esc((txt||'').slice(0,4000))+'</pre>'; return; }
-  var blocks=[];
-  Object.keys(data||{}).forEach(function(k){
-    var vers=(data[k]||[]); if(!vers.length) return;
+  var files=d.files||{}; var names=Object.keys(files);
+  var where=d.path?esc(d.path):'the dataset root';
+  var back='<button class=recnewscan onclick="versionsForm(_recTarget,(_recLast&&_recLast.path)||\\'\\')">\\u2190 scan another folder</button>';
+  if(!names.length){ body.innerHTML=recBanner()+back+'<div class=hempty>No files with older versions found under '+where+'.</div>'; return; }
+  var trunc=d.truncated?('<p class=recnote>Showing '+d.shown+' of '+d.total+' files with history \\u2014 narrow the folder to see the rest.</p>'):'';
+  var blocks=names.map(function(name){
+    var vers=files[name]||[];
     var rows=vers.map(function(v){
-      var vp=v.path||''; var m=v.metadata||{}; var isLive=(vp===k);
       var act;
-      if(isLive){ act='<span class=reclive>live</span>'; }
-      else { _recVers.push(vp); act='<button class=recrestore data-vi="'+(_recVers.length-1)+'" onclick="doRestore(this)">Restore</button>'; }
-      return '<tr><td>'+esc(m.modify_time||'')+'</td><td class=recsize>'+esc(m.size||'')+'</td><td class=recact>'+act+'</td></tr>';
+      if(v.live){ act='<span class=reclive>live</span>'; }
+      else { _recVers.push(v.path); act='<button class=recrestore data-vi="'+(_recVers.length-1)+'" onclick="doRestore(this)">Restore</button>'; }
+      return '<tr><td>'+esc(v.modify_time||'')+'</td><td class=recsize>'+esc(v.size||'')+'</td><td class=recact>'+act+'</td></tr>';
     }).join('');
-    blocks.push('<div class=recfile><div class=recfp>'+esc(k)+'</div><div class=rectblwrap><table class=rectbl>'
-      +'<thead><tr><th>Version (modified)</th><th>Size</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div></div>');
-  });
-  if(!blocks.length){ body.innerHTML=recBanner()+'<div class=hempty>'+(kind==='deleted'?'No deleted files found in snapshots under that path.':'No other versions found for that path.')+'</div>'; return; }
-  body.innerHTML=recBanner()+'<p class=recnote>Restore copies a version into the dataset\\u2019s <code>.bm-restores/</code> staging dir \\u2014 your live files are never touched.</p>'+blocks.join('');
+    return '<div class=recfile><div class=recfp>'+esc(name)+'</div><div class=rectblwrap><table class=rectbl>'
+      +'<thead><tr><th>Version (modified)</th><th>Size</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div></div>';
+  }).join('');
+  body.innerHTML=recBanner()+back+'<p class=recnote>'+names.length+' file'+(names.length==1?'':'s')+' with older versions under '+where
+    +'. Restore copies a version into <code>.bm-restores/</code> \\u2014 live files untouched.</p>'+trunc+blocks;
 }
 function renderDeletedManifest(m, walkedTs, total){
   // manifest = { "<deleted path>": {path,size,modify_time,versions} } - newest version per file, already

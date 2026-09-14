@@ -142,6 +142,17 @@ def do_execute(cfg):
             api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                      {"ok": False, "output": f"agent '{NAME}' does not manage target '{target}'"})
             continue
+        if action == "recover-versions":
+            # folder-wide version history: enumerate files ourselves + batch through httm (httm --recursive
+            # panics for versions outside interactive mode). Result goes back as the intent output JSON.
+            result, err = C.scan_versions(t, opts.get("path") or "", timeout=RECOVER_WALK_TIMEOUT)
+            if err:
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err})
+            else:
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                         {"ok": True, "output": json.dumps(result)})
+            print(f"  intent {iid} {target} recover-versions -> {'FAIL' if err else str(result.get('total'))+' file(s)'}")
+            continue
         if action == "recover-walk":
             # explicit UI refresh: walk this dataset now (bypassing the off-peak window) and STORE the
             # manifest, so the scan is kept, not discarded. The intent result is just a small summary.

@@ -1479,6 +1479,112 @@ def reduce_deleted_manifest(raw_json, cap=2000):
     out = {path: rec for _, path, rec in rows[:cap]}
     return json.dumps(out), len(rows)
 
+def _scan_files(base, cap):
+    """DFS the live directory tree under `base`, staying on ONE filesystem (skip child-dataset mounts,
+    like --one-filesystem) and NOT following symlinks. Returns (files, truncated, scanned). Skips .zfs and
+    the .bm-restores staging dir. Bounded to `cap` files. This replaces httm --recursive for versions,
+    which panics outside interactive mode - we enumerate ourselves and hand explicit files to httm."""
+    files, truncated, scanned = [], False, 0
+    try:
+        base_dev = os.stat(base).st_dev
+    except OSError as e:
+        return files, False, 0
+    stack = [base]
+    while stack and len(files) < cap:
+        d = stack.pop()
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            continue
+        for e in entries:
+            if e.name in (".zfs", ".bm-restores"):
+                continue
+            try:
+                if e.is_symlink():
+                    continue
+                if e.is_dir(follow_symlinks=False):
+                    if e.stat(follow_symlinks=False).st_dev == base_dev:   # don't cross into child datasets
+                        stack.append(e.path)
+                elif e.is_file(follow_symlinks=False):
+                    scanned += 1
+                    files.append(e.path)
+                    if len(files) >= cap:
+                        truncated = True
+                        break
+            except OSError:
+                continue
+    return files, truncated, scanned
+
+def _reduce_versions(merged, mp, show_cap, ver_cap):
+    """Pure: turn {abs_path: [version dicts]} (merged httm --json output) into the browsable result. Keep
+    only files that have real HISTORY (at least one snapshot version, i.e. a version path != the live
+    path); newest-first, capped. Returns (files_dict, total_with_history). files_dict is keyed by path
+    relative to the mountpoint -> list of {path,size,modify_time,live}."""
+    import datetime
+
+    def _mt(v):
+        s = ((v or {}).get("metadata") or {}).get("modify_time") or ""
+        try:
+            return datetime.datetime.strptime(s, "%a %b %d %H:%M:%S %Y").timestamp()
+        except (ValueError, TypeError):
+            return -1.0
+
+    rows = []
+    for p, vers in merged.items():
+        if not isinstance(vers, list):
+            continue
+        if not any(isinstance(v, dict) and (v.get("path") or "") != p for v in vers):
+            continue   # only a live version -> nothing to restore
+        vs = sorted((v for v in vers if isinstance(v, dict)), key=_mt, reverse=True)[:ver_cap]
+        entries = [{"path": v.get("path") or "", "size": (v.get("metadata") or {}).get("size") or "",
+                    "modify_time": (v.get("metadata") or {}).get("modify_time") or "",
+                    "live": (v.get("path") or "") == p} for v in vs]
+        rel = os.path.relpath(p, mp) if mp else p
+        rows.append((rel, entries))
+    total = len(rows)
+    rows.sort(key=lambda r: r[0].lower())
+    return {rel: entries for rel, entries in rows[:show_cap]}, total
+
+def scan_versions(t, rel, scan_cap=1500, show_cap=300, ver_cap=15, timeout=900):
+    """Folder-wide version history for a dataset-backed target, WITHOUT httm --recursive: enumerate the
+    files under <mountpoint>/<rel> ourselves, then run `httm --json` on them in batches and merge. rel may
+    also name a single file. Returns (result_dict, err); result = {path, files, total, shown, truncated,
+    scanned} ready to hand to the dashboard."""
+    src = t.get("source")
+    if not src:
+        return None, "versions requires a dataset-backed target"
+    mp, err = _mountpoint(src)
+    if err:
+        return None, err
+    base, err = _safe_join(mp, rel or "")
+    if err:
+        return None, err
+    if os.path.isfile(base):
+        files, truncated, scanned = [base], False, 1
+    elif os.path.isdir(base):
+        files, truncated, scanned = _scan_files(base, scan_cap)
+    else:
+        return None, f"no such file or folder under the dataset: {rel or '/'}"
+    merged = {}
+    for i in range(0, len(files), 400):                     # batch: keep argv well under ARG_MAX
+        # --omit-ditto drops snapshot versions identical to live (same size+mtime), so an unchanged file
+        # collapses to just its live version and gets filtered out below - only genuinely-changed files
+        # survive. (--omit-ditto is safe here; it only panics when paired with --recursive.)
+        rc, out, _ = run(NICE + ["httm", "--json", "--omit-ditto"] + files[i:i + 400], timeout=timeout)
+        if not out:
+            continue
+        try:
+            o = json.loads(out)
+        except ValueError:
+            continue
+        if isinstance(o, dict):
+            for p, vers in o.items():
+                if isinstance(vers, list):
+                    merged.setdefault(p, []).extend(vers)
+    fdict, total = _reduce_versions(merged, mp, show_cap, ver_cap)
+    return {"path": rel or "", "files": fdict, "total": total, "shown": len(fdict),
+            "truncated": truncated or (total > len(fdict)), "scanned": scanned}, None
+
 def _mountpoint(ds):
     rc, out, _ = run(["zfs", "get", "-H", "-o", "value", "mountpoint", ds])
     mp = out.strip()
