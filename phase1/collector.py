@@ -1350,7 +1350,7 @@ def build_command(action, t, opts=None):
             rp, err = _validate_under(version, mp)
             if err:
                 return None, f"bad version path: {err}"
-            staging = opts.get("dest") or os.path.join(mp, ".bm-restores")
+            staging = opts.get("dest") or os.path.join(mp, ".cairn-restores")
             sp, err = _validate_under(staging, mp) if not opts.get("dest") else (staging, None)
             dest = os.path.join(sp if not err else staging, os.path.basename(rp) + f".restored-{time.strftime('%Y%m%dT%H%M%S')}")
             # -v so stdout carries "'<src>' -> '<dest>'": the UI parses that to show where it landed.
@@ -1482,7 +1482,7 @@ def reduce_deleted_manifest(raw_json, cap=2000):
 def _scan_files(base, cap):
     """DFS the live directory tree under `base`, staying on ONE filesystem (skip child-dataset mounts,
     like --one-filesystem) and NOT following symlinks. Returns (files, truncated, scanned). Skips .zfs and
-    the .bm-restores staging dir. Bounded to `cap` files. This replaces httm --recursive for versions,
+    the .cairn-restores staging dir. Bounded to `cap` files. This replaces httm --recursive for versions,
     which panics outside interactive mode - we enumerate ourselves and hand explicit files to httm."""
     files, truncated, scanned = [], False, 0
     try:
@@ -1497,7 +1497,7 @@ def _scan_files(base, cap):
         except OSError:
             continue
         for e in entries:
-            if e.name in (".zfs", ".bm-restores"):
+            if e.name in (".zfs", ".cairn-restores", ".bm-restores"):
                 continue
             try:
                 if e.is_symlink():

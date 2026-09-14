@@ -50,7 +50,7 @@ def test_restore_is_verbose_copy_only(monkeypatch):
         {"version": "/mnt/pool/.zfs/snapshot/s1/file.txt"})
     assert err is None
     assert cmd[:4] == ["cp", "-av", "--no-clobber", "--"] and cmd[-2].endswith("file.txt")
-    assert "/.bm-restores/" in cmd[-1] and ".restored-" in cmd[-1]
+    assert "/.cairn-restores/" in cmd[-1] and ".restored-" in cmd[-1]
 
 
 # ---- zpool_scrub_progress --------------------------------------------------------------------
@@ -239,9 +239,9 @@ def test_scan_files_enumerates_and_skips(tmp_path):
     (tmp_path / "a.txt").write_text("x")
     sub = tmp_path / "sub"; sub.mkdir(); (sub / "b.txt").write_text("y")
     zfs = tmp_path / ".zfs"; zfs.mkdir(); (zfs / "hidden.txt").write_text("z")
-    bm = tmp_path / ".bm-restores"; bm.mkdir(); (bm / "r.txt").write_text("w")
+    bm = tmp_path / ".cairn-restores"; bm.mkdir(); (bm / "r.txt").write_text("w")
     files, trunc, scanned = collector._scan_files(str(tmp_path), 100)
-    assert sorted(os.path.basename(f) for f in files) == ["a.txt", "b.txt"]   # .zfs + .bm-restores skipped
+    assert sorted(os.path.basename(f) for f in files) == ["a.txt", "b.txt"]   # .zfs + .cairn-restores skipped
     assert trunc is False
 
 

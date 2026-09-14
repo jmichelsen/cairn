@@ -2058,7 +2058,7 @@ function renderFileVersions(d){
       +'<thead><tr><th>Version (modified)</th><th>Size</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div></div>';
   }).join('');
   body.innerHTML=recBanner()+back+'<p class=recnote>'+names.length+' file'+(names.length==1?'':'s')+' with older versions under '+where
-    +'. Restore copies a version into <code>.bm-restores/</code> \\u2014 live files untouched.</p>'+trunc+blocks;
+    +'. Restore copies a version into <code>.cairn-restores/</code> \\u2014 live files untouched.</p>'+trunc+blocks;
 }
 function renderDeletedManifest(m, walkedTs, total){
   // manifest = { "<deleted path>": {path,size,modify_time,versions} } - newest version per file, already
@@ -2075,13 +2075,13 @@ function renderDeletedManifest(m, walkedTs, total){
   }).join('');
   var shown=keys.length, capped=(total && total>shown);
   body.innerHTML='<p class=reccached>'+when+' \\u00b7 '+(capped?('showing newest '+shown+' of '+total+' deleted files'):(shown+' deleted file'+(shown==1?'':'s')))+'</p>'
-    +'<p class=recnote>Restore copies the file\\u2019s last snapshot version into <code>.bm-restores/</code> \\u2014 live files untouched.'
+    +'<p class=recnote>Restore copies the file\\u2019s last snapshot version into <code>.cairn-restores/</code> \\u2014 live files untouched.'
     +(capped?' Use <b>Versions</b> for a specific file not listed here.':'')+'</p>'
     +'<div class=rectblwrap><table class=rectbl><thead><tr><th>Deleted file</th><th>Size</th><th>Last modified</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
 async function doRestore(btn){
   var vp=_recVers[parseInt(btn.getAttribute('data-vi'),10)]; if(vp==null) return;
-  if(!confirm("Restore this version?\\nIt is copied into the dataset's .bm-restores/ staging dir. Live files are not touched.")) return;
+  if(!confirm("Restore this version?\\nIt is copied into the dataset's .cairn-restores/ staging dir. Live files are not touched.")) return;
   btn.disabled=true; var td=btn.parentNode; td.innerHTML='<span class=recwait>restoring\\u2026</span>';
   var b={target:_recTarget, action:'restore', version:vp, requested_by:'ui'};
   var r,j;
