@@ -1242,6 +1242,17 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .recfhint{margin:10px 0 0;font-size:11.5px;color:var(--mut);line-height:1.5}
 .recnewscan{display:inline-block;margin:0 0 12px;font-size:11.5px;font-weight:600;cursor:pointer;color:var(--acc);background:none;border:0;padding:0}
 .recnewscan:hover{text-decoration:underline}
+.reccrumb{margin:12px 0 4px;font-size:12px;color:var(--mut);display:flex;flex-wrap:wrap;align-items:center;gap:2px}
+.reccrumb0,.reccrumbi{cursor:pointer;color:var(--acc);font-family:"Roboto Mono",monospace}
+.reccrumb0:hover,.reccrumbi:hover{text-decoration:underline}
+.reccrumb .recsep{color:var(--mut);margin:0 2px}
+.rectree{margin-top:10px;display:flex;flex-direction:column;gap:8px}
+.recdir{display:flex;align-items:center;gap:9px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--surf);cursor:pointer;font-size:13px}
+.recdir:hover{border-color:var(--acc)}
+.recdir .recdi{font-size:14px;line-height:1}
+.recdir .recdn{font-family:"Roboto Mono",monospace;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.recdir .recdc{flex:none;font:600 10px/1 "Roboto Mono",monospace;color:var(--acc2);background:var(--heatbg);border-radius:20px;padding:3px 8px}
+.recfp .recfi{margin-right:7px}
 .card.pair .pbadge{font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);border:1px solid var(--line);border-radius:5px;padding:1px 6px;margin-right:8px}
 .picn{width:15px;height:15px;vertical-align:-2px;margin-right:7px;color:var(--mut)}
 .phalves{display:flex;flex-direction:column;gap:10px;margin-top:11px}
@@ -1926,6 +1937,8 @@ async function reconAct(btn, action, tid, pair){
 // Points  = the dataset's snapshots (restore points).   Versions = one file's history across snapshots.
 // Deleted = files gone from live but still in snapshots. Restore = copy a chosen version to staging.
 var _recTarget=null, _recVers=[], _recLast=null, _recCachedTs=0;
+// client-side tree browser over a versions scan result (no round-trips to drill; "Scan here" re-scans)
+var _recTree=null, _recCwd=[], _recScanRoot='', _recScanMeta=null, _recDirs=[];
 function openRec(){ document.getElementById('recmodal').hidden=false; }
 function closeRec(){ document.getElementById('recmodal').hidden=true; }
 function recRefresh(){ if(_recLast) openRecover(_recLast.target, _recLast.kind, true); }
@@ -2038,27 +2051,68 @@ function renderPoints(txt){
     +'<div class=rectblwrap><table class=rectbl><thead><tr><th>Snapshot</th><th>Created</th><th>Age</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
 function renderFileVersions(d){
-  // d = {path, files:{ relpath: [ {path,size,modify_time,live} ] }, total, shown, truncated} from the
-  // agent's folder scan. Browse files that have older versions; each non-live version has a Restore.
-  var body=document.getElementById('recbody'); _recVers=[];
-  var files=d.files||{}; var names=Object.keys(files);
-  var where=d.path?esc(d.path):'the dataset root';
-  var back='<button class=recnewscan onclick="versionsForm(_recTarget,(_recLast&&_recLast.path)||\\'\\')">\\u2190 scan another folder</button>';
-  if(!names.length){ body.innerHTML=recBanner()+back+'<div class=hempty>No files with older versions found under '+where+'.</div>'; return; }
-  var trunc=d.truncated?('<p class=recnote>Showing '+d.shown+' of '+d.total+' files with history \\u2014 narrow the folder to see the rest.</p>'):'';
-  var blocks=names.map(function(name){
-    var vers=files[name]||[];
+  // d = {path, files:{ relpath: [ {path,size,modify_time,live} ] }, total, shown, truncated}. Build a
+  // tree from the returned paths so the flat scan can be BROWSED folder-by-folder, all client-side; the
+  // path bar tracks where you are, and "Scan here" re-scans that folder (e.g. to expand a capped result).
+  _recScanRoot = d.path || '';
+  _recScanMeta = {total:d.total||0, shown:d.shown||0, truncated:!!d.truncated};
+  _recTree = _recBuildTree(d.files||{});
+  _recCwd = [];
+  renderVersionsView();
+}
+function _recBuildTree(files){
+  var root={d:{}, f:{}};
+  Object.keys(files).forEach(function(rel){
+    var segs=rel.split('/'); var fname=segs.pop(); var n=root;
+    segs.forEach(function(s){ if(!s) return; if(!n.d[s]) n.d[s]={d:{}, f:{}}; n=n.d[s]; });
+    n.f[fname]=files[rel];
+  });
+  return root;
+}
+function _recNodeAt(cwd){ var n=_recTree||{d:{},f:{}}; for(var i=0;i<cwd.length;i++){ n=(n.d[cwd[i]]||{d:{},f:{}}); } return n; }
+function _recCount(n){ var c=Object.keys(n.f).length; Object.keys(n.d).forEach(function(k){ c+=_recCount(n.d[k]); }); return c; }
+function _recCurPath(){
+  var base=_recScanRoot?_recScanRoot.split('/').filter(Boolean):[];
+  return base.concat(_recCwd).join('/');
+}
+function recCd(btn){ var name=_recDirs[parseInt(btn.getAttribute('data-di'),10)]; if(name==null) return; _recCwd.push(name); renderVersionsView(); }
+function recCdTo(i){ _recCwd = (i<0) ? [] : _recCwd.slice(0, i+1); renderVersionsView(); }
+function renderVersionsView(){
+  var body=document.getElementById('recbody'); _recVers=[]; _recDirs=[];
+  var node=_recNodeAt(_recCwd);
+  var cp=_recCurPath();
+  // persistent path bar: current location, editable; Scan here re-scans it on the agent
+  var html='<form class=recform onsubmit="submitVersions(event)"><div class=recfrow>'
+    +'<input id=recpath class=recinput type=text value="'+esc(cp)+'" placeholder="blank = whole dataset">'
+    +'<button class=recscan type=submit>Scan here</button></div></form>';
+  // breadcrumb within the current scan (client-side nav)
+  var crumbs='<span class=reccrumb0 onclick="recCdTo(-1)">'+(_recScanRoot?esc(_recScanRoot):'dataset root')+'</span>';
+  _recCwd.forEach(function(seg,i){ crumbs+='<span class=recsep>/</span><span class=reccrumbi data-ci="'+i+'" onclick="recCdTo('+i+')">'+esc(seg)+'</span>'; });
+  html+='<div class=reccrumb>'+crumbs+'</div>'+recBanner();
+  if(_recScanMeta && _recScanMeta.truncated){
+    html+='<p class=recnote>This scan was capped at '+_recScanMeta.shown+' of '+_recScanMeta.total+' files with history. Drill into a folder and press <b>Scan here</b> for its full contents.</p>';
+  }
+  var dirs=Object.keys(node.d).sort(function(a,b){return a.toLowerCase()<b.toLowerCase()?-1:1;});
+  var files=Object.keys(node.f).sort(function(a,b){return a.toLowerCase()<b.toLowerCase()?-1:1;});
+  if(!dirs.length && !files.length){ body.innerHTML=html+'<div class=hempty>No files with older versions here.</div>'; return; }
+  html+='<div class=rectree>';
+  dirs.forEach(function(name){
+    _recDirs.push(name);
+    html+='<div class=recdir data-di="'+(_recDirs.length-1)+'" onclick="recCd(this)"><span class=recdi>\\ud83d\\udcc1</span><span class=recdn>'+esc(name)+'</span><span class=recdc>'+_recCount(node.d[name])+'</span></div>';
+  });
+  files.forEach(function(name){
+    var vers=node.f[name]||[];
     var rows=vers.map(function(v){
       var act;
       if(v.live){ act='<span class=reclive>live</span>'; }
       else { _recVers.push(v.path); act='<button class=recrestore data-vi="'+(_recVers.length-1)+'" onclick="doRestore(this)">Restore</button>'; }
       return '<tr><td>'+esc(v.modify_time||'')+'</td><td class=recsize>'+esc(v.size||'')+'</td><td class=recact>'+act+'</td></tr>';
     }).join('');
-    return '<div class=recfile><div class=recfp>'+esc(name)+'</div><div class=rectblwrap><table class=rectbl>'
+    html+='<div class=recfile><div class=recfp><span class=recfi>\\ud83d\\udcc4</span>'+esc(name)+'</div><div class=rectblwrap><table class=rectbl>'
       +'<thead><tr><th>Version (modified)</th><th>Size</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div></div>';
-  }).join('');
-  body.innerHTML=recBanner()+back+'<p class=recnote>'+names.length+' file'+(names.length==1?'':'s')+' with older versions under '+where
-    +'. Restore copies a version into <code>.cairn-restores/</code> \\u2014 live files untouched.</p>'+trunc+blocks;
+  });
+  html+='</div>';
+  body.innerHTML=html;
 }
 function renderDeletedManifest(m, walkedTs, total){
   // manifest = { "<deleted path>": {path,size,modify_time,versions} } - newest version per file, already
