@@ -1999,7 +1999,7 @@ async function reconAct(btn, action, tid, pair){
   }catch(e){ btns.forEach(function(x){x.disabled=false;}); }
 }
 // ---- recovery browser: Points / Versions / Deleted, and copy-only Restore ----
-// Points  = the dataset's snapshots (restore points).   Versions = one file's history across snapshots.
+// Snapshots (kind 'points') = the dataset's snapshots.   Versions = browse folders + a file's history.
 // Deleted = files gone from live but still in snapshots. Restore = copy a chosen version to staging.
 var _recTarget=null, _recVers=[], _recLast=null, _recCachedTs=0;
 // Versions browser: navigate the cheap nightly DIR tree client-side; scan a folder for file history on
@@ -2033,7 +2033,7 @@ async function pollAction(id, maxTries){                // resolve to {state,out
 async function openRecover(target, kind, refresh){
   if(_recBusy) return;                                    // a scan is already in flight
   _recTarget=target; _recCachedTs=0;
-  var titles={points:'Restore points', versions:'File versions', deleted:'Deleted files'};
+  var titles={points:'Snapshots', versions:'File versions', deleted:'Deleted files'};
   document.getElementById('rectitle').textContent=titles[kind]+' \\u00b7 '+target;
   var rb=document.getElementById('recrefresh');
   openRec(); recBusy(true);
@@ -2148,7 +2148,7 @@ function renderPoints(txt){
     var d=epoch?new Date(epoch*1000):null;
     return '<tr><td class=recsnap>'+esc(snap)+'</td><td>'+(d?d.toLocaleString():'')+'</td><td class=recage>'+(epoch?relTime(epoch):'')+'</td></tr>';
   }).reverse().join('');
-  body.innerHTML=recBanner()+'<p class=recnote>'+lines.length+' restore point'+(lines.length==1?'':'s')+'. To recover files from one, use <b>Versions</b> (one file\\u2019s history) or <b>Deleted</b> (files no longer live).</p>'
+  body.innerHTML=recBanner()+'<p class=recnote>'+lines.length+' snapshot'+(lines.length==1?'':'s')+'. To recover files, use <b>Versions</b> (older versions of a file) or <b>Deleted</b> (files no longer live).</p>'
     +'<div class=rectblwrap><table class=rectbl><thead><tr><th>Snapshot</th><th>Created</th><th>Age</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
 function _recDirNodeAt(cwd){ var n=_recDirTree||{}; for(var i=0;i<cwd.length;i++){ n=(n[cwd[i]]||{}); } return n; }
@@ -2244,7 +2244,7 @@ async function doRestore(btn){
 
 def _acts(r, can_act, viewer=False):
     """Card action buttons - only when an EXECUTE-capable agent owns the target (else the intent
-    would hang pending). Recovery (Points/Deleted/Versions) sits on a compact sub-row. A read-only
+    would hang pending). Recovery (Snapshots/Deleted/Versions) sits on a compact sub-row. A read-only
     viewer gets no controls at all (not even the report-only note)."""
     n = r["name"]; t = r["type"]
     if viewer:
@@ -2252,21 +2252,24 @@ def _acts(r, can_act, viewer=False):
     if not can_act:
         return ('<div class="cact"><span class="ro">report-only</span></div>'
                 if t in ("zfs-repl", "zfs-local") else "")
+    _d = json.loads(r.get("detail_json") or "{}")
+    caps = _d.get("caps") or {}                            # absent (pre-caps agent) => show, as before
     rec = ""
     if t in ("zfs-repl", "zfs-local") and r.get("source"):
-        rec = (f'<div class="crec">'
-               f"<button onclick=\"openRecover('{n}','points')\" title=\"snapshots you can recover from\">Points</button>"
-               f"<button onclick=\"openRecover('{n}','deleted')\" title=\"files deleted from live but still in snapshots\">Deleted</button>"
-               f"<button onclick=\"openRecover('{n}','versions')\" title=\"every snapshot version of one file/path\">Versions</button>"
-               f"</div>")
+        # Snapshots (list restore points) works on any dataset-backed target; Deleted/Versions browse the
+        # live mount, so hide them when the dataset has no usable mountpoint (e.g. an unmounted pool).
+        rec = ('<div class="crec">'
+               f"<button onclick=\"openRecover('{n}','points')\" title=\"list this dataset's snapshots\">Snapshots</button>")
+        if caps.get("recoverable", True):
+            rec += (f"<button onclick=\"openRecover('{n}','deleted')\" title=\"files deleted from live but still in snapshots\">Deleted</button>"
+                    f"<button onclick=\"openRecover('{n}','versions')\" title=\"browse folders and restore an older version of a file\">Versions</button>")
+        rec += "</div>"
     if t == "zfs-repl":
         main = (f"<button class=pri onclick=\"act('{n}','sync',true)\">Replicate</button>"
                 f"<button onclick=\"act('{n}','snapshot',true)\">Snapshot</button>"
                 f"<button onclick=\"act('{n}','sync',false)\">no-snap</button>")
     elif t == "zfs-local":
         main = ""
-        _d = json.loads(r.get("detail_json") or "{}")
-        caps = _d.get("caps") or {}                       # absent (pre-caps agent) => show, as before
         # snapshot needs zfs delegation; hide the button on datasets this agent can't snapshot (e.g.
         # an OS root pool with no `zfs allow`), so it never queues an intent that only fails.
         if r.get("source") and caps.get("snapshot", True):

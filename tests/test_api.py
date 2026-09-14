@@ -44,6 +44,18 @@ def test_missing_caps_defaults_to_showing():
     assert ">Snapshot<" in h and ">Scrub<" in h
 
 
+# ---- recovery buttons gated on a usable mountpoint --------------------------------------------
+def test_unmounted_dataset_hides_deleted_versions_keeps_snapshots():
+    h = api._acts(_row("iwolf", caps={"snapshot": False, "scrub": True, "recoverable": False}), True, False)
+    assert ">Snapshots<" in h                     # listing snapshots needs no mount
+    assert ">Deleted<" not in h and ">Versions<" not in h
+
+
+def test_recoverable_dataset_shows_all_recovery():
+    h = api._acts(_row("mcz/x", caps={"snapshot": True, "scrub": False, "recoverable": True}), True, False)
+    assert ">Snapshots<" in h and ">Deleted<" in h and ">Versions<" in h
+
+
 # ---- read-only viewer gating -----------------------------------------------------------------
 def test_viewer_gets_no_controls():
     assert api._acts(_row("mcz", caps={"snapshot": True, "scrub": True}), False, True) == ""
