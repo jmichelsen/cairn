@@ -1,16 +1,41 @@
 # cairn - aggregate ZFS/borg/backupninja backup status, alert, and trigger actions.
-FROM python:3.12-slim
+#
+# Multi-stage: the `deps` base pins the Python app dependencies ONCE, and both the production `runtime`
+# image and the `ci` test image build from it - so CI provably runs the tests against the exact dependency
+# versions production ships (no drift). Build the runtime with `--target runtime` (it's last, so also the
+# default) and the CI checks with `--target ci`. The CI stages cache the deps across runs (see the
+# .gitlab-ci.yml files); the two targets share the `deps` layer in the daemon, so pip runs once.
 
+# ---- shared base: python + the app's pip deps (single source of truth for versions) ----
+FROM python:3.12-slim AS deps
+ENV DEBIAN_FRONTEND=noninteractive PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN pip install --no-cache-dir pyyaml "fastapi>=0.110" "uvicorn[standard]>=0.29"
+
+# ---- ci: adds nodejs (for check_js's `node --check`) + pytest, then RUNS the checks as the final layer.
+# A failed `docker build --target ci` IS a failed test stage. Only the source COPY + this RUN re-run when
+# code changes; the deps/apt/pip layers above stay cached. ----
+FROM deps AS ci
+ENV PYTHONDONTWRITEBYTECODE=1
+RUN apt-get update -qq && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir pytest
+WORKDIR /src
+COPY phase1 /src/phase1
+COPY tools  /src/tools
+COPY tests  /src/tests
+COPY agent.py VERSION /src/
+RUN python3 -m py_compile phase1/*.py agent.py \
+ && python3 tools/check_js.py \
+ && python3 -m pytest -q
+
+# ---- runtime: the production image (default target - keep it LAST) ----
+FROM deps AS runtime
 LABEL org.opencontainers.image.title="cairn" \
       org.opencontainers.image.description="Aggregate ZFS/borg/backupninja backup status, alert (email + Gotify), and trigger on-demand snapshot/replicate/scrub." \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/jmichelsen/cairn"
-
-# Userland tools the adapters shell out to. zfsutils-linux lives in Debian 'contrib' (ZFS
-# licensing), so enable it first. It is the ONLY version-sensitive tool: for ZFS reads the
-# container's zfs userland should match the host's MAJOR version (2.x today); if yours differs,
-# mount the host binaries over these (see docker-compose.yml).
-ENV DEBIAN_FRONTEND=noninteractive
+# Userland tools the adapters shell out to. zfsutils-linux lives in Debian 'contrib' (ZFS licensing), so
+# enable it first. It is the ONLY version-sensitive tool: for ZFS reads the container's zfs userland should
+# match the host's MAJOR version (2.x today); if yours differs, mount the host binaries over these.
 RUN set -eux; \
     if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
         sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources; \
@@ -21,8 +46,6 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
         zfsutils-linux borgbackup msmtp smartmontools sqlite3 curl ca-certificates bash; \
     rm -rf /var/lib/apt/lists/*
-
-RUN pip install --no-cache-dir pyyaml "fastapi>=0.110" "uvicorn[standard]>=0.29"
 
 WORKDIR /app
 COPY phase0 /app/phase0
