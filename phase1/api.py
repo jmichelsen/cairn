@@ -921,21 +921,56 @@ def list_actions(limit: int = 20, target: str = None):
 # ---------------- recovery manifests: agent-walked "deleted files" cache per dataset --------------
 @app.get("/api/v1/backup/agent/recovery-due")
 def recovery_due(agent: str):
-    """Datasets this agent should (re)walk: enabled zfs-local targets whose deleted-manifest is missing
-    or older than RECOVER_WALK_INTERVAL. Missing ones first, then the stalest."""
+    """Datasets this agent should (re)walk: enabled zfs-local targets whose deleted OR versions manifest is
+    missing or older than RECOVER_WALK_INTERVAL (both are refreshed together). Missing first, then stalest."""
     cutoff = int(time.time()) - RECOVER_WALK_INTERVAL
     with db() as conn:
         rows = conn.execute(
             "SELECT t.name, t.source FROM targets t "
-            "LEFT JOIN recovery_manifests m ON m.target_id=t.id AND m.kind='deleted' "
+            "LEFT JOIN recovery_manifests md ON md.target_id=t.id AND md.kind='deleted' "
+            "LEFT JOIN recovery_manifests mv ON mv.target_id=t.id AND mv.kind='versions' "
             "WHERE t.agent=? AND t.enabled=1 AND t.type='zfs-local' AND t.source IS NOT NULL "
-            "AND (m.walked_ts IS NULL OR m.walked_ts < ?) "
-            "ORDER BY (m.walked_ts IS NULL) DESC, m.walked_ts ASC", (agent, cutoff)).fetchall()
+            "AND (md.walked_ts IS NULL OR md.walked_ts < ? OR mv.walked_ts IS NULL OR mv.walked_ts < ?) "
+            "ORDER BY (md.walked_ts IS NULL OR mv.walked_ts IS NULL) DESC, "
+            "min(COALESCE(md.walked_ts,0), COALESCE(mv.walked_ts,0)) ASC",
+            (agent, cutoff, cutoff)).fetchall()
     return {"targets": [dict(r) for r in rows]}
+
+def _merge_versions_manifest(conn, tid, path, files, truncated, now):
+    """Merge a versions scan into the stored WHOLE-dataset versions manifest (files keyed relative to the
+    dataset root). path='' replaces everything; a subpath replaces only that subtree - so a manual
+    'Scan here' persists into the tree rather than being thrown away."""
+    row = conn.execute("SELECT gz FROM recovery_manifests WHERE target_id=? AND kind='versions'",
+                       (tid,)).fetchone()
+    stored, was_trunc = {}, False
+    if row and row["gz"] is not None:
+        try:
+            prev = json.loads(gzip.decompress(row["gz"]).decode() or "{}")
+            stored = prev.get("files") or {}
+            was_trunc = bool(prev.get("truncated"))
+        except Exception:
+            stored, was_trunc = {}, False
+    p = (path or "").strip("/")
+    if p:
+        pfx = p + "/"
+        stored = {k: v for k, v in stored.items() if not (k == p or k.startswith(pfx))}
+        trunc = was_trunc or bool(truncated)     # a subtree refill doesn't change whole-dataset coverage
+    else:
+        stored, pfx, trunc = {}, "", bool(truncated)
+    for k, v in (files or {}).items():
+        stored[pfx + k] = v
+    total = len(stored)
+    payload = json.dumps({"path": "", "files": stored, "total": total, "shown": total, "truncated": trunc})
+    conn.execute(
+        "INSERT INTO recovery_manifests(target_id,kind,gz,entry_count,raw_bytes,walked_ts) "
+        "VALUES(?, 'versions', ?, ?, ?, ?) ON CONFLICT(target_id,kind) DO UPDATE SET "
+        "gz=excluded.gz, entry_count=excluded.entry_count, raw_bytes=excluded.raw_bytes, walked_ts=excluded.walked_ts",
+        (tid, gzip.compress(payload.encode()), total, len(payload), now))
 
 @app.post("/api/v1/backup/agent/recovery-manifest")
 async def recovery_manifest_push(request: Request):
-    """An agent pushes a freshly-walked manifest (gzipped JSON, base64). A failed walk (ok=false) records
+    """An agent pushes a freshly-walked manifest. deleted = gzipped JSON (base64); versions = a files dict
+    the API merges by path (whole-dataset replace, or subtree replace). A failed walk (ok=false) records
     only walked_ts so it isn't retried until the next interval, preserving any prior good manifest."""
     body = await _json(request)
     target = body.get("target"); kind = body.get("kind") or "deleted"
@@ -952,6 +987,11 @@ async def recovery_manifest_push(request: Request):
                 (r["id"], kind, now))
             conn.commit()
             return {"ok": True, "stored": False}
+        if kind == "versions":
+            _merge_versions_manifest(conn, r["id"], body.get("path") or "", body.get("files") or {},
+                                     body.get("truncated"), int(body.get("walked_ts") or now))
+            conn.commit()
+            return {"ok": True, "stored": True}
         gz = _b64.b64decode(body.get("gz_b64") or "")
         conn.execute(
             "INSERT INTO recovery_manifests(target_id,kind,gz,entry_count,raw_bytes,walked_ts) "
@@ -1966,9 +2006,18 @@ async function openRecover(target, kind, refresh){
   openRec();
   if(kind==='deleted'){ _recLast={target:target, kind:'deleted', path:null}; if(rb) rb.hidden=false; await openDeleted(target, refresh); return; }
   if(kind==='points'){ _recLast={target:target, kind:'points', path:null}; if(rb) rb.hidden=false; await pointsScan(target); return; }
-  // versions: guided form first (no cryptic prompt); a Refresh re-runs the last scan
+  // versions: open straight into the nightly-seeded tree if we have one; a Refresh re-scans
   if(refresh && _recLast && _recLast.kind==='versions'){ await versionsScan(target, _recLast.path||'', true); return; }
-  if(rb) rb.hidden=true;                                  // nothing scanned yet -> nothing to refresh
+  var body=document.getElementById('recbody');
+  body.innerHTML='<div class=hempty>loading\\u2026</div>';
+  var vm=null; try{ vm=await (await fetch('/api/v1/backup/recovery-manifest?target='+encodeURIComponent(target)+'&kind=versions')).json(); }catch(e){}
+  if(vm && vm.present && vm.manifest && Object.keys((vm.manifest.files)||{}).length){
+    _recLast={target:target, kind:'versions', path:''}; _recCachedTs=vm.walked_ts||0;
+    if(rb) rb.hidden=false;
+    renderFileVersions(vm.manifest);                     // browse the seeded tree; Scan here refreshes it
+    return;
+  }
+  if(rb) rb.hidden=true;                                  // no seeded tree yet -> guided form
   versionsForm(target, (_recLast && _recLast.kind==='versions') ? (_recLast.path||'') : '');
 }
 async function pointsScan(target){
@@ -1992,7 +2041,7 @@ function versionsForm(target, prefill){
     +'<p class=recfhint>Finds every file under it that has older snapshot versions, so you can pick one to restore. A big tree takes longer \\u2014 narrow the path to speed it up.</p></form>';
   var el=document.getElementById('recpath'); if(el) el.focus();
 }
-function submitVersions(ev){ if(ev) ev.preventDefault(); versionsScan(_recTarget, (document.getElementById('recpath').value||'').trim()); }
+function submitVersions(ev){ if(ev) ev.preventDefault(); versionsScan(_recTarget, (document.getElementById('recpath').value||'').trim(), true); }
 async function versionsScan(target, path, refresh){
   _recLast={target:target, kind:'versions', path:path}; _recCachedTs=0;
   document.getElementById('rectitle').textContent='File versions \\u00b7 '+target+(path?(' / '+path):'');
@@ -2008,8 +2057,15 @@ async function versionsScan(target, path, refresh){
   var out; try{ out=await pollAction(j.id, 300); }
   catch(e){ body.innerHTML='<div class=hempty>Scan still running \\u2014 reopen Versions shortly.</div>'; return; }
   if(out.state!=='done'){ body.innerHTML='<div class=hempty>scan '+esc(out.state)+':</div><pre class=recpre>'+esc(out.output||'(no output)')+'</pre>'; return; }
-  var data; try{ data=JSON.parse(out.output||'{}'); }catch(e){ body.innerHTML='<div class=hempty>could not parse the scan result</div>'; return; }
-  renderFileVersions(data);
+  // the scan stored/merged the tree into the manifest; read it back and open there, drilled to the path
+  var vm=null; try{ vm=await (await fetch('/api/v1/backup/recovery-manifest?target='+encodeURIComponent(target)+'&kind=versions')).json(); }catch(e){}
+  if(vm && vm.present && vm.manifest){
+    _recCachedTs=0; renderFileVersions(vm.manifest);
+    if(path){ _recCwd=path.split('/').filter(Boolean); renderVersionsView(); }   // stay where you scanned
+    return;
+  }
+  var summ={}; try{ summ=JSON.parse(out.output||'{}'); }catch(e){}
+  body.innerHTML='<div class=hempty>Scan complete'+(summ.total!=null?(' \\u2014 '+summ.total+' file(s) with history'):'')+', but the tree could not be loaded. Reopen Versions.</div>';
 }
 async function openDeleted(target, refresh){
   // Deleted is manifest-backed. Normal open serves the stored manifest instantly; a Refresh (or the very

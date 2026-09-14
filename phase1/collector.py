@@ -1545,11 +1545,12 @@ def _reduce_versions(merged, mp, show_cap, ver_cap):
     rows.sort(key=lambda r: r[0].lower())
     return {rel: entries for rel, entries in rows[:show_cap]}, total
 
-def scan_versions(t, rel, scan_cap=1500, show_cap=300, ver_cap=15, timeout=900):
+def scan_versions(t, rel, scan_cap=1500, show_cap=300, ver_cap=15, timeout=900, budget=None):
     """Folder-wide version history for a dataset-backed target, WITHOUT httm --recursive: enumerate the
     files under <mountpoint>/<rel> ourselves, then run `httm --json` on them in batches and merge. rel may
-    also name a single file. Returns (result_dict, err); result = {path, files, total, shown, truncated,
-    scanned} ready to hand to the dashboard."""
+    also name a single file. `budget` (seconds) caps total wall-clock across batches so a whole-dataset
+    nightly scan can't run away (it stops early and marks the result truncated). Returns (result_dict,
+    err); result = {path, files, total, shown, truncated, scanned}."""
     src = t.get("source")
     if not src:
         return None, "versions requires a dataset-backed target"
@@ -1566,7 +1567,12 @@ def scan_versions(t, rel, scan_cap=1500, show_cap=300, ver_cap=15, timeout=900):
     else:
         return None, f"no such file or folder under the dataset: {rel or '/'}"
     merged = {}
+    deadline = (time.time() + budget) if budget else None
+    budget_hit = False
     for i in range(0, len(files), 400):                     # batch: keep argv well under ARG_MAX
+        if deadline and time.time() > deadline:             # wall-clock budget (nightly whole-dataset scan)
+            budget_hit = True
+            break
         # --omit-ditto drops snapshot versions identical to live (same size+mtime), so an unchanged file
         # collapses to just its live version and gets filtered out below - only genuinely-changed files
         # survive. (--omit-ditto is safe here; it only panics when paired with --recursive.)
@@ -1586,7 +1592,7 @@ def scan_versions(t, rel, scan_cap=1500, show_cap=300, ver_cap=15, timeout=900):
     treebase = base if os.path.isdir(base) else os.path.dirname(base)
     fdict, total = _reduce_versions(merged, treebase, show_cap, ver_cap)
     return {"path": rel or "", "files": fdict, "total": total, "shown": len(fdict),
-            "truncated": truncated or (total > len(fdict)), "scanned": scanned}, None
+            "truncated": truncated or budget_hit or (total > len(fdict)), "scanned": scanned}, None
 
 def _mountpoint(ds):
     rc, out, _ = run(["zfs", "get", "-H", "-o", "value", "mountpoint", ds])
