@@ -622,7 +622,8 @@ def timeline(days: int = 14):
 import subprocess
 NOTIFY_SH = os.environ.get("NOTIFY_SH", str(HERE.parent / "phase0" / "notify.sh"))
 ALLOWED_ACTIONS = {"snapshot", "sync", "scrub", "pull",
-                   "recover-points", "recover-search", "recover-deleted", "restore"}
+                   "recover-points", "recover-search", "recover-deleted", "restore",
+                   "recover-walk"}  # on-demand deleted-files walk that FILLS the stored manifest
 STATUS_INGEST_COLS = ["snap_age_src_s","snap_age_dst_s","repl_lag_s","pool_health","pool_cap_pct",
     "last_scrub_ts","usedbysnapshots","compressratio","key_status","archive_count","dedup_ratio",
     "logical_size","physical_size","last_check_ts","last_check_result","lock_state","handler_type",
@@ -856,9 +857,11 @@ async def create_action(request: Request):
             raise HTTPException(400, "sync only valid for zfs-repl targets")
         if action == "scrub" and r["type"] != "zfs-local":
             raise HTTPException(400, "scrub only valid for zfs-local targets")
+        if action == "recover-walk" and r["type"] != "zfs-local":
+            raise HTTPException(400, "recover-walk only valid for zfs-local targets")
         if action == "pull" and r["type"] != "zfs-local":
             raise HTTPException(400, "pull only valid for a zfs-local replica (the off-site copy)")
-        if (action == "snapshot" or action in RECOVER_ACTIONS) and not r["source"]:
+        if (action == "snapshot" or action in RECOVER_ACTIONS or action == "recover-walk") and not r["source"]:
             raise HTTPException(400, "action requires a dataset-backed target")
         if action == "restore" and not opts.get("version"):
             raise HTTPException(400, "restore requires a 'version' (snapshot file path from a search)")
@@ -1914,8 +1917,9 @@ function recRefresh(){ if(_recLast) openRecover(_recLast.target, _recLast.kind, 
 function recBanner(){   // "cached Nm ago" line when the listing was reused, else nothing
   return _recCachedTs ? '<p class=reccached>cached '+relTime(_recCachedTs)+' \\u00b7 Refresh to re-scan</p>' : '';
 }
-async function pollAction(id){                          // resolve to {state,output,cmd,action}
-  for(var i=0;i<180;i++){
+async function pollAction(id, maxTries){                // resolve to {state,output,cmd,action}
+  var lim=maxTries||180;                                // default ~6 min; walks pass a larger value
+  for(var i=0;i<lim;i++){
     var j=await (await fetch('/api/v1/backup/actions/'+id)).json();
     var st=j.state||'?';
     if(['done','failed','stalled'].includes(st)){
@@ -1924,7 +1928,7 @@ async function pollAction(id){                          // resolve to {state,out
     }
     await new Promise(s=>setTimeout(s,2000));
   }
-  throw new Error('timed out after 6 min');
+  throw new Error('timed out');
 }
 async function openRecover(target, kind, refresh){
   var path=null;
@@ -1938,13 +1942,10 @@ async function openRecover(target, kind, refresh){
   var rb=document.getElementById('recrefresh'); if(rb) rb.hidden=false;
   var body=document.getElementById('recbody');
   openRec();
-  if(kind==='deleted' && !refresh){                      // serve the nightly manifest first (instant)
-    var mj=null;
-    try{ mj=await (await fetch('/api/v1/backup/recovery-manifest?target='+encodeURIComponent(target)+'&kind=deleted')).json(); }catch(e){}
-    if(mj && mj.present){ renderDeletedManifest(mj.manifest||{}, mj.walked_ts, mj.entry_count||0); return; }
-  }
-  body.innerHTML='<div class=hempty>scanning '+esc(target)+(kind==='deleted'?' (recursive, may take a moment)':'')+'\\u2026</div>';
-  var action = kind==='points'?'recover-points' : kind==='deleted'?'recover-deleted':'recover-search';
+  if(kind==='deleted'){ await openDeleted(target, refresh); return; }
+  // points / versions stay live (points is cheap + freshness-sensitive; versions is per-file + fast)
+  body.innerHTML='<div class=hempty>scanning '+esc(target)+'\\u2026</div>';
+  var action = kind==='points' ? 'recover-points' : 'recover-search';
   var b={target:target, action:action, requested_by:'ui'}; if(path) b.path=path; if(refresh) b.refresh=true;
   var r,j;
   try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); j=await r.json(); }
@@ -1955,6 +1956,32 @@ async function openRecover(target, kind, refresh){
   catch(e){ body.innerHTML='<div class=hempty>scan did not finish: '+esc(String(e))+'</div>'; return; }
   if(out.state!=='done'){ body.innerHTML='<div class=hempty>scan '+esc(out.state)+':</div><pre class=recpre>'+esc(out.output||'(no output)')+'</pre>'; return; }
   if(kind==='points') renderPoints(out.output); else renderVersions(out.output, kind);
+}
+async function openDeleted(target, refresh){
+  // Deleted is manifest-backed. Normal open serves the stored manifest instantly; a Refresh (or the very
+  // first open before any nightly walk) runs a walk NOW that FILLS the manifest - the scan is kept, not
+  // thrown away - then renders the fresh manifest. An explicit walk bypasses the agent's off-peak window.
+  var body=document.getElementById('recbody');
+  async function loadManifest(){
+    try{ return await (await fetch('/api/v1/backup/recovery-manifest?target='+encodeURIComponent(target)+'&kind=deleted')).json(); }
+    catch(e){ return null; }
+  }
+  if(!refresh){
+    var mj=await loadManifest();
+    if(mj && mj.present){ renderDeletedManifest(mj.manifest||{}, mj.walked_ts, mj.entry_count||0); return; }
+  }
+  body.innerHTML='<div class=hempty>walking '+esc(target)+' for deleted files (recursive; can take a few minutes)\\u2026<br>this also refreshes the saved list.</div>';
+  var b={target:target, action:'recover-walk', requested_by:'ui'};
+  var r,j;
+  try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); j=await r.json(); }
+  catch(e){ body.innerHTML='<div class=hempty>request failed: '+esc(String(e))+'</div>'; return; }
+  if(!r.ok){ body.innerHTML='<div class=hempty>rejected: '+esc(j.detail||('HTTP '+r.status))+'</div>'; return; }
+  var out; try{ out=await pollAction(j.id, 300); }        // walks are slower: allow ~10 min
+  catch(e){ body.innerHTML='<div class=hempty>Walk still running \\u2014 it will finish in the background and fill the list. Reopen Deleted in a bit.</div>'; return; }
+  if(out.state!=='done'){ body.innerHTML='<div class=hempty>walk '+esc(out.state)+':</div><pre class=recpre>'+esc(out.output||'(no output)')+'</pre>'; return; }
+  var mj2=await loadManifest();
+  if(mj2 && mj2.present){ renderDeletedManifest(mj2.manifest||{}, mj2.walked_ts, mj2.entry_count||0); }
+  else { body.innerHTML='<div class=hempty>Walk finished \\u2014 no deleted files found in snapshots.</div>'; }
 }
 function renderPoints(txt){
   var body=document.getElementById('recbody');
