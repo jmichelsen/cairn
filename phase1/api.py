@@ -1167,6 +1167,23 @@ def _link_confirm(conn, agent, removable, dataset, dest_subpath, now):
         (agent, removable, dataset, (dest_subpath or "").strip("/"), now))
     conn.commit()
 
+def _ds_source(conn, dataset):
+    r = conn.execute("SELECT source FROM targets WHERE name=? AND source IS NOT NULL LIMIT 1",
+                     (dataset,)).fetchone()
+    return r["source"] if r else dataset
+
+def _log_link_event(conn, removable, action, message):
+    """Record a non-agent link action (confirm/add/unlink) as a COMPLETED intent, so it shows in the
+    card's History with a timestamp alongside the agent-run actions (verify, relocate, backup)."""
+    row = conn.execute("SELECT id FROM targets WHERE name=? AND type='removable' "
+                       "ORDER BY (agent IS NULL), id LIMIT 1", (removable,)).fetchone()
+    if not row:
+        return
+    now = int(time.time())
+    conn.execute("INSERT INTO intents(target_id,action,opts,state,requested_by,created_ts,result,result_ts,claimed_by) "
+                 "VALUES(?,?,'{}','done','ui',?,?,?,'ui')",
+                 (row["id"], action, now, json.dumps({"output": message}), now))
+
 @app.get("/api/v1/backup/agent/removable-links")
 def agent_removable_links(agent: str, removable: str = None):
     """Agent reads its CONFIRMED links so backup-now knows what to sync. (auth: agent)"""
@@ -1231,8 +1248,13 @@ async def removable_links_confirm(request: Request):
     body = await _json(request); now = int(time.time())
     with db() as conn:
         if body.get("id"):
-            conn.execute("UPDATE removable_links SET confirmed=1, updated_ts=? WHERE id=?",
-                         (now, int(body["id"]))); conn.commit()
+            row = conn.execute("SELECT removable,dataset,dest_subpath FROM removable_links WHERE id=?",
+                               (int(body["id"]),)).fetchone()
+            conn.execute("UPDATE removable_links SET confirmed=1, updated_ts=? WHERE id=?", (now, int(body["id"])))
+            if row:
+                _log_link_event(conn, row["removable"], "link-confirmed",
+                                f"{_ds_source(conn, row['dataset'])} → {row['dest_subpath']}")
+            conn.commit()
             return {"ok": True}
         removable = (body.get("removable") or "").strip(); dataset = (body.get("dataset") or "").strip()
         dest = (body.get("dest_subpath") or "").strip()
@@ -1245,13 +1267,21 @@ async def removable_links_confirm(request: Request):
         if conflict:
             raise HTTPException(409, conflict)
         _link_confirm(conn, agent, removable, dataset, dest, now)
+        _log_link_event(conn, removable, "link-added", f"{_ds_source(conn, dataset)} → {dest.strip('/')}")
+        conn.commit()
         return {"ok": True}
 
 @app.delete("/api/v1/backup/removable-links/{lid}")
 def removable_links_delete(lid: int):
     """Unlink (drop a suggestion or a confirmed link). (auth: admin via middleware)"""
     with db() as conn:
-        conn.execute("DELETE FROM removable_links WHERE id=?", (lid,)); conn.commit()
+        row = conn.execute("SELECT removable,dataset,dest_subpath,confirmed FROM removable_links WHERE id=?",
+                           (lid,)).fetchone()
+        conn.execute("DELETE FROM removable_links WHERE id=?", (lid,))
+        if row and row["confirmed"]:   # log real unlinks, not dismissals of an unconfirmed suggestion
+            _log_link_event(conn, row["removable"], "unlinked",
+                            f"{_ds_source(conn, row['dataset'])} ({row['dest_subpath']})")
+        conn.commit()
     return {"ok": True}
 
 # ---------------- recovery manifests: agent-walked "deleted files" cache per dataset --------------
