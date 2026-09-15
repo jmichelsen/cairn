@@ -373,3 +373,37 @@ def test_removable_attached_rw_fresh_is_ok_and_backupable(monkeypatch):
     d = json.loads(st["detail_json"])
     assert st["severity"] == "OK" and d["caps"]["backupable"] is True
     assert st["last_run_ts"] == now - 3600
+
+
+# ---- removable discovery (structural tree matching) ------------------------------------------
+def test_discover_matches_dataset_by_directory_structure(tmp_path):
+    import os
+    # dataset root has 5 children; the drive holds 4 of them under bk/Pics (drift) => score 0.8
+    ds = tmp_path / "live" / "Pics"
+    for n in ["a", "b", "c", "d", "e"]:
+        os.makedirs(ds / n)
+    drive = tmp_path / "drive"
+    for n in ["a", "b", "c", "d"]:
+        os.makedirs(drive / "bk" / "Pics" / n)
+    # an unrelated dataset that is NOT on the drive
+    karly = tmp_path / "live" / "karly"
+    for n in ["k1", "k2", "k3"]:
+        os.makedirs(karly / n)
+    res = collector.discover_removable_links(
+        str(drive), [{"name": "Pics", "path": str(ds)}, {"name": "karly", "path": str(karly)}])
+    assert len(res) == 1
+    m = res[0]
+    assert m["dataset"] == "Pics" and m["subpath"] == "bk/Pics"
+    assert 0.79 <= m["score"] <= 0.81 and m["matched"] == 4 and m["total"] == 5
+    assert m["added"] == ["e"]                      # the drift = exactly what a sync would add
+
+
+def test_discover_ignores_weak_matches(tmp_path):
+    import os
+    ds = tmp_path / "Pics"
+    for n in ["a", "b", "c", "d", "e"]:
+        os.makedirs(ds / n)
+    drive = tmp_path / "drive"
+    for n in ["a", "zzz"]:                          # only 1 of 5 overlaps -> below min_score
+        os.makedirs(drive / "x" / n)
+    assert collector.discover_removable_links(str(drive), [{"name": "Pics", "path": str(ds)}]) == []

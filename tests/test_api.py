@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 
 os.environ.setdefault("CAIRN_DB", os.path.join(tempfile.mkdtemp(), "cairn-test.db"))
 os.environ.setdefault("CAIRN_ADMIN_TOKEN", "test-admin-token")
@@ -188,3 +189,62 @@ def test_backup_now_button_shows_only_when_backupable():
     off = api._acts(_removable_row(False), can_act=True, viewer=False)
     assert "backup-now" not in off and "Mirror" not in off  # detached / read-only -> no buttons
     assert api._acts(_removable_row(True), can_act=True, viewer=True) == ""  # viewer: no controls
+
+
+# ---- removable links + scorecard credit ------------------------------------------------------
+def _seed_repl(name, source, dest, tier="A", location="offsite", agent="local"):
+    with api.db() as conn:
+        tid = conn.execute(
+            "INSERT INTO targets(name,type,source,dest,tier,location,agent,enabled) "
+            "VALUES(?,?,?,?,?,?,?,1) RETURNING id",
+            (name, "zfs-repl", source, dest, tier, location, agent)).fetchone()[0]
+        conn.execute("INSERT INTO status(ts,target_id,severity) VALUES(1,?, 'OK')", (tid,))
+        conn.commit()
+    return tid
+
+
+def test_link_suggest_then_confirm_roundtrip():
+    with api.db() as conn:
+        api._link_suggest(conn, "local", "extd", [{"dataset": "Pics", "subpath": "bk/Pics", "score": 0.8}], 1000)
+        links = api._links_for(conn, removable="extd")
+        assert len(links) == 1 and links[0]["confirmed"] == 0 and links[0]["dataset"] == "Pics"
+        api._link_confirm(conn, "local", "extd", "Pics", "bk/Pics", 1001)
+        c = api._links_for(conn, removable="extd", confirmed_only=True)
+        assert len(c) == 1 and c[0]["confirmed"] == 1
+
+
+def test_link_suggest_preserves_confirmed_and_drops_stale_suggestions():
+    with api.db() as conn:
+        api._link_confirm(conn, "local", "d2", "Pics", "bk/Pics", 2000)
+        api._link_suggest(conn, "local", "d2", [{"dataset": "karly", "subpath": "k", "score": 0.9}], 2000)
+        got = {L["dataset"]: L["confirmed"] for L in api._links_for(conn, removable="d2")}
+        assert got == {"Pics": 1, "karly": 0}       # confirmed Pics survived a scan that didn't mention it
+        api._link_suggest(conn, "local", "d2", [], 2000)   # a scan mentioning neither
+        got = {L["dataset"] for L in api._links_for(conn, removable="d2")}
+        assert got == {"Pics"}                        # unconfirmed karly dropped, confirmed Pics kept
+
+
+def test_scorecard_credits_fresh_removable_copy():
+    now = int(time.time())
+    _seed_repl("PicsA", "mcz/mclife/PicsA", "vault/PicsA")     # 2 copies (mcz+vault), off-site, fails 3-2-1
+    base = {c["name"]: c for c in api.scorecard()["cards"]}["PicsA"]
+    assert base["copies"] == 2 and base["pass_321"] is False
+    with api.db() as conn:
+        api._link_confirm(conn, "local", "extA", "PicsA", "PicsA", now)
+        conn.execute("UPDATE removable_links SET last_backup_ts=? WHERE removable='extA'", (now,))
+        conn.commit()
+    card = {c["name"]: c for c in api.scorecard()["cards"]}["PicsA"]
+    assert card["copies"] == 3 and card["media"] == 3 and card["removable"] is True
+    assert card["pass_321"] is True
+
+
+def test_scorecard_ignores_stale_removable_copy():
+    now = int(time.time())
+    _seed_repl("PicsB", "mcz/mclife/PicsB", "vault/PicsB")
+    with api.db() as conn:
+        api._link_confirm(conn, "local", "extB", "PicsB", "PicsB", now)
+        conn.execute("UPDATE removable_links SET last_backup_ts=? WHERE removable='extB'",
+                     (now - (api.REMOVABLE_STALE_D + 5) * api.DAY,))
+        conn.commit()
+    card = {c["name"]: c for c in api.scorecard()["cards"]}["PicsB"]
+    assert card["copies"] == 2 and card["removable"] is False and "STALE" in card["note"]
