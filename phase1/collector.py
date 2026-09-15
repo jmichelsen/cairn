@@ -583,12 +583,16 @@ def _removable_last_backup(t, pr):
             pass
     return removable_state(t).get("last_backup_ts")
 
-def cairn_subpath(dataset_source):
-    """Where a cairn-managed copy of a dataset lives on a drive: cairn/<slugged-source>. Keeps every
-    cairn-written tree under one `cairn/` folder in its own per-dataset subfolder, so datasets never
-    mix (e.g. mcz/mclife/Pics -> cairn/mcz_mclife_Pics)."""
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", (dataset_source or "").strip("/")).strip("_")
-    return f"cairn/{slug}" if slug else "cairn/dataset"
+def cairn_subpath(dataset_source, host=None):
+    """Where a cairn-managed copy of a dataset lives on a drive: cairn/<host>/<slugged-source>. Every
+    cairn-written tree sits under one `cairn/` folder, namespaced by SOURCE HOST (so a drive used on
+    two boxes can't collide - cairn/mclife/evo500 vs cairn/other/evo500) then per-dataset (so datasets
+    never mix). E.g. host=mclife, source=mcz/mclife/Pics -> cairn/mclife/mcz_mclife_Pics."""
+    def _slug(s):
+        return re.sub(r"[^A-Za-z0-9._-]+", "_", (s or "").strip("/")).strip("_")
+    ds = _slug(dataset_source) or "dataset"
+    h = _slug(host)
+    return f"cairn/{h}/{ds}" if h else f"cairn/{ds}"
 
 def removable_relocate(mount, from_sub, to_sub):
     """Rename a subtree WITHIN a drive (from_sub -> to_sub) - an intra-filesystem move, so it's an

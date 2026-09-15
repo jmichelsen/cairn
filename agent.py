@@ -16,8 +16,10 @@ Env: CAIRN_API_URL, CAIRN_API_TOKEN, CAIRN_AGENT_NAME, CAIRN_TARGETS, CAIRN_CAN_
      CAIRN_INTERVAL, CAIRN_DRYRUN(0/1), CAIRN_ACTION_TIMEOUT
 Run: agent.py [--once]
 """
-import base64, gzip, json, os, sys, time, urllib.request, urllib.error
+import base64, gzip, json, os, socket, sys, time, urllib.request, urllib.error
 from pathlib import Path
+
+HOSTNAME = socket.gethostname().split(".")[0]   # source-server namespace for cairn/<host>/<dataset>
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "phase1"))
@@ -119,7 +121,7 @@ def do_report(cfg):
         items.append(item)
     resp = api_call("POST", "/api/v1/backup/report",
                     {"agent": NAME, "ts": int(time.time()), "can_execute": CAN_EXEC,
-                     "interval": INTERVAL, "version": VERSION, "statuses": items}) or {}
+                     "interval": INTERVAL, "version": VERSION, "hostname": HOSTNAME, "statuses": items}) or {}
     return len(items), bool(resp.get("update"))
 
 def self_update():
@@ -287,7 +289,7 @@ def do_execute(cfg):
             if not link or ds not in dmap:
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                          {"ok": False, "output": f"no confirmed link for dataset '{ds}'"}); continue
-            newsub = C.cairn_subpath(dmap[ds]["source"])
+            newsub = C.cairn_subpath(dmap[ds]["source"], HOSTNAME)   # cairn/<host>/<dataset-slug>
             ok2, msg = C.removable_relocate(pr["mount"], link["dest_subpath"], newsub)
             if ok2:
                 api_call("POST", "/api/v1/backup/agent/removable-links",

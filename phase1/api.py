@@ -282,6 +282,7 @@ def _init_db():
                                   ("agents", "report_interval", "INTEGER"),
                                   ("agents", "agent_version", "TEXT"),
                                   ("agents", "update_requested", "INTEGER DEFAULT 0"),
+                                  ("agents", "hostname", "TEXT"),
                                   ("removable_links", "meta_json", "TEXT"),
                                   ("removable_links", "verify_method", "TEXT"),
                                   ("removable_links", "verify_ts", "INTEGER")]:
@@ -860,16 +861,18 @@ async def report(request: Request):
     can_exec = 1 if payload.get("can_execute") else 0
     interval = int(payload.get("interval") or 0) or None   # agent's own poll cadence (for staleness)
     version = (payload.get("version") or "").strip() or None   # agent's running cairn version
+    hostname = (payload.get("hostname") or "").strip() or None  # agent's host, for cairn/<host>/ namespacing
     statuses = payload.get("statuses", [])
     alerts = []
     with db() as conn:
-        conn.execute("""INSERT INTO agents(name,can_execute,last_report_ts,report_interval,agent_version)
-            VALUES(?,?,?,?,?)
+        conn.execute("""INSERT INTO agents(name,can_execute,last_report_ts,report_interval,agent_version,hostname)
+            VALUES(?,?,?,?,?,?)
             ON CONFLICT(name) DO UPDATE SET can_execute=excluded.can_execute,
             last_report_ts=excluded.last_report_ts,
             report_interval=COALESCE(excluded.report_interval, agents.report_interval),
-            agent_version=COALESCE(excluded.agent_version, agents.agent_version)""",
-            (agent, can_exec, now, interval, version))
+            agent_version=COALESCE(excluded.agent_version, agents.agent_version),
+            hostname=COALESCE(excluded.hostname, agents.hostname)""",
+            (agent, can_exec, now, interval, version, hostname))
         for s in statuses:
             name = s.get("name")
             if not name:
@@ -1118,6 +1121,15 @@ def _removable_agent(conn, removable):
                      "ORDER BY (agent IS NULL), id LIMIT 1", (removable,)).fetchone()
     return r["agent"] if r else None
 
+def _removable_host(conn, removable):
+    """Hostname of the box that owns this removable (for cairn/<host>/ namespacing); falls back to the
+    agent name, then 'host' if the agent hasn't reported a hostname yet."""
+    r = conn.execute(
+        "SELECT a.hostname AS hn, t.agent AS ag FROM targets t LEFT JOIN agents a ON a.name=t.agent "
+        "WHERE t.name=? AND t.type='removable' AND t.enabled=1 ORDER BY (t.agent IS NULL), t.id LIMIT 1",
+        (removable,)).fetchone()
+    return (r["hn"] or r["ag"] or "host") if r else "host"
+
 def _link_suggest(conn, agent, removable, suggestions, now):
     """Upsert discovery suggestions. A CONFIRMED row is preserved (only its score refreshes); a new
     suggestion lands as confirmed=0. Unconfirmed suggestions no longer proposed are dropped so stale
@@ -1258,11 +1270,13 @@ async def removable_links_confirm(request: Request):
             return {"ok": True}
         removable = (body.get("removable") or "").strip(); dataset = (body.get("dataset") or "").strip()
         dest = (body.get("dest_subpath") or "").strip()
-        if not removable or not dataset or not dest:
-            raise HTTPException(400, "removable, dataset, dest_subpath (or id) required")
+        if not removable or not dataset:
+            raise HTTPException(400, "removable and dataset (or id) required")
         agent = (body.get("agent") or "").strip() or _removable_agent(conn, removable)
         if not agent:
             raise HTTPException(404, f"no agent owns removable '{removable}'")
+        if not dest:   # auto-file under cairn/<host>/<dataset-slug> (the same path the relocate uses)
+            dest = _cmd.cairn_subpath(_ds_source(conn, dataset), _removable_host(conn, removable))
         conflict = _subpath_conflict(conn, agent, removable, dataset, dest)
         if conflict:
             raise HTTPException(409, conflict)
@@ -1780,7 +1794,7 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .rl-btns,.rl-ctl{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px;align-items:center}
 .rl-hint{font-size:11px;color:var(--mut)} .rl-hint b{color:var(--ink);font-weight:600}
 .rl-add{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}
-.rl-addl{font-size:11px;color:var(--mut);width:100%}
+.rl-addl{font-size:11px;color:var(--mut);width:100%} .rl-addl code{color:var(--ink);font-size:11px}
 .rl-btns button,.rl-ctl button{appearance:none;font:600 11px/1 "Red Hat Text";border:1px solid var(--line);
   background:var(--surf);color:var(--ink);border-radius:7px;padding:5px 9px;cursor:pointer}
 .rl-btns button.pri,.rl-ctl button.pri{background:var(--acc);color:#fff;border-color:var(--acc)}
@@ -2060,12 +2074,11 @@ async function unlink(id){
   var r=await fetch('/api/v1/backup/removable-links/'+id,{method:'DELETE'});
   if(r.ok) location.reload(); else alert('unlink failed');
 }
-async function addLink(btn, removable){
-  var w=btn.parentNode, sel=w.querySelector('.rl-sel'), ds=sel.value, sub=w.querySelector('.rl-sub').value.trim();
-  if(!sub){ var o=sel.options[sel.selectedIndex]; sub=o?o.getAttribute('data-sub'):''; }  // default to cairn/<slug>
-  if(!ds||!sub){ alert('pick a dataset'); return; }
+async function addLink(btn, removable){   // subpath is auto-computed server-side: cairn/<host>/<dataset>
+  var ds=btn.parentNode.querySelector('.rl-sel').value;
+  if(!ds){ alert('pick a dataset'); return; }
   var r=await fetch('/api/v1/backup/removable-links',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({removable:removable, dataset:ds, dest_subpath:sub})});
+    body:JSON.stringify({removable:removable, dataset:ds})});
   if(r.ok) location.reload(); else { var j={}; try{j=await r.json()}catch(e){} alert('add failed: '+(j.detail||r.status)); }
 }
 function verifyLink(removable, dataset, tier){   // tier: 'census' (size+mtime) | 'content' (auto) | 'xattr' | 'hash'
@@ -2940,6 +2953,7 @@ def _removable_links_html(r, viewer=False):
     fit_note = f'<span class=rl-free>drive: {_cap(free)} free of {_cap(total)}</span>' if free else ""
     with db() as conn:
         links = _links_for(conn, removable=r["name"])
+        host = _removable_host(conn, r["name"])
         cands = [(x["name"], x["source"]) for x in conn.execute(
             "SELECT DISTINCT name, source FROM targets WHERE type IN ('zfs-local','zfs-repl') "
             "AND source IS NOT NULL AND enabled=1 ORDER BY source").fetchall()]
@@ -3023,11 +3037,10 @@ def _removable_links_html(r, viewer=False):
                   f'<span class=rl-hint>scan <b>this drive</b> and match its folders to your datasets</span></div>')
         picker = ""
         if avail:
-            opts = "".join(f'<option value="{_esc(nm)}" data-sub="{_esc(_cmd.cairn_subpath(src or nm))}">'
-                           f'{_esc(src or nm)}</option>' for nm, src in avail)
-            picker = (f'<div class=rl-add><span class=rl-addl>or link a dataset manually:</span>'
+            opts = "".join(f'<option value="{_esc(nm)}">{_esc(src or nm)}</option>' for nm, src in avail)
+            picker = (f'<div class=rl-add><span class=rl-addl>or link a dataset manually '
+                      f'(auto-filed under <code>cairn/{_esc(host)}/</code>):</span>'
                       f'<select class=rl-sel>{opts}</select>'
-                      f'<input class=rl-sub placeholder="folder on drive (default cairn/…)">'
                       f'<button onclick="addLink(this,\'{name}\')">Add</button></div>')
         controls = detect + picker
     return (f'<div class=rlinks><div class=rl-hd>Datasets on this drive{fit_note}</div>'
