@@ -426,6 +426,8 @@ def test_removable_relocate_moves_within_drive(tmp_path):
     assert ok, msg
     assert (mount / "cairn" / "mcz_Pics" / "a.jpg").exists()
     assert not (mount / "old" / "Pics").exists()
+    assert not (mount / "old").exists()          # now-empty parent pruned
+    assert (mount).exists()                       # but never the mount itself
 
 
 def test_removable_relocate_refuses_existing_dest_and_escape(tmp_path):
