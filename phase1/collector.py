@@ -545,6 +545,13 @@ def _removable_dest(t):
         return None
     return os.path.join(mount, sub) if sub else mount
 
+def _removable_log_path(t):
+    """Persistent rsync log for this removable target - appended each real run so a backup can be
+    inspected at any time (long after the intent output scrolled off). Lives off the drive so it
+    survives the drive being unplugged."""
+    slug = re.sub(r"[^A-Za-z0-9_.-]", "_", str(t.get("name", "x")))
+    return os.path.join(_cairn_state_dir(), f"removable-{slug}.rsync.log")
+
 def removable_probe(t):
     """Locate the drive by a STABLE id (fs UUID or /dev/disk/by-id, never /dev/sdX) and read its mount.
     Returns dict(attached, mounted, ro, mount, dev). No root needed."""
@@ -1422,10 +1429,20 @@ def build_command(action, t, opts=None):
         dest = _removable_dest(t)
         if not src or not dest:
             return None, "removable target needs source + mount"
+        dry = bool(opts.get("dryrun"))
+        # mirror (--delete) is opt-in and dangerous. Per-click `opts.mirror` wins; else the target's
+        # `mirror` default; else off. A stale/diverged drive is never clobbered unless explicitly asked.
+        mirror = opts.get("mirror")
+        if mirror is None:
+            mirror = t.get("mirror")
         cmd = ["rsync", "-aH", "--stats"]
-        if opts.get("dryrun"):
+        # Persistent, appended rsync log (real runs only - a dry run's "would transfer" lines would
+        # pollute the record of actual backups; dry output still comes back in the intent result).
+        if not dry:
+            cmd += ["--log-file", _removable_log_path(t)]
+        if dry:
             cmd.append("-n")
-        if t.get("mirror"):
+        if mirror:
             cmd.append("--delete")
         for ex in (t.get("exclude") or []):
             cmd += ["--exclude", str(ex)]

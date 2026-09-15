@@ -184,6 +184,7 @@ def test_backup_now_is_an_allowed_action():
 def test_backup_now_button_shows_only_when_backupable():
     on = api._acts(_removable_row(True), can_act=True, viewer=False)
     assert "backup-now" in on and "Back up now" in on
+    assert "mirrorRemovable" in on and "Mirror" in on     # destructive variant is offered too
     off = api._acts(_removable_row(False), can_act=True, viewer=False)
-    assert "backup-now" not in off        # detached / read-only -> no button
+    assert "backup-now" not in off and "Mirror" not in off  # detached / read-only -> no buttons
     assert api._acts(_removable_row(True), can_act=True, viewer=True) == ""  # viewer: no controls
