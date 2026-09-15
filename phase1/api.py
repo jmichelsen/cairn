@@ -2788,33 +2788,38 @@ def _removable_links_html(r, viewer=False):
     name = _esc(r["name"])
     with db() as conn:
         links = _links_for(conn, removable=r["name"])
-        cands = [x["name"] for x in conn.execute(
-            "SELECT DISTINCT name FROM targets WHERE type IN ('zfs-local','zfs-repl') "
-            "AND enabled=1 ORDER BY name").fetchall()]
+        # name -> full dataset source (e.g. "mcz/mclife/Pics"), so the card is unambiguous. Datasets
+        # linkable to a removable are the dataset-backed targets that have a source.
+        cands = [(x["name"], x["source"]) for x in conn.execute(
+            "SELECT DISTINCT name, source FROM targets WHERE type IN ('zfs-local','zfs-repl') "
+            "AND source IS NOT NULL AND enabled=1 ORDER BY source").fetchall()]
+    srcmap = dict(cands)
+    def _dsname(nm):   # full source when known, else the bare target name
+        return _esc(srcmap.get(nm) or nm)
     linked = {L["dataset"] for L in links}
     out = []
     for L in links:
-        ds = _esc(L["dataset"]); sub = _esc(L["dest_subpath"]); lid = int(L["id"])
+        full = _dsname(L["dataset"]); sub = _esc(L["dest_subpath"]); lid = int(L["id"])
         if L["confirmed"]:
             when = _ago(L["last_backup_ts"]) if L.get("last_backup_ts") else "not yet synced"
             ctl = "" if viewer else f'<button onclick="unlink({lid})" title="remove this link">Unlink</button>'
-            out.append(f'<div class=rl><span class="rl-i ok">linked</span><b>{ds}</b>'
-                       f'<span class=rl-p>{sub}</span><span class=rl-w>{_esc(when)}</span>{ctl}</div>')
+            out.append(f'<div class=rl><span class="rl-i ok">linked</span><b>{full}</b>'
+                       f'<span class=rl-p>&rarr; {sub}</span><span class=rl-w>{_esc(when)}</span>{ctl}</div>')
         else:
             sc = f"{L['score']:.0%}" if L.get("score") is not None else "?"
             ctl = "" if viewer else (f'<button class=pri onclick="confirmLink({lid})">Confirm</button>'
                                      f'<button onclick="unlink({lid})">Dismiss</button>')
-            out.append(f'<div class=rl><span class="rl-i q">detected</span><b>{ds}</b>'
-                       f'<span class=rl-p>{sub}</span><span class=rl-w>match {sc}</span>{ctl}</div>')
+            out.append(f'<div class=rl><span class="rl-i q">detected</span><b>{full}</b>'
+                       f'<span class=rl-p>&rarr; {sub}</span><span class=rl-w>match {sc}</span>{ctl}</div>')
     body = "".join(out) or '<div class=rl-none>no datasets linked yet - Detect or add one below</div>'
     controls = ""
     if not viewer:
-        avail = [c for c in cands if c not in linked]
+        avail = [(nm, src) for nm, src in cands if nm not in linked]
         picker = ""
         if avail:
-            opts = "".join(f'<option value="{_esc(c)}">{_esc(c)}</option>' for c in avail)
+            opts = "".join(f'<option value="{_esc(nm)}">{_esc(src or nm)}</option>' for nm, src in avail)
             picker = (f'<select class=rl-sel>{opts}</select>'
-                      f'<input class=rl-sub placeholder="path on drive (e.g. photos)">'
+                      f'<input class=rl-sub placeholder="destination folder on the drive (e.g. Pics)">'
                       f'<button onclick="addLink(this,\'{name}\')">Add</button>')
         controls = (f'<div class=rl-ctl><button onclick="scanRemovable(\'{name}\')" '
                     f'title="scan the drive and auto-detect which datasets it already holds">Detect contents</button>'
