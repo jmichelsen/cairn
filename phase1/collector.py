@@ -867,6 +867,10 @@ def adapter_removable(t, defaults, now):
         detail["total_bytes"] = sv.f_blocks * sv.f_frsize
     except OSError:
         pass
+    try:                                        # is the drive hash-tagged? (lets the UI warn before a
+        detail["tagged"] = round(drive_tagged_fraction(pr["mount"]), 3)   # slow full-hash verify)
+    except OSError:
+        pass
     reasons.append("attached (read-only)" if pr["ro"] else "attached")
     if pr["ro"]:
         st["severity"] = worst(st["severity"], "WARN"); reasons.append("mounted READ-ONLY - remount rw to back up")
