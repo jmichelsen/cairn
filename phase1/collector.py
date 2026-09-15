@@ -638,10 +638,25 @@ def rsync_census(src, dest, excludes=None, timeout=1800):
     update = max(transferred - add, 0)
     unchanged = max(reg_total - transferred, 0)
     pct = round(unchanged / reg_total, 4) if reg_total else 0.0
-    sample = [l for l in out.splitlines() if l[:1] in (">", "c", "*", "<")][:80]
+    # Aggregate the (up to 100k+) itemized lines by TOP-LEVEL folder, so the diff is a readable "where
+    # is the churn" table instead of an unreadable per-file scroll.
+    buckets = {}
+    for line in out.splitlines():
+        if line.startswith("*deleting"):
+            p = line[9:].strip("/ \t"); cat = "delete"
+        elif len(line) > 12 and line[1] == "f":            # a file entry: YXcstpoguax<space>path
+            p = line[12:]; cat = "add" if set(line[2:11]) <= {"+"} else "update"
+        else:
+            continue
+        top = p.split("/", 1)[0] or "(root)"
+        b = buckets.setdefault(top, {"add": 0, "update": 0, "delete": 0})
+        b[cat] += 1
+    by_folder = sorted(({"folder": k, "add": v["add"], "update": v["update"], "delete": v["delete"]}
+                        for k, v in buckets.items()),
+                       key=lambda x: -(x["add"] + x["update"] + x["delete"]))
     return {"pct": pct, "reg_total": reg_total, "transfer": transferred, "add": add,
-            "update": update, "delete": deletes, "unchanged": unchanged,
-            "bytes_add": bytes_add, "sample": sample}, None
+            "update": update, "delete": deletes, "unchanged": unchanged, "bytes_add": bytes_add,
+            "folders_total": len(by_folder), "by_folder": by_folder[:40]}, None
 
 def xattr_verify(src, dest, cap=1000000):
     """Tier-2 CONTENT verify with NO file reads: compare the cached user.b3sig xattr on each source
