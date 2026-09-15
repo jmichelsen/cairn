@@ -2068,8 +2068,23 @@ async function addLink(btn, removable){
     body:JSON.stringify({removable:removable, dataset:ds, dest_subpath:sub})});
   if(r.ok) location.reload(); else { var j={}; try{j=await r.json()}catch(e){} alert('add failed: '+(j.detail||r.status)); }
 }
-function verifyLink(removable, dataset, tier){   // tier: 'census' (size+mtime) | 'xattr' (content) | 'hash'
+function verifyLink(removable, dataset, tier){   // tier: 'census' (size+mtime) | 'content' (auto) | 'xattr' | 'hash'
   post({target:removable, action:'removable-verify', dataset:dataset, tier:(tier||'census'), requested_by:'ui'});
+}
+function verifyContent(btn, removable, dataset){   // confirmed: fast if tagged, else warn with a hash ETA
+  var tagged=parseFloat(btn.getAttribute('data-tagged'));   // NaN until the agent reports it
+  var used=parseFloat(btn.getAttribute('data-used'))||0, gb=used/1e9, msg;
+  if(tagged>=0.8){
+    msg='Verify '+dataset+' content using the drive’s cached hashes (fast, no re-read). Proceed?';
+  } else {
+    var mins=used/1e6/60/60;   // ~60 MB/s rough
+    var eta = mins<1 ? '<1 min' : (mins<90 ? Math.round(mins)+' min' : (mins/60).toFixed(1)+' h');
+    var untag = (tagged>=0) ? 'only '+Math.round(tagged*100)+'% of the drive is hash-tagged' : 'the drive isn’t hash-tagged';
+    msg='Content verify for '+dataset+': '+untag+', so it must READ EVERY BYTE (~'+gb.toFixed(0)+
+        ' GB, roughly '+eta+' at ~60 MB/s). Proceed?';
+  }
+  if(!confirm(msg)) return;
+  verifyLink(removable, dataset, 'content');
 }
 async function relocateLink(removable, dataset){
   if(!confirm('Move this dataset’s tree under cairn/ on the drive? This is an instant on-drive rename (no copy).')) return;
@@ -2920,6 +2935,8 @@ def _removable_links_html(r, viewer=False):
     name = _esc(r["name"])
     det = json.loads(r.get("detail_json") or "{}")
     free = det.get("free_bytes"); total = det.get("total_bytes")
+    used = (total - free) if (free is not None and total is not None) else 0
+    tagged = det.get("tagged")   # fraction of drive files carrying a b3sig (None until the agent reports)
     fit_note = f'<span class=rl-free>drive: {_cap(free)} free of {_cap(total)}</span>' if free else ""
     with db() as conn:
         links = _links_for(conn, removable=r["name"])
@@ -2986,7 +3003,9 @@ def _removable_links_html(r, viewer=False):
             reloc = ('<button onclick="relocateLink(\'{n}\',\'{d}\')" title="move this tree under cairn/ (instant, on-drive)">Move under cairn/</button>'.format(n=name, d=ds_js)
                      if not L["dest_subpath"].startswith("cairn/") else "")
             btns = (f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'census\')" title="re-check size+mtime match + fit">Check</button>'
-                    f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'content\')" title="content-verify: uses cached b3sig xattrs if the drive is tagged, else a full BLAKE3 hash (slow)">Verify content</button>'
+                    f'<button data-tagged="{tagged if tagged is not None else ""}" data-used="{used}" '
+                    f'onclick="verifyContent(this,\'{name}\',\'{ds_js}\')" '
+                    f'title="content-verify: cached b3sig xattrs if the drive is tagged, else a full BLAKE3 hash (slow)">Verify content</button>'
                     f'{diffbtn}{reloc}<button onclick="unlink({lid})" title="remove this link">Unlink</button>')
         else:
             btns = f'<button class=pri onclick="confirmLink({lid})">Confirm</button>{diffbtn}<button onclick="unlink({lid})">Dismiss</button>'
