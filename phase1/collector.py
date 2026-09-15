@@ -507,6 +507,112 @@ def adapter_rclone(t, defaults, now):
     st["detail_json"] = json.dumps(dict(reasons=reasons, tool="rclone"))
     return [st]
 
+# ---------------- removable 2nd-leg (an external drive as the 3-2-1 "2nd media") ----------------
+# Monitoring is READ-ONLY and needs NO privilege: it reads /dev/disk/by-* symlinks and the mount
+# table only. Backups run on demand via the 'backup-now' action (rsync incremental); absence of the
+# drive is a NEUTRAL state, never CRIT (an unplugged 2nd-leg is expected).
+def _cairn_state_dir():
+    d = os.environ.get("CAIRN_STATE_DIR") or os.path.expanduser("~/.local/state/cairn")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+def _removable_state_path(t):
+    slug = re.sub(r"[^A-Za-z0-9_.-]", "_", str(t.get("name", "x")))
+    return os.path.join(_cairn_state_dir(), f"removable-{slug}.json")
+
+def removable_state(t):
+    try:
+        with open(_removable_state_path(t)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+def removable_write_state(t, **kw):
+    s = removable_state(t); s.update(kw)
+    try:
+        with open(_removable_state_path(t), "w") as f:
+            json.dump(s, f)
+    except OSError:
+        pass
+
+def _removable_dest(t):
+    """Absolute path the backup writes INTO: <mount>/<dest_subpath>."""
+    mount = t.get("mount"); sub = (t.get("dest_subpath") or "").strip("/")
+    if not mount:
+        return None
+    return os.path.join(mount, sub) if sub else mount
+
+def removable_probe(t):
+    """Locate the drive by a STABLE id (fs UUID or /dev/disk/by-id, never /dev/sdX) and read its mount.
+    Returns dict(attached, mounted, ro, mount, dev). No root needed."""
+    uuid = t.get("uuid"); byid = t.get("by_id"); dev = None
+    if uuid and os.path.exists(f"/dev/disk/by-uuid/{uuid}"):
+        dev = os.path.realpath(f"/dev/disk/by-uuid/{uuid}")
+    elif byid and os.path.exists(f"/dev/disk/by-id/{byid}"):
+        dev = os.path.realpath(f"/dev/disk/by-id/{byid}")
+    mount = t.get("mount"); mounted = False; ro = False
+    if mount:
+        rc, out, _ = run(["findmnt", "-nro", "SOURCE,OPTIONS", mount])
+        if rc == 0 and out.strip():
+            mounted = True
+            parts = out.strip().split()
+            opts = parts[-1] if parts else ""
+            ro = "ro" in opts.split(",")
+    return dict(attached=dev is not None, mounted=mounted, ro=ro, mount=mount, dev=dev)
+
+def _removable_last_backup(t, pr):
+    """Authoritative last-backup epoch: the on-drive stamp when the drive is present+mounted, else the
+    host-side state written on the last successful run."""
+    dest = _removable_dest(t)
+    if pr["mounted"] and dest:
+        stamp = os.path.join(dest, ".cairn-lastbackup")
+        try:
+            with open(stamp) as f:
+                return int(f.read().strip())
+        except (OSError, ValueError):
+            pass
+    return removable_state(t).get("last_backup_ts")
+
+def adapter_removable(t, defaults, now):
+    """A removable external drive as a 2nd-media leg. Reports PRESENCE + freshness; the actual backup
+    runs on demand (see the 'backup-now' action). Absence never escalates past WARN (and only after a
+    long grace), so an unplugged drive is a calm 'detached', not a CRIT."""
+    tool = t.get("tool", "rsync")
+    pr = removable_probe(t)
+    last = _removable_last_backup(t, pr)
+    detail = dict(tool=tool, removable=True, attached=pr["attached"], mounted=pr["mounted"],
+                  mount=pr["mount"], location=t.get("location", "removable"))
+    if last:
+        detail["last_backup_ts"] = last
+    caps = {"backupable": False}
+    st = dict(severity="OK", last_error=None, last_run_ts=last)
+    reasons = []
+    if not pr["attached"]:
+        # neutral detached state; only nudge WARN after a long grace since the last backup
+        if last:
+            age_d = (now - last) // 86400
+            reasons.append(f"detached · last backup {age_d}d ago")
+            dw = int(t.get("detach_warn_d", defaults.get("removable_detach_warn_d", 45)))
+            if age_d >= dw:
+                st["severity"] = "WARN"; reasons.append(f"over {dw}d - attach it to refresh the 2nd copy")
+        else:
+            reasons.append("detached · never backed up by cairn")
+        st["detail_json"] = json.dumps(dict(detail, reasons=reasons, caps=caps)); return [st]
+    if not pr["mounted"]:
+        st["severity"] = "WARN"; reasons.append(f"attached but not mounted at {pr['mount']}")
+        st["detail_json"] = json.dumps(dict(detail, reasons=reasons, caps=caps)); return [st]
+    reasons.append("attached (read-only)" if pr["ro"] else "attached")
+    if pr["ro"]:
+        st["severity"] = worst(st["severity"], "WARN"); reasons.append("mounted READ-ONLY - remount rw to back up")
+    else:
+        caps["backupable"] = True
+    reasons += _fresh(st, t, defaults, now, last, "last backup")
+    st["detail_json"] = json.dumps(dict(detail, reasons=reasons, caps=caps))
+    return [st]
+
 def adapter_snapper(t, defaults, now):
     """snapper (btrfs) config: newest snapshot age (freshness) + count. Config name in `source`
     (e.g. root, home). Uses snapper --jsonout (0.10+); needs read access to the config."""
@@ -1245,6 +1351,8 @@ def collect_all(cfg, now=None):
                 sts = adapter_restic(t, defaults, now)
             elif typ == "rclone":
                 sts = adapter_rclone(t, defaults, now)
+            elif typ == "removable":
+                sts = adapter_removable(t, defaults, now)
             elif typ == "snapper":
                 sts = adapter_snapper(t, defaults, now)
             elif typ == "smart":
@@ -1301,6 +1409,28 @@ def build_command(action, t, opts=None):
         if not opts.get("create_snapshot", True):
             cmd.append("--no-sync-snap")
         return cmd + [src, dst], None
+    if action == "backup-now":
+        # Incremental backup of a live source onto a removable 2nd-leg drive. rsync only for now
+        # (borg/restic later). ADDITIVE by default (no --delete): a stale/diverged drive is never
+        # auto-clobbered - set `mirror: true` on the target to opt into --delete. The agent's handler
+        # guards presence/rw and stamps the drive on success; here we only build the argv.
+        if typ != "removable":
+            return None, f"'backup-now' not allowed for type '{typ}'"
+        tool = t.get("tool", "rsync")
+        if tool != "rsync":
+            return None, f"backup tool '{tool}' not supported yet (rsync only)"
+        dest = _removable_dest(t)
+        if not src or not dest:
+            return None, "removable target needs source + mount"
+        cmd = ["rsync", "-aH", "--stats"]
+        if opts.get("dryrun"):
+            cmd.append("-n")
+        if t.get("mirror"):
+            cmd.append("--delete")
+        for ex in (t.get("exclude") or []):
+            cmd += ["--exclude", str(ex)]
+        # trailing slashes: copy the CONTENTS of src into dest
+        return cmd + ["--", src.rstrip("/") + "/", dest.rstrip("/") + "/"], None
     if action == "scrub":
         if typ != "zfs-local":
             return None, f"'scrub' not allowed for type '{typ}'"

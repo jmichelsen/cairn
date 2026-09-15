@@ -735,7 +735,7 @@ def timeline(days: int = 14):
 # The API never touches ZFS/borg/disks. Agents (local + remote) do all host work and talk HTTP.
 import subprocess
 NOTIFY_SH = os.environ.get("NOTIFY_SH", str(HERE.parent / "phase0" / "notify.sh"))
-ALLOWED_ACTIONS = {"snapshot", "sync", "scrub", "pull",
+ALLOWED_ACTIONS = {"snapshot", "sync", "scrub", "pull", "backup-now",
                    "recover-points", "recover-search", "recover-deleted", "restore",
                    "recover-walk",       # on-demand deleted-files walk that FILLS the stored manifest
                    "recover-versions",   # folder-wide file version history (enumerate + batch httm)
@@ -976,6 +976,11 @@ async def create_action(request: Request):
             raise HTTPException(400, "sync only valid for zfs-repl targets")
         if action == "scrub" and r["type"] != "zfs-local":
             raise HTTPException(400, "scrub only valid for zfs-local targets")
+        if action == "backup-now":
+            if r["type"] != "removable":
+                raise HTTPException(400, "backup-now only valid for removable targets")
+            if not r["source"]:
+                raise HTTPException(400, "removable target has no source to back up")
         if action == "recover-walk" and r["type"] != "zfs-local":
             raise HTTPException(400, "recover-walk only valid for zfs-local targets")
         if action == "pull" and r["type"] != "zfs-local":
@@ -1286,6 +1291,7 @@ def revoke_token(label: str):
 GROUPS = {"zfs-local": (0, "Pools"),
           "snapper": (0, "Snapshots (snapper)"),
           "rclone": (1, "Off-site (rclone)"),
+          "removable": (1, "Removable drives"),
           "zfs-repl": (2, "Replication (ZFS)"),
           "borg-repo": (3, "Archive repos (borg)"),
           "restic": (3, "Archive repos (restic)"),
@@ -2399,6 +2405,12 @@ def _acts(r, can_act, viewer=False):
                 main += f'<button class=scrubbtn data-scrub disabled>{lbl}</button>'
             else:
                 main += f'<button class=scrubbtn data-scrub onclick="act(\'{n}\',\'scrub\',true)">Scrub</button>'
+    elif t == "removable":
+        # Back up now only when the drive is present AND writable (caps.backupable); a detached or
+        # read-only drive shows no button - the card's reasons say why ("detached" / "read-only").
+        main = (f"<button class=pri onclick=\"act('{n}','backup-now')\" "
+                f"title=\"incremental rsync to the attached 2nd-leg drive\">Back up now</button>"
+                if caps.get("backupable") else "")
     else:
         return ""
     return f'<div class="cact">{main}</div>{rec}'

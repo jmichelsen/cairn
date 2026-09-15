@@ -278,3 +278,79 @@ def test_reduce_accepts_future_array_form():
     js, total = collector.reduce_deleted_manifest(arr)
     out = _j.loads(js)
     assert total == 2 and set(out) == {"/mnt/pool/a.txt", "/mnt/pool/b.txt"}
+
+
+# ---- removable 2nd-leg -----------------------------------------------------------------------
+_REMOVABLE_T = {"name": "ext", "type": "removable", "tool": "rsync",
+                "uuid": "1234-abcd", "mount": "/mnt/ext", "source": "/tank/photos",
+                "dest_subpath": "photos", "tier": "B", "location": "removable"}
+
+
+def test_backup_now_builds_incremental_rsync():
+    cmd, err = collector.build_command("backup-now", _REMOVABLE_T)
+    assert err is None
+    assert cmd == ["rsync", "-aH", "--stats", "--", "/tank/photos/", "/mnt/ext/photos/"]
+    assert "--delete" not in cmd            # additive by default: never auto-clobbers
+
+
+def test_backup_now_mirror_and_excludes_and_dryrun():
+    t = dict(_REMOVABLE_T, mirror=True, exclude=["*.tmp", "cache"])
+    cmd, _ = collector.build_command("backup-now", t, {"dryrun": True})
+    assert "--delete" in cmd and "-n" in cmd
+    assert cmd.count("--exclude") == 2 and "*.tmp" in cmd and "cache" in cmd
+
+
+def test_backup_now_rejected_on_non_removable():
+    cmd, err = collector.build_command("backup-now", {"type": "zfs-local", "source": "tank"})
+    assert cmd is None and "not allowed" in err
+
+
+def test_backup_now_needs_source_and_mount():
+    cmd, err = collector.build_command("backup-now", {"type": "removable", "tool": "rsync",
+                                                      "mount": "/mnt/ext"})
+    assert cmd is None and "source" in err
+
+
+def _probe(monkeypatch, **kw):
+    base = {"attached": True, "mounted": True, "ro": False, "mount": "/mnt/ext", "dev": "/dev/sdz1"}
+    monkeypatch.setattr(collector, "removable_probe", lambda t: dict(base, **kw))
+
+
+def test_removable_detached_is_neutral_not_crit(monkeypatch):
+    _probe(monkeypatch, attached=False, mounted=False)
+    monkeypatch.setattr(collector, "_removable_last_backup", lambda t, pr: None)
+    st = collector.adapter_removable(_REMOVABLE_T, collector.DEFAULT_THRESHOLDS, 1_000_000)[0]
+    assert st["severity"] == "OK"
+    import json
+    d = json.loads(st["detail_json"])
+    assert d["caps"]["backupable"] is False and "detached" in d["reasons"][0]
+
+
+def test_removable_detached_long_grace_warns(monkeypatch):
+    _probe(monkeypatch, attached=False, mounted=False)
+    now = 100 * 86400
+    monkeypatch.setattr(collector, "_removable_last_backup", lambda t, pr: now - 60 * 86400)
+    st = collector.adapter_removable(dict(_REMOVABLE_T, detach_warn_d=45),
+                                     collector.DEFAULT_THRESHOLDS, now)[0]
+    assert st["severity"] == "WARN"        # 60d detached, past the 45d grace
+
+
+def test_removable_readonly_warns_and_blocks_backup(monkeypatch):
+    _probe(monkeypatch, ro=True)
+    monkeypatch.setattr(collector, "_removable_last_backup", lambda t, pr: None)
+    st = collector.adapter_removable(_REMOVABLE_T, collector.DEFAULT_THRESHOLDS, 1_000_000)[0]
+    import json
+    d = json.loads(st["detail_json"])
+    assert st["severity"] == "WARN" and d["caps"]["backupable"] is False
+    assert any("READ-ONLY" in r for r in d["reasons"])
+
+
+def test_removable_attached_rw_fresh_is_ok_and_backupable(monkeypatch):
+    _probe(monkeypatch)                    # attached, mounted, rw
+    now = 1_000_000
+    monkeypatch.setattr(collector, "_removable_last_backup", lambda t, pr: now - 3600)  # 1h old
+    st = collector.adapter_removable(_REMOVABLE_T, collector.DEFAULT_THRESHOLDS, now)[0]
+    import json
+    d = json.loads(st["detail_json"])
+    assert st["severity"] == "OK" and d["caps"]["backupable"] is True
+    assert st["last_run_ts"] == now - 3600

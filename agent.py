@@ -182,6 +182,45 @@ def do_execute(cfg):
                                            else (err or "walk failed"))})
             print(f"  intent {iid} {target} recover-walk -> {'ok' if ok else 'FAIL'} ({count})")
             continue
+        if action == "backup-now":
+            # Removable 2nd-leg incremental backup. Guard presence/rw HERE (a clear message beats an
+            # opaque rsync failure), run the rsync, and on success stamp the drive + host state so the
+            # freshness card is accurate even after the drive is unplugged.
+            dry = DRYRUN or bool(opts.get("dryrun"))
+            pr = C.removable_probe(t)
+            if not pr["attached"]:
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                         {"ok": False, "output": "drive not attached - plug in the 2nd-leg drive and retry"})
+                print(f"  intent {iid} {target} backup-now -> SKIP (detached)"); continue
+            if not pr["mounted"]:
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                         {"ok": False, "output": f"drive attached but not mounted at {pr['mount']}"})
+                print(f"  intent {iid} {target} backup-now -> SKIP (unmounted)"); continue
+            if pr["ro"] and not dry:
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                         {"ok": False, "output": f"{pr['mount']} is mounted READ-ONLY - remount rw to back up"})
+                print(f"  intent {iid} {target} backup-now -> SKIP (read-only)"); continue
+            cmd, err = C.build_command(action, t, opts)
+            if err:
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err})
+                continue
+            rc, so, se = C.run(cmd, timeout=TIMEOUT)
+            full = (so + se).strip()
+            if rc == 0 and not dry:
+                ts = int(time.time())
+                dest = C._removable_dest(t)
+                try:
+                    if dest:
+                        with open(os.path.join(dest, ".cairn-lastbackup"), "w") as f:
+                            f.write(str(ts))   # on-drive stamp: authoritative last-backup time
+                except OSError:
+                    pass
+                C.removable_write_state(t, last_backup_ts=ts)   # host-side fallback for when detached
+            head = "[DRY-RUN] " if dry else ""
+            api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                     {"ok": rc == 0, "output": (head + full)[-1800:], "cmd": " ".join(cmd), "dryrun": dry})
+            print(f"  intent {iid} {target} backup-now{' [dry]' if dry else ''} -> {'ok' if rc == 0 else 'FAIL'}")
+            continue
         cmd, err = C.build_command(action, t, opts)
         if err:
             api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err})
