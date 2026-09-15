@@ -281,7 +281,10 @@ def _init_db():
                                   ("auth_tokens", "expires_ts", "INTEGER"),
                                   ("agents", "report_interval", "INTEGER"),
                                   ("agents", "agent_version", "TEXT"),
-                                  ("agents", "update_requested", "INTEGER DEFAULT 0")]:
+                                  ("agents", "update_requested", "INTEGER DEFAULT 0"),
+                                  ("removable_links", "meta_json", "TEXT"),
+                                  ("removable_links", "verify_method", "TEXT"),
+                                  ("removable_links", "verify_ts", "INTEGER")]:
                 try:
                     c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
                 except sqlite3.OperationalError:
@@ -312,6 +315,9 @@ def _init_db():
                 confirmed     INTEGER DEFAULT 0,
                 score         REAL,
                 last_backup_ts INTEGER,
+                meta_json     TEXT,
+                verify_method TEXT,
+                verify_ts     INTEGER,
                 updated_ts    INTEGER NOT NULL,
                 UNIQUE(agent, removable, dataset))""")
             # CI pipeline status broker: one row per badge name (e.g. 'tests', 'deploy'), latest wins.
@@ -690,8 +696,8 @@ def scorecard():
         # stale is not. Keep the freshest link per dataset name.
         now = int(time.time())
         removable_fresh = {}
-        for L in conn.execute("SELECT dataset,last_backup_ts FROM removable_links WHERE confirmed=1").fetchall():
-            lb = L["last_backup_ts"] or 0
+        for L in conn.execute("SELECT dataset,last_backup_ts,verify_ts FROM removable_links WHERE confirmed=1").fetchall():
+            lb = max(L["last_backup_ts"] or 0, L["verify_ts"] or 0)   # a sync OR a content-verify = known-good
             fresh = bool(lb) and (now - lb) <= REMOVABLE_STALE_D * DAY
             cur = removable_fresh.get(L["dataset"])
             if cur is None or lb > cur[1]:
@@ -771,6 +777,7 @@ def timeline(days: int = 14):
 import subprocess
 NOTIFY_SH = os.environ.get("NOTIFY_SH", str(HERE.parent / "phase0" / "notify.sh"))
 ALLOWED_ACTIONS = {"snapshot", "sync", "scrub", "pull", "backup-now", "removable-scan",
+                   "removable-verify", "removable-relocate",
                    "recover-points", "recover-search", "recover-deleted", "restore",
                    "recover-walk",       # on-demand deleted-files walk that FILLS the stored manifest
                    "recover-versions",   # folder-wide file version history (enumerate + batch httm)
@@ -992,7 +999,7 @@ async def create_action(request: Request):
         opts["dryrun"] = True   # per-action dry-run: the agent runs a native -n / read-only probe
     if body.get("mirror"):
         opts["mirror"] = True   # removable backup-now: rsync --delete (mirror). Destructive; opt-in.
-    for k in ("path", "dest", "version"):
+    for k in ("path", "dest", "version", "dataset", "dest_subpath", "tier"):
         if body.get(k) is not None:
             opts[k] = str(body[k])
     agent_sel = body.get("agent")   # disambiguate a name shared by two agents (e.g. a replication pair)
@@ -1016,8 +1023,8 @@ async def create_action(request: Request):
         if action == "backup-now":
             if r["type"] != "removable":
                 raise HTTPException(400, "backup-now only valid for removable targets")
-        if action == "removable-scan" and r["type"] != "removable":
-            raise HTTPException(400, "removable-scan only valid for removable targets")
+        if action in ("removable-scan", "removable-verify", "removable-relocate") and r["type"] != "removable":
+            raise HTTPException(400, f"{action} only valid for removable targets")
         if action == "recover-walk" and r["type"] != "zfs-local":
             raise HTTPException(400, "recover-walk only valid for zfs-local targets")
         if action == "pull" and r["type"] != "zfs-local":
@@ -1122,19 +1129,35 @@ def _link_suggest(conn, agent, removable, suggestions, now):
         if not ds or not sub:
             continue
         keep.add(ds)
+        meta = json.dumps({"census": s["census"]}) if s.get("census") else None
         conn.execute(
-            "INSERT INTO removable_links(agent,removable,dataset,dest_subpath,confirmed,score,updated_ts) "
-            "VALUES(?,?,?,?,0,?,?) ON CONFLICT(agent,removable,dataset) DO UPDATE SET "
+            "INSERT INTO removable_links(agent,removable,dataset,dest_subpath,confirmed,score,meta_json,updated_ts) "
+            "VALUES(?,?,?,?,0,?,?,?) ON CONFLICT(agent,removable,dataset) DO UPDATE SET "
             "score=excluded.score, updated_ts=excluded.updated_ts, "
+            "meta_json=COALESCE(excluded.meta_json, removable_links.meta_json), "
             "dest_subpath=CASE WHEN removable_links.confirmed=1 THEN removable_links.dest_subpath "
             "ELSE excluded.dest_subpath END",
-            (agent, removable, ds, sub, s.get("score"), now))
+            (agent, removable, ds, sub, s.get("score"), meta, now))
     for r in conn.execute("SELECT dataset FROM removable_links WHERE agent=? AND removable=? AND confirmed=0",
                           (agent, removable)).fetchall():
         if r["dataset"] not in keep:
             conn.execute("DELETE FROM removable_links WHERE agent=? AND removable=? AND dataset=? AND confirmed=0",
                          (agent, removable, r["dataset"]))
     conn.commit()
+
+def _subpath_conflict(conn, agent, removable, dataset, sub):
+    """A dataset's folder on a drive must be non-root and must not nest with another dataset's folder,
+    so trees never mix. Returns an error message or None."""
+    sub = (sub or "").strip("/")
+    if not sub:
+        return "destination can't be the drive root - give each dataset its own subfolder"
+    for L in _links_for(conn, removable=removable, agent=agent):
+        if L["dataset"] == dataset:
+            continue
+        other = (L["dest_subpath"] or "").strip("/")
+        if other and (other == sub or sub.startswith(other + "/") or other.startswith(sub + "/")):
+            return f"folder '{sub}' overlaps '{other}' (dataset {L['dataset']}) - datasets must not nest"
+    return None
 
 def _link_confirm(conn, agent, removable, dataset, dest_subpath, now):
     conn.execute(
@@ -1158,12 +1181,33 @@ async def agent_removable_links_push(request: Request):
     agent = (body.get("agent") or "").strip(); removable = (body.get("removable") or "").strip()
     if not agent or not removable:
         return JSONResponse({"detail": "agent + removable required"}, status_code=400)
-    now = int(time.time())
+    now = int(time.time()); op = body.get("op"); ds = (body.get("dataset") or "").strip()
     with db() as conn:
-        if body.get("op") == "stamp":
-            ds = (body.get("dataset") or "").strip()
+        if op == "stamp":                     # a real backup ran for this dataset
             conn.execute("UPDATE removable_links SET last_backup_ts=? WHERE agent=? AND removable=? AND dataset=?",
                          (int(body.get("ts") or now), agent, removable, ds)); conn.commit()
+            return {"ok": True}
+        if op == "census":                    # tier-1 diff/fit result (size+mtime; NOT freshness)
+            meta = json.dumps({"census": body.get("census") or {}})
+            conn.execute("UPDATE removable_links SET meta_json=? WHERE agent=? AND removable=? AND dataset=?",
+                         (meta, agent, removable, ds)); conn.commit()
+            return {"ok": True}
+        if op == "verify":                    # tier-2/3 CONTENT verify -> counts as freshness (user decision)
+            cur = conn.execute("SELECT meta_json FROM removable_links WHERE agent=? AND removable=? AND dataset=?",
+                               (agent, removable, ds)).fetchone()
+            try:
+                meta = json.loads(cur["meta_json"]) if cur and cur["meta_json"] else {}
+            except (ValueError, TypeError):
+                meta = {}
+            meta["verify"] = body.get("result") or {}
+            ts = int(body.get("ts") or now)
+            conn.execute("UPDATE removable_links SET meta_json=?, verify_method=?, verify_ts=?, last_backup_ts=? "
+                         "WHERE agent=? AND removable=? AND dataset=?",
+                         (json.dumps(meta), body.get("method"), ts, ts, agent, removable, ds)); conn.commit()
+            return {"ok": True}
+        if op == "relocate":                  # agent moved the tree on-drive; record its new subpath
+            conn.execute("UPDATE removable_links SET dest_subpath=? WHERE agent=? AND removable=? AND dataset=?",
+                         ((body.get("dest_subpath") or "").strip("/"), agent, removable, ds)); conn.commit()
             return {"ok": True}
         _link_suggest(conn, agent, removable, body.get("suggestions") or [], now)
         return {"ok": True, "links": _links_for(conn, removable=removable, agent=agent)}
@@ -1191,6 +1235,9 @@ async def removable_links_confirm(request: Request):
         agent = (body.get("agent") or "").strip() or _removable_agent(conn, removable)
         if not agent:
             raise HTTPException(404, f"no agent owns removable '{removable}'")
+        conflict = _subpath_conflict(conn, agent, removable, dataset, dest)
+        if conflict:
+            raise HTTPException(409, conflict)
         _link_confirm(conn, agent, removable, dataset, dest, now)
         return {"ok": True}
 
@@ -1685,6 +1732,11 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .rl-ctl{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;align-items:center}
 .rl-sel,.rl-sub{font:12px "Red Hat Text";padding:4px 7px;border:1px solid var(--line);border-radius:7px;
   background:var(--surf);color:var(--ink)}
+.rl-cen{font-size:11px;color:var(--mut);padding:0 0 5px 58px} .rl-cen b{color:var(--ink);font-weight:700}
+.rl-nofit,.rl-nofit b{color:var(--crit)}
+.rl-diff{margin:0 0 6px 58px;padding:8px;background:var(--bg);border:1px solid var(--line);border-radius:7px;
+  font:11px/1.45 ui-monospace,monospace;max-height:220px;overflow:auto;white-space:pre}
+.rl-free{margin-left:10px;font-weight:400;text-transform:none;letter-spacing:0;color:var(--mut)}
 .cact button:hover{filter:brightness(1.05)}
 .cact .ro{color:var(--unk);font-size:11.5px;font-style:italic;align-self:center}
 .crec{display:flex;gap:10px;margin-top:9px}
@@ -1948,11 +2000,25 @@ async function unlink(id){
   if(r.ok) location.reload(); else alert('unlink failed');
 }
 async function addLink(btn, removable){
-  var w=btn.parentNode, ds=w.querySelector('.rl-sel').value, sub=w.querySelector('.rl-sub').value.trim();
-  if(!ds||!sub){ alert('pick a dataset and enter a path on the drive'); return; }
+  var w=btn.parentNode, sel=w.querySelector('.rl-sel'), ds=sel.value, sub=w.querySelector('.rl-sub').value.trim();
+  if(!sub){ var o=sel.options[sel.selectedIndex]; sub=o?o.getAttribute('data-sub'):''; }  // default to cairn/<slug>
+  if(!ds||!sub){ alert('pick a dataset'); return; }
   var r=await fetch('/api/v1/backup/removable-links',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({removable:removable, dataset:ds, dest_subpath:sub})});
-  if(r.ok) location.reload(); else alert('add failed');
+  if(r.ok) location.reload(); else { var j={}; try{j=await r.json()}catch(e){} alert('add failed: '+(j.detail||r.status)); }
+}
+function verifyLink(removable, dataset){   // re-run the size+mtime census for one link
+  post({target:removable, action:'removable-verify', dataset:dataset, requested_by:'ui'});
+}
+async function relocateLink(removable, dataset){
+  if(!confirm('Move this dataset’s tree under cairn/ on the drive? This is an instant on-drive rename (no copy).')) return;
+  post({target:removable, action:'removable-relocate', dataset:dataset, requested_by:'ui'});
+}
+function toggleDiff(btn){   // show/hide the itemized rsync diff sample for this link
+  var el=btn.closest('.rl');
+  while((el=el.nextElementSibling) && !el.classList.contains('rl')){
+    if(el.classList && el.classList.contains('rl-diff')){ el.hidden=!el.hidden; return; }
+  }
 }
 async function actPrompt(target, action, field, msg){
   var v=prompt(msg); if(v===null) return;
@@ -2791,45 +2857,72 @@ def _removable_links_html(r, viewer=False):
     if r.get("type") != "removable":
         return ""
     name = _esc(r["name"])
+    det = json.loads(r.get("detail_json") or "{}")
+    free = det.get("free_bytes"); total = det.get("total_bytes")
+    fit_note = f'<span class=rl-free>drive: {_cap(free)} free of {_cap(total)}</span>' if free else ""
     with db() as conn:
         links = _links_for(conn, removable=r["name"])
-        # name -> full dataset source (e.g. "mcz/mclife/Pics"), so the card is unambiguous. Datasets
-        # linkable to a removable are the dataset-backed targets that have a source.
         cands = [(x["name"], x["source"]) for x in conn.execute(
             "SELECT DISTINCT name, source FROM targets WHERE type IN ('zfs-local','zfs-repl') "
             "AND source IS NOT NULL AND enabled=1 ORDER BY source").fetchall()]
     srcmap = dict(cands)
-    def _dsname(nm):   # full source when known, else the bare target name
-        return _esc(srcmap.get(nm) or nm)
     linked = {L["dataset"] for L in links}
     out = []
     for L in links:
-        full = _dsname(L["dataset"]); sub = _esc(L["dest_subpath"]); lid = int(L["id"])
+        full = _esc(srcmap.get(L["dataset"]) or L["dataset"]); sub = _esc(L["dest_subpath"]); lid = int(L["id"])
+        ds_js = _esc(L["dataset"])
+        try:
+            meta = json.loads(L.get("meta_json") or "{}")
+        except (ValueError, TypeError):
+            meta = {}
+        cen = meta.get("census") or {}
+        # census line: match % + add/update/delete + fit (does the delta fit in free space?)
+        cline = ""
+        if cen:
+            wontfit = (free is not None and cen.get("bytes_add", 0) > free)
+            fitcls = " rl-nofit" if wontfit else ""
+            cline = (f'<div class="rl-cen{fitcls}">match <b>{cen.get("pct",0):.0%}</b> · '
+                     f'+{cen.get("add",0)} new / {cen.get("update",0)} changed / {cen.get("delete",0)} extra · '
+                     f'would add <b>{_cap(cen.get("bytes_add",0))}</b>'
+                     f'{" — WON’T FIT" if wontfit else ""}</div>')
+            samp = _esc("\n".join(cen.get("sample") or [])[:6000]) if cen.get("sample") else ""
+            if samp:
+                cline += f'<pre class=rl-diff hidden>{samp}</pre>'
+        needs_relocate = not L["dest_subpath"].startswith("cairn/")
         if L["confirmed"]:
-            when = _ago(L["last_backup_ts"]) if L.get("last_backup_ts") else "not yet synced"
-            ctl = "" if viewer else f'<button onclick="unlink({lid})" title="remove this link">Unlink</button>'
+            vts = max(L.get("last_backup_ts") or 0, L.get("verify_ts") or 0)
+            when = _ago(vts) if vts else "not yet synced/verified"
+            btns = "" if viewer else (
+                f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\')" title="re-check size+mtime match">Check</button>'
+                + (f'<button onclick="toggleDiff(this)">Diff</button>' if cen.get("sample") else "")
+                + (f'<button onclick="relocateLink(\'{name}\',\'{ds_js}\')" title="move this tree under cairn/ (instant, on-drive)">Move under cairn/</button>' if needs_relocate else "")
+                + f'<button onclick="unlink({lid})" title="remove this link">Unlink</button>')
             out.append(f'<div class=rl><span class="rl-i ok">linked</span><b>{full}</b>'
-                       f'<span class=rl-p>&rarr; {sub}</span><span class=rl-w>{_esc(when)}</span>{ctl}</div>')
+                       f'<span class=rl-p>&rarr; {sub}</span><span class=rl-w>{_esc(when)}</span>{btns}</div>{cline}')
         else:
             sc = f"{L['score']:.0%}" if L.get("score") is not None else "?"
-            ctl = "" if viewer else (f'<button class=pri onclick="confirmLink({lid})">Confirm</button>'
-                                     f'<button onclick="unlink({lid})">Dismiss</button>')
+            btns = "" if viewer else (
+                f'<button class=pri onclick="confirmLink({lid})">Confirm</button>'
+                + (f'<button onclick="toggleDiff(this)">Diff</button>' if cen.get("sample") else "")
+                + f'<button onclick="unlink({lid})">Dismiss</button>')
             out.append(f'<div class=rl><span class="rl-i q">detected</span><b>{full}</b>'
-                       f'<span class=rl-p>&rarr; {sub}</span><span class=rl-w>match {sc}</span>{ctl}</div>')
+                       f'<span class=rl-p>&rarr; {sub}</span><span class=rl-w>structure {sc}</span>{btns}</div>{cline}')
     body = "".join(out) or '<div class=rl-none>no datasets linked yet - Detect or add one below</div>'
     controls = ""
     if not viewer:
         avail = [(nm, src) for nm, src in cands if nm not in linked]
         picker = ""
         if avail:
-            opts = "".join(f'<option value="{_esc(nm)}">{_esc(src or nm)}</option>' for nm, src in avail)
+            opts = "".join(f'<option value="{_esc(nm)}" data-sub="{_esc(_cmd.cairn_subpath(src or nm))}">'
+                           f'{_esc(src or nm)}</option>' for nm, src in avail)
             picker = (f'<select class=rl-sel>{opts}</select>'
-                      f'<input class=rl-sub placeholder="destination folder on the drive (e.g. Pics)">'
+                      f'<input class=rl-sub placeholder="folder on drive (default cairn/…)">'
                       f'<button onclick="addLink(this,\'{name}\')">Add</button>')
         controls = (f'<div class=rl-ctl><button onclick="scanRemovable(\'{name}\')" '
                     f'title="scan the drive and auto-detect which datasets it already holds">Detect contents</button>'
                     f'{picker}</div>')
-    return f'<div class=rlinks><div class=rl-hd>Datasets on this drive</div>{body}{controls}</div>'
+    return (f'<div class=rlinks><div class=rl-hd>Datasets on this drive{fit_note}</div>'
+            f'{body}{controls}</div>')
 
 def _card(r, can_act, viewer=False):
     nm = r["name"]; n = _esc(nm); sev = SEVCLS.get(r["severity"], "unk")

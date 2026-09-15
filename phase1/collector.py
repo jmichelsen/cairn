@@ -583,6 +583,66 @@ def _removable_last_backup(t, pr):
             pass
     return removable_state(t).get("last_backup_ts")
 
+def cairn_subpath(dataset_source):
+    """Where a cairn-managed copy of a dataset lives on a drive: cairn/<slugged-source>. Keeps every
+    cairn-written tree under one `cairn/` folder in its own per-dataset subfolder, so datasets never
+    mix (e.g. mcz/mclife/Pics -> cairn/mcz_mclife_Pics)."""
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", (dataset_source or "").strip("/")).strip("_")
+    return f"cairn/{slug}" if slug else "cairn/dataset"
+
+def removable_relocate(mount, from_sub, to_sub):
+    """Rename a subtree WITHIN a drive (from_sub -> to_sub) - an intra-filesystem move, so it's an
+    instant metadata rename, not a copy. Guards: both paths stay under `mount`, source exists, dest
+    does not (never overwrite). Returns (ok, message)."""
+    mount = os.path.realpath(mount)
+    src = os.path.realpath(os.path.join(mount, (from_sub or "").strip("/")))
+    dst = os.path.abspath(os.path.join(mount, (to_sub or "").strip("/")))
+    under = lambda p: p == mount or p.startswith(mount + os.sep)
+    if not under(src):
+        return False, "source escapes the drive"
+    if not under(dst):
+        return False, "destination escapes the drive"
+    if not os.path.isdir(src):
+        return False, f"source '{from_sub}' not found on the drive"
+    if os.path.exists(dst):
+        return False, f"destination '{to_sub}' already exists - not overwriting"
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        os.rename(src, dst)                     # same filesystem => atomic, no data copy
+    except OSError as e:
+        return False, f"move failed: {e}"
+    return True, f"moved '{from_sub}' -> '{to_sub}'"
+
+def rsync_census(src, dest, excludes=None, timeout=1800):
+    """Dry-run rsync to compare a dataset SOURCE against a drive SUBPATH - the honest diff + fit, with
+    NO transfer and NO delete (both -n). dest need not exist (then everything is 'add'). Returns
+    (summary, err). summary = counts (add/update/delete/unchanged of `reg_total`), match `pct`,
+    `bytes_add` (what a real backup would write), and a few sample itemized lines for a diff view."""
+    cmd = ["rsync", "-aHni", "--delete", "--stats", "--dry-run"]
+    for ex in (excludes or []):
+        cmd += ["--exclude", str(ex)]
+    cmd += ["--", src.rstrip("/") + "/", dest.rstrip("/") + "/"]
+    rc, out, err = run(cmd, timeout=timeout)
+    if rc not in (0, 24):                       # 24 = a source file vanished mid-scan; harmless here
+        return None, _errline(err, out, rc)
+
+    def num(pat):
+        m = re.search(pat, out)
+        return int(m.group(1).replace(",", "")) if m else 0
+    reg_total = num(r"Number of files:.*?reg:\s*([\d,]+)")
+    transferred = num(r"Number of regular files transferred:\s*([\d,]+)")
+    created_reg = num(r"Number of created files:.*?reg:\s*([\d,]+)")
+    bytes_add = num(r"Total transferred file size:\s*([\d,]+)")
+    deletes = len(re.findall(r"(?m)^\*deleting ", out))
+    add = min(created_reg, transferred)
+    update = max(transferred - add, 0)
+    unchanged = max(reg_total - transferred, 0)
+    pct = round(unchanged / reg_total, 4) if reg_total else 0.0
+    sample = [l for l in out.splitlines() if l[:1] in (">", "c", "*", "<")][:80]
+    return {"pct": pct, "reg_total": reg_total, "transfer": transferred, "add": add,
+            "update": update, "delete": deletes, "unchanged": unchanged,
+            "bytes_add": bytes_add, "sample": sample}, None
+
 def _dir_children(path, cap=1000):
     """Immediate child names of a directory (the cheap structural fingerprint). None if unreadable."""
     try:
@@ -660,6 +720,12 @@ def adapter_removable(t, defaults, now):
     if not pr["mounted"]:
         st["severity"] = "WARN"; reasons.append(f"attached but not mounted at {pr['mount']}")
         st["detail_json"] = json.dumps(dict(detail, reasons=reasons, caps=caps)); return [st]
+    try:                                        # drive capacity, for the fit ("will it hold X?") check
+        sv = os.statvfs(pr["mount"])
+        detail["free_bytes"] = sv.f_bavail * sv.f_frsize
+        detail["total_bytes"] = sv.f_blocks * sv.f_frsize
+    except OSError:
+        pass
     reasons.append("attached (read-only)" if pr["ro"] else "attached")
     if pr["ro"]:
         st["severity"] = worst(st["severity"], "WARN"); reasons.append("mounted READ-ONLY - remount rw to back up")
