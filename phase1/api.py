@@ -1771,6 +1771,9 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .rl-cen{font-size:11.5px;color:var(--mut);margin:3px 0} .rl-cen b{color:var(--ink);font-weight:700}
 .rl-nofit,.rl-nofit b{color:var(--crit)}
 .rl-btns,.rl-ctl{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px;align-items:center}
+.rl-hint{font-size:11px;color:var(--mut)} .rl-hint b{color:var(--ink);font-weight:600}
+.rl-add{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}
+.rl-addl{font-size:11px;color:var(--mut);width:100%}
 .rl-btns button,.rl-ctl button{appearance:none;font:600 11px/1 "Red Hat Text";border:1px solid var(--line);
   background:var(--surf);color:var(--ink);border-radius:7px;padding:5px 9px;cursor:pointer}
 .rl-btns button.pri,.rl-ctl button.pri{background:var(--acc);color:#fff;border-color:var(--acc)}
@@ -2985,16 +2988,17 @@ def _removable_links_html(r, viewer=False):
     controls = ""
     if not viewer:
         avail = [(nm, src) for nm, src in cands if nm not in linked]
+        detect = (f'<div class=rl-ctl><button onclick="scanRemovable(\'{name}\')">Detect contents</button>'
+                  f'<span class=rl-hint>scan <b>this drive</b> and auto-match its folders to your datasets</span></div>')
         picker = ""
         if avail:
             opts = "".join(f'<option value="{_esc(nm)}" data-sub="{_esc(_cmd.cairn_subpath(src or nm))}">'
                            f'{_esc(src or nm)}</option>' for nm, src in avail)
-            picker = (f'<select class=rl-sel>{opts}</select>'
+            picker = (f'<div class=rl-add><span class=rl-addl>or link a dataset manually:</span>'
+                      f'<select class=rl-sel>{opts}</select>'
                       f'<input class=rl-sub placeholder="folder on drive (default cairn/…)">'
-                      f'<button onclick="addLink(this,\'{name}\')">Add</button>')
-        controls = (f'<div class=rl-ctl><button onclick="scanRemovable(\'{name}\')" '
-                    f'title="scan the drive and auto-detect which datasets it already holds">Detect contents</button>'
-                    f'{picker}</div>')
+                      f'<button onclick="addLink(this,\'{name}\')">Add</button></div>')
+        controls = detect + picker
     return (f'<div class=rlinks><div class=rl-hd>Datasets on this drive{fit_note}</div>'
             f'{body}{controls}</div>')
 
