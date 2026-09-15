@@ -2071,10 +2071,6 @@ async function addLink(btn, removable){
 function verifyLink(removable, dataset, tier){   // tier: 'census' (size+mtime) | 'xattr' (content) | 'hash'
   post({target:removable, action:'removable-verify', dataset:dataset, tier:(tier||'census'), requested_by:'ui'});
 }
-function hashVerify(removable, dataset){         // tier-3: definitive but reads every byte
-  if(!confirm('Full-hash verify reads every byte on the drive - this can take hours. Start it?')) return;
-  verifyLink(removable, dataset, 'hash');
-}
 async function relocateLink(removable, dataset){
   if(!confirm('Move this dataset’s tree under cairn/ on the drive? This is an instant on-drive rename (no copy).')) return;
   post({target:removable, action:'removable-relocate', dataset:dataset, requested_by:'ui'});
@@ -2990,8 +2986,7 @@ def _removable_links_html(r, viewer=False):
             reloc = ('<button onclick="relocateLink(\'{n}\',\'{d}\')" title="move this tree under cairn/ (instant, on-drive)">Move under cairn/</button>'.format(n=name, d=ds_js)
                      if not L["dest_subpath"].startswith("cairn/") else "")
             btns = (f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'census\')" title="re-check size+mtime match + fit">Check</button>'
-                    f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'xattr\')" title="content-verify via cached b3sig xattrs (no re-read)">Verify content</button>'
-                    f'<button onclick="hashVerify(\'{name}\',\'{ds_js}\')" title="full BLAKE3 ledger - reads every byte (slow)">Full hash</button>'
+                    f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'content\')" title="content-verify: uses cached b3sig xattrs if the drive is tagged, else a full BLAKE3 hash (slow)">Verify content</button>'
                     f'{diffbtn}{reloc}<button onclick="unlink({lid})" title="remove this link">Unlink</button>')
         else:
             btns = f'<button class=pri onclick="confirmLink({lid})">Confirm</button>{diffbtn}<button onclick="unlink({lid})">Dismiss</button>'

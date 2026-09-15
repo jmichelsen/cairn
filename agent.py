@@ -240,6 +240,8 @@ def do_execute(cfg):
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                          {"ok": False, "output": f"no source/subpath for dataset '{ds}'"}); continue
             dest = os.path.join(pr["mount"], sub)
+            if tier in ("content", "auto"):     # one "Verify content": xattrs if tagged, else full hash
+                tier = "xattr" if C.drive_tagged_fraction(dest) >= 0.8 else "hash"
             if tier in ("xattr", "hash"):
                 if tier == "xattr":
                     res, err = C.xattr_verify(srcp, dest)
