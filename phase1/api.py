@@ -1192,18 +1192,24 @@ async def agent_removable_links_push(request: Request):
             conn.execute("UPDATE removable_links SET meta_json=? WHERE agent=? AND removable=? AND dataset=?",
                          (meta, agent, removable, ds)); conn.commit()
             return {"ok": True}
-        if op == "verify":                    # tier-2/3 CONTENT verify -> counts as freshness (user decision)
+        if op == "verify":                    # tier-2/3 CONTENT verify. Only a CLEAN verify sets
             cur = conn.execute("SELECT meta_json FROM removable_links WHERE agent=? AND removable=? AND dataset=?",
-                               (agent, removable, ds)).fetchone()
-            try:
-                meta = json.loads(cur["meta_json"]) if cur and cur["meta_json"] else {}
+                               (agent, removable, ds)).fetchone()  # freshness (verify_ts) - a verify with
+            try:                                                   # mismatches/untagged files is stored but
+                meta = json.loads(cur["meta_json"]) if cur and cur["meta_json"] else {}  # NOT counted fresh
             except (ValueError, TypeError):
                 meta = {}
             meta["verify"] = body.get("result") or {}
             ts = int(body.get("ts") or now)
-            conn.execute("UPDATE removable_links SET meta_json=?, verify_method=?, verify_ts=?, last_backup_ts=? "
-                         "WHERE agent=? AND removable=? AND dataset=?",
-                         (json.dumps(meta), body.get("method"), ts, ts, agent, removable, ds)); conn.commit()
+            if body.get("verified"):
+                conn.execute("UPDATE removable_links SET meta_json=?, verify_method=?, verify_ts=?, "
+                             "last_backup_ts=? WHERE agent=? AND removable=? AND dataset=?",
+                             (json.dumps(meta), body.get("method"), ts, ts, agent, removable, ds))
+            else:
+                conn.execute("UPDATE removable_links SET meta_json=?, verify_method=? "
+                             "WHERE agent=? AND removable=? AND dataset=?",
+                             (json.dumps(meta), body.get("method"), agent, removable, ds))
+            conn.commit()
             return {"ok": True}
         if op == "relocate":                  # agent moved the tree on-drive; record its new subpath
             conn.execute("UPDATE removable_links SET dest_subpath=? WHERE agent=? AND removable=? AND dataset=?",
@@ -2007,8 +2013,8 @@ async function addLink(btn, removable){
     body:JSON.stringify({removable:removable, dataset:ds, dest_subpath:sub})});
   if(r.ok) location.reload(); else { var j={}; try{j=await r.json()}catch(e){} alert('add failed: '+(j.detail||r.status)); }
 }
-function verifyLink(removable, dataset){   // re-run the size+mtime census for one link
-  post({target:removable, action:'removable-verify', dataset:dataset, requested_by:'ui'});
+function verifyLink(removable, dataset, tier){   // tier: 'census' (size+mtime) | 'xattr' (content) | 'hash'
+  post({target:removable, action:'removable-verify', dataset:dataset, tier:(tier||'census'), requested_by:'ui'});
 }
 async function relocateLink(removable, dataset){
   if(!confirm('Move this dataset’s tree under cairn/ on the drive? This is an instant on-drive rename (no copy).')) return;
@@ -2888,17 +2894,27 @@ def _removable_links_html(r, viewer=False):
             samp = _esc("\n".join(cen.get("sample") or [])[:6000]) if cen.get("sample") else ""
             if samp:
                 cline += f'<pre class=rl-diff hidden>{samp}</pre>'
+        ver = meta.get("verify") or {}
+        vline = ""
+        if ver:
+            vcls = "ok" if ver.get("clean") else "warn"
+            extra = ("" if ver.get("clean") else
+                     f' — {ver.get("mismatch",0)} differ, {ver.get("missing_dest",0)} missing, '
+                     f'{ver.get("dest_untagged",0)} untagged (re-sync with -X)')
+            vline = (f'<div class=rl-cen><span class="rl-i {vcls}">content {ver.get("pct",0):.0%}</span> '
+                     f'verified via {_esc(ver.get("method","?"))}{extra}</div>')
         needs_relocate = not L["dest_subpath"].startswith("cairn/")
         if L["confirmed"]:
             vts = max(L.get("last_backup_ts") or 0, L.get("verify_ts") or 0)
             when = _ago(vts) if vts else "not yet synced/verified"
             btns = "" if viewer else (
-                f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\')" title="re-check size+mtime match">Check</button>'
+                f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'census\')" title="re-check size+mtime match + fit">Check</button>'
+                f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'xattr\')" title="content-verify via cached b3sig xattrs (no re-read)">Verify content</button>'
                 + (f'<button onclick="toggleDiff(this)">Diff</button>' if cen.get("sample") else "")
                 + (f'<button onclick="relocateLink(\'{name}\',\'{ds_js}\')" title="move this tree under cairn/ (instant, on-drive)">Move under cairn/</button>' if needs_relocate else "")
                 + f'<button onclick="unlink({lid})" title="remove this link">Unlink</button>')
             out.append(f'<div class=rl><span class="rl-i ok">linked</span><b>{full}</b>'
-                       f'<span class=rl-p>&rarr; {sub}</span><span class=rl-w>{_esc(when)}</span>{btns}</div>{cline}')
+                       f'<span class=rl-p>&rarr; {sub}</span><span class=rl-w>{_esc(when)}</span>{btns}</div>{cline}{vline}')
         else:
             sc = f"{L['score']:.0%}" if L.get("score") is not None else "?"
             btns = "" if viewer else (

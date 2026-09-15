@@ -289,7 +289,7 @@ _REMOVABLE_T = {"name": "ext", "type": "removable", "tool": "rsync",
 def test_backup_now_builds_incremental_rsync():
     cmd, err = collector.build_command("backup-now", _REMOVABLE_T)
     assert err is None
-    assert cmd[:3] == ["rsync", "-aH", "--stats"]
+    assert cmd[:3] == ["rsync", "-aHX", "--stats"]   # -X carries user.b3sig; -H preserves hardlinks
     assert cmd[-3:] == ["--", "/tank/photos/", "/mnt/ext/photos/"]   # contents-of via trailing slash
     assert "--delete" not in cmd            # additive by default: never auto-clobbers
 
@@ -445,3 +445,39 @@ def test_rsync_census_parses_counts(monkeypatch):
     assert cen["reg_total"] == 950 and cen["transfer"] == 12
     assert cen["add"] == 8 and cen["update"] == 4 and cen["delete"] == 1
     assert cen["bytes_add"] == 4200000 and abs(cen["pct"] - 938/950) < 0.001
+
+
+# ---- removable phase (b): xattr tier-2 content verify -----------------------------------------
+def test_xattr_verify_flags_mismatch_and_missing(tmp_path):
+    import os
+    import pytest
+    src = tmp_path / "src"; dst = tmp_path / "dst"; os.makedirs(src); os.makedirs(dst)
+    for n in ("a", "b", "c"):
+        (src / n).write_text(n)
+    (dst / "a").write_text("a"); (dst / "b").write_text("b")   # c missing on dst
+    try:
+        os.setxattr(str(src / "a"), "user.b3sig", b"Faaa")
+        os.setxattr(str(src / "b"), "user.b3sig", b"Fbbb")
+        os.setxattr(str(src / "c"), "user.b3sig", b"Fccc")
+        os.setxattr(str(dst / "a"), "user.b3sig", b"Faaa")     # match
+        os.setxattr(str(dst / "b"), "user.b3sig", b"Fzzz")     # mismatch
+    except OSError:
+        pytest.skip("filesystem does not support user xattrs")
+    res, err = collector.xattr_verify(str(src), str(dst))
+    assert err is None
+    assert res["matched"] == 1 and res["mismatch"] == 1 and res["missing_dest"] == 1
+    assert res["clean"] is False
+
+
+def test_xattr_verify_clean_pass(tmp_path):
+    import os
+    import pytest
+    src = tmp_path / "s"; dst = tmp_path / "d"; os.makedirs(src); os.makedirs(dst)
+    (src / "x").write_text("x"); (dst / "x").write_text("x")
+    try:
+        os.setxattr(str(src / "x"), "user.b3sig", b"Fxxx")
+        os.setxattr(str(dst / "x"), "user.b3sig", b"Fxxx")
+    except OSError:
+        pytest.skip("filesystem does not support user xattrs")
+    res, _ = collector.xattr_verify(str(src), str(dst))
+    assert res["clean"] is True and res["pct"] == 1.0 and res["matched"] == 1

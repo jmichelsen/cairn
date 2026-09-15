@@ -224,22 +224,38 @@ def do_execute(cfg):
                      {"ok": True, "output": f"{len(sugg)} match(es): {msg}"})
             print(f"  intent {iid} {target} removable-scan -> {len(sugg)} match(es)"); continue
         if action == "removable-verify":
-            # Re-run the census (tier-1 size+mtime diff/fit) for one confirmed/suggested dataset link.
-            # (tier-2 xattr and tier-3 full-hash verify are added in later phases.) READ-ONLY.
+            # Verify one dataset link. tier=census (default): size+mtime diff/fit. tier=xattr: compare
+            # cached user.b3sig on both sides (free content check; a clean pass marks freshness).
+            # tier=hash (phase c): full BLAKE3. All READ-ONLY of the drive.
             pr = C.removable_probe(t)
             if not pr["attached"] or not pr["mounted"]:
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                          {"ok": False, "output": f"drive not attached/mounted at {pr['mount']}"}); continue
-            ds = opts.get("dataset") or ""
+            ds = opts.get("dataset") or ""; tier = opts.get("tier") or "census"
             lr = api_call("GET", f"/api/v1/backup/agent/removable-links?agent={NAME}&removable={target}") or {}
             link = next((L for L in (lr.get("links") or []) if L["dataset"] == ds), None)
-            # confirmed links come from the GET (confirmed_only); for an unconfirmed one, fall back to opts
             sub = (link or {}).get("dest_subpath") or opts.get("dest_subpath") or ""
             srcp = {d["name"]: d["path"] for d in _dataset_paths(cfg)}.get(ds)
             if not srcp or not sub:
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                          {"ok": False, "output": f"no source/subpath for dataset '{ds}'"}); continue
-            cen, err = C.rsync_census(srcp, os.path.join(pr["mount"], sub), timeout=RECOVER_WALK_TIMEOUT * 4)
+            dest = os.path.join(pr["mount"], sub)
+            if tier == "xattr":
+                res, err = C.xattr_verify(srcp, dest)
+                if err:
+                    api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err}); continue
+                api_call("POST", "/api/v1/backup/agent/removable-links",
+                         {"agent": NAME, "removable": target, "op": "verify", "dataset": ds,
+                          "method": "xattr", "result": res, "verified": res["clean"]})
+                note = ("" if res["clean"] else
+                        f" — NOT fresh: {res['mismatch']} differ, {res['missing_dest']} missing, "
+                        f"{res['dest_untagged']} untagged (re-sync with -X to tag)")
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                         {"ok": True, "output": f"xattr-verify {ds}: {res['pct']:.0%} content-matched"
+                                                f" ({res['matched']} files){note}"})
+                print(f"  intent {iid} {target} removable-verify[xattr] {ds} -> {res['pct']:.0%} clean={res['clean']}")
+                continue
+            cen, err = C.rsync_census(srcp, dest, timeout=RECOVER_WALK_TIMEOUT * 4)
             if err:
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err}); continue
             api_call("POST", "/api/v1/backup/agent/removable-links",
