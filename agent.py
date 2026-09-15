@@ -136,6 +136,22 @@ def self_update():
         subprocess.Popen(["bash", script, "--update"], start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+def _dataset_paths(cfg):
+    """Monitored dataset-backed targets as [{name, path}], path = a real local directory (zfs
+    mountpoint resolved). Feeds removable discovery (structural tree matching) + link-driven backups."""
+    out = []
+    for t in cfg.get("targets", []):
+        typ = t.get("type"); src = t.get("source")
+        if not src or typ == "removable":
+            continue
+        if typ in ("zfs-local", "zfs-repl"):
+            mp, err = C._mountpoint(src)
+            if not err and mp:
+                out.append({"name": t["name"], "path": mp})
+        elif os.path.isdir(src):
+            out.append({"name": t["name"], "path": src})
+    return out
+
 def do_execute(cfg):
     tmap = {t["name"]: t for t in cfg.get("targets", [])}
     res = api_call("GET", f"/api/v1/backup/intents?agent={NAME}") or {}
@@ -182,10 +198,26 @@ def do_execute(cfg):
                                            else (err or "walk failed"))})
             print(f"  intent {iid} {target} recover-walk -> {'ok' if ok else 'FAIL'} ({count})")
             continue
+        if action == "removable-scan":
+            # Discover which monitored datasets this drive already holds, by structural tree match, and
+            # push the suggestions (the dashboard shows them for the user to confirm). READ-ONLY.
+            pr = C.removable_probe(t)
+            if not pr["attached"] or not pr["mounted"]:
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                         {"ok": False, "output": f"drive not attached/mounted at {pr['mount']}"}); continue
+            sugg = C.discover_removable_links(pr["mount"], _dataset_paths(cfg))
+            api_call("POST", "/api/v1/backup/agent/removable-links",
+                     {"agent": NAME, "removable": target, "suggestions": sugg})
+            msg = ("; ".join(f"{s['dataset']}->{s['subpath']} ({s['score']})" for s in sugg)
+                   or "no dataset trees recognized on this drive")
+            api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                     {"ok": True, "output": f"{len(sugg)} match(es): {msg}"})
+            print(f"  intent {iid} {target} removable-scan -> {len(sugg)} match(es)"); continue
         if action == "backup-now":
             # Removable 2nd-leg incremental backup. Guard presence/rw HERE (a clear message beats an
-            # opaque rsync failure), run the rsync, and on success stamp the drive + host state so the
-            # freshness card is accurate even after the drive is unplugged.
+            # opaque rsync failure). If the drive has CONFIRMED dataset links, back up each of them
+            # (per-dataset stamp so the scorecard credits each copy); otherwise fall back to the
+            # target's own single source/dest_subpath.
             dry = DRYRUN or bool(opts.get("dryrun"))
             pr = C.removable_probe(t)
             if not pr["attached"]:
@@ -200,29 +232,48 @@ def do_execute(cfg):
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                          {"ok": False, "output": f"{pr['mount']} is mounted READ-ONLY - remount rw to back up"})
                 print(f"  intent {iid} {target} backup-now -> SKIP (read-only)"); continue
-            cmd, err = C.build_command(action, t, opts)
-            if err:
-                api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err})
-                continue
-            rc, so, se = C.run(cmd, timeout=TIMEOUT)
-            full = (so + se).strip()
-            if rc == 0 and not dry:
-                ts = int(time.time())
-                dest = C._removable_dest(t)
-                try:
-                    if dest:
-                        with open(os.path.join(dest, ".cairn-lastbackup"), "w") as f:
-                            f.write(str(ts))   # on-drive stamp: authoritative last-backup time
-                except OSError:
-                    pass
-                C.removable_write_state(t, last_backup_ts=ts)   # host-side fallback for when detached
-            head = "[DRY-RUN] " if dry else ""
-            if not dry:   # tell the operator where the full, persistent rsync log lives
-                head += f"log: {C._removable_log_path(t)}\n"
+            lr = api_call("GET", f"/api/v1/backup/agent/removable-links?agent={NAME}&removable={target}") or {}
+            links = lr.get("links") or []
+            # per-dataset link jobs, or a single fallback job from the target's own source/dest_subpath
+            dsmap = {d["name"]: d["path"] for d in _dataset_paths(cfg)}
+            if links:
+                jobs = []
+                for L in links:
+                    srcp = dsmap.get(L["dataset"])
+                    jobs.append((L["dataset"], dict(t, source=srcp, dest_subpath=L["dest_subpath"]),
+                                 srcp is not None))
+            else:
+                jobs = [(None, t, bool(t.get("source")))]
+            head = ("[DRY-RUN] " if dry else "") + (f"log: {C._removable_log_path(t)}\n" if not dry else "")
+            oks, lines = [], []
+            for ds, jt, have_src in jobs:
+                label = ds or "source"
+                if not have_src:
+                    oks.append(False); lines.append(f"{label}: FAIL (dataset source not on this agent)"); continue
+                cmd, err = C.build_command("backup-now", jt, opts)
+                if err:
+                    oks.append(False); lines.append(f"{label}: FAIL ({err})"); continue
+                rc, so, se = C.run(cmd, timeout=TIMEOUT)
+                oks.append(rc == 0)
+                if rc == 0 and not dry:
+                    ts = int(time.time()); dest = C._removable_dest(jt)
+                    try:
+                        if dest:
+                            with open(os.path.join(dest, ".cairn-lastbackup"), "w") as f:
+                                f.write(str(ts))
+                    except OSError:
+                        pass
+                    C.removable_write_state(t, last_backup_ts=ts)
+                    if ds:   # record per-dataset freshness so the scorecard can credit this copy
+                        api_call("POST", "/api/v1/backup/agent/removable-links",
+                                 {"agent": NAME, "removable": target, "op": "stamp", "dataset": ds, "ts": ts})
+                tail = (so + se).strip()[-500:]
+                lines.append(f"{label}: {'ok' if rc == 0 else 'FAIL'}\n{tail}")
+            ok = all(oks) and bool(oks)
             api_call("POST", f"/api/v1/backup/intents/{iid}/result",
-                     {"ok": rc == 0, "output": (head + full)[-1800:], "cmd": " ".join(cmd), "dryrun": dry})
-            print(f"  intent {iid} {target} backup-now{' [dry]' if dry else ''} -> {'ok' if rc == 0 else 'FAIL'}")
-            continue
+                     {"ok": ok, "output": (head + "\n".join(lines))[-1800:], "dryrun": dry})
+            print(f"  intent {iid} {target} backup-now{' [dry]' if dry else ''} -> "
+                  f"{'ok' if ok else 'FAIL'} ({sum(oks)}/{len(oks)} datasets)"); continue
         cmd, err = C.build_command(action, t, opts)
         if err:
             api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err})

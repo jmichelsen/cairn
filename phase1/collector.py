@@ -583,6 +583,55 @@ def _removable_last_backup(t, pr):
             pass
     return removable_state(t).get("last_backup_ts")
 
+def _dir_children(path, cap=1000):
+    """Immediate child names of a directory (the cheap structural fingerprint). None if unreadable."""
+    try:
+        with os.scandir(path) as it:
+            out = set()
+            for i, e in enumerate(it):
+                if i >= cap:
+                    break
+                out.add(e.name)
+            return out
+    except OSError:
+        return None
+
+def discover_removable_links(mount, datasets, max_depth=3, min_score=0.6, min_children=3, dir_cap=6000):
+    """Match subtrees on a removable drive to monitored datasets by DIRECTORY STRUCTURE - comparing
+    immediate child-name sets (the rsync / bare-tree case; ZFS matches by snapshot GUID and borg/restic
+    by repo metadata, which are exact and handled elsewhere). `datasets` = [{name, path}] where path is
+    the dataset's live root (a zfs mountpoint, resolved by the caller). Returns the best match per
+    dataset above `min_score`: {dataset, subpath, score, matched, total, added}. READ-ONLY.
+      subpath : drive path relative to `mount` ('.' = the mount root itself).
+      score   : |drive_children ∩ dataset_children| / |dataset_children| (fuzzy: a stale copy that has
+                drifted still matches strongly; exact identity is NOT required).
+      added   : dataset children absent from the drive = exactly what a sync would add (the delta)."""
+    sigs = []
+    for d in datasets:
+        c = _dir_children(d["path"]) if d.get("path") else None
+        if c and len(c) >= min_children:
+            sigs.append((d["name"], c))
+    if not sigs:
+        return []
+    mount = mount.rstrip("/"); base = mount.count(os.sep); best = {}; seen = 0
+    for root, dirs, files in os.walk(mount):
+        seen += 1
+        if seen > dir_cap:
+            break
+        if (root.count(os.sep) - base) >= max_depth:
+            dirs[:] = []                          # don't descend past max_depth
+        here = set(dirs) | set(files)
+        if len(here) < min_children:
+            continue
+        for name, sig in sigs:
+            inter = len(here & sig); score = inter / len(sig)
+            if score >= min_score and inter >= min_children and (
+                    name not in best or score > best[name]["score"]):
+                best[name] = {"dataset": name, "subpath": os.path.relpath(root, mount),
+                              "score": round(score, 3), "matched": inter, "total": len(sig),
+                              "added": sorted(sig - here)[:50]}
+    return sorted(best.values(), key=lambda r: -r["score"])
+
 def adapter_removable(t, defaults, now):
     """A removable external drive as a 2nd-media leg. Reports PRESENCE + freshness; the actual backup
     runs on demand (see the 'backup-now' action). Absence never escalates past WARN (and only after a

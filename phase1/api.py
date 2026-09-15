@@ -298,6 +298,22 @@ def _init_db():
                 raw_bytes   INTEGER,
                 walked_ts   INTEGER NOT NULL,
                 PRIMARY KEY (target_id, kind))""")
+            # Removable-drive <-> dataset links: which monitored dataset(s) a removable drive carries,
+            # and where on it. Rows start as discovery SUGGESTIONS (confirmed=0, from structural match /
+            # zfs GUID / repo metadata) and become authoritative once a human confirms (confirmed=1).
+            # last_backup_ts is per-dataset (a drive can hold several) so the scorecard can credit a
+            # fresh copy even when the drive is unplugged. Keyed (agent, removable, dataset).
+            c.execute("""CREATE TABLE IF NOT EXISTS removable_links (
+                id            INTEGER PRIMARY KEY,
+                agent         TEXT NOT NULL,
+                removable     TEXT NOT NULL,
+                dataset       TEXT NOT NULL,
+                dest_subpath  TEXT NOT NULL,
+                confirmed     INTEGER DEFAULT 0,
+                score         REAL,
+                last_backup_ts INTEGER,
+                updated_ts    INTEGER NOT NULL,
+                UNIQUE(agent, removable, dataset))""")
             # CI pipeline status broker: one row per badge name (e.g. 'tests', 'deploy'), latest wins.
             # CI pushes here (POST /api/v1/ci/status); /badge/{name}.svg renders it. Lets the private
             # GitLab pipelines surface their status publicly without making the pipelines public.
@@ -669,6 +685,17 @@ def scorecard():
         # That's exactly a guaranteed pair (home zfs-repl -> vault zfs-local), so reuse that detection
         # instead of relying on a `location` flag nobody sets. Keyed by the home (sending) half.
         offsite_keys = {(p["r_agent"], p["r_name"]) for p in _pair_rows(conn)}
+        # A CONFIRMED removable copy counts as an extra on-site copy + a distinct medium for its dataset -
+        # but only while FRESH (a shelved backup is only as good as its last sync). Detached is fine;
+        # stale is not. Keep the freshest link per dataset name.
+        now = int(time.time())
+        removable_fresh = {}
+        for L in conn.execute("SELECT dataset,last_backup_ts FROM removable_links WHERE confirmed=1").fetchall():
+            lb = L["last_backup_ts"] or 0
+            fresh = bool(lb) and (now - lb) <= REMOVABLE_STALE_D * DAY
+            cur = removable_fresh.get(L["dataset"])
+            if cur is None or lb > cur[1]:
+                removable_fresh[L["dataset"]] = (fresh, lb)
     tiera = [r for r in rows if r["type"] == "zfs-repl" and (r["tier"] == "A")]
     cards = []
     for r in tiera:
@@ -680,11 +707,19 @@ def scorecard():
                         or ((r.get("agent") or "", r["name"]) in offsite_keys)) else 0
         onsite = len(pools) - offsite
         copies = len(pools)
-        card = dict(name=r["name"], copies=copies, media=len(pools), onsite=onsite,
-                    offsite=offsite,
-                    pass_321=(copies >= 3 and len(pools) >= 2 and offsite >= 1),
+        media = len(pools)
+        rem = removable_fresh.get(r["name"])
+        if rem and rem[0]:                 # confirmed + fresh removable copy: on-site copy on new medium
+            copies += 1; media += 1; onsite += 1
+        card = dict(name=r["name"], copies=copies, media=media, onsite=onsite,
+                    offsite=offsite, removable=bool(rem and rem[0]),
+                    pass_321=(copies >= 3 and media >= 2 and offsite >= 1),
                     note="")
-        if offsite == 0:
+        if rem and rem[0]:
+            card["note"] = "includes a removable 2nd-media copy"
+        elif rem and not rem[0]:
+            card["note"] = "removable copy is STALE - re-sync the external drive"
+        elif offsite == 0:
             card["note"] = "NO off-site copy - no remote vault holds this dataset yet"
         elif copies < 3:
             card["note"] = "off-site copy present; needs a 3rd copy for full 3-2-1"
@@ -735,7 +770,7 @@ def timeline(days: int = 14):
 # The API never touches ZFS/borg/disks. Agents (local + remote) do all host work and talk HTTP.
 import subprocess
 NOTIFY_SH = os.environ.get("NOTIFY_SH", str(HERE.parent / "phase0" / "notify.sh"))
-ALLOWED_ACTIONS = {"snapshot", "sync", "scrub", "pull", "backup-now",
+ALLOWED_ACTIONS = {"snapshot", "sync", "scrub", "pull", "backup-now", "removable-scan",
                    "recover-points", "recover-search", "recover-deleted", "restore",
                    "recover-walk",       # on-demand deleted-files walk that FILLS the stored manifest
                    "recover-versions",   # folder-wide file version history (enumerate + batch httm)
@@ -981,8 +1016,8 @@ async def create_action(request: Request):
         if action == "backup-now":
             if r["type"] != "removable":
                 raise HTTPException(400, "backup-now only valid for removable targets")
-            if not r["source"]:
-                raise HTTPException(400, "removable target has no source to back up")
+        if action == "removable-scan" and r["type"] != "removable":
+            raise HTTPException(400, "removable-scan only valid for removable targets")
         if action == "recover-walk" and r["type"] != "zfs-local":
             raise HTTPException(400, "recover-walk only valid for zfs-local targets")
         if action == "pull" and r["type"] != "zfs-local":
@@ -1057,6 +1092,114 @@ def list_actions(limit: int = 20, target: str = None):
                 "SELECT i.*, t.name AS target FROM intents i LEFT JOIN targets t ON t.id=i.target_id "
                 "ORDER BY i.created_ts DESC LIMIT ?", (limit,)).fetchall()]
     return {"actions": rows}
+
+# ---------------- removable drive <-> dataset links (discovery + confirm) --------------
+# A removable copy older than this stops counting toward a dataset's 3-2-1 (a shelved backup is only
+# as good as its last sync). Detached is fine; STALE is not.
+REMOVABLE_STALE_D = int(os.environ.get("CAIRN_REMOVABLE_STALE_D", "90"))
+
+def _links_for(conn, removable=None, agent=None, confirmed_only=False):
+    q = "SELECT * FROM removable_links WHERE 1=1"; a = []
+    if removable is not None: q += " AND removable=?"; a.append(removable)
+    if agent is not None: q += " AND agent=?"; a.append(agent)
+    if confirmed_only: q += " AND confirmed=1"
+    return [dict(r) for r in conn.execute(q + " ORDER BY confirmed DESC, score DESC, dataset", a).fetchall()]
+
+def _removable_agent(conn, removable):
+    """Which agent owns this removable target (so a UI-confirmed link is routed correctly)."""
+    r = conn.execute("SELECT agent FROM targets WHERE name=? AND type='removable' AND enabled=1 "
+                     "ORDER BY (agent IS NULL), id LIMIT 1", (removable,)).fetchone()
+    return r["agent"] if r else None
+
+def _link_suggest(conn, agent, removable, suggestions, now):
+    """Upsert discovery suggestions. A CONFIRMED row is preserved (only its score refreshes); a new
+    suggestion lands as confirmed=0. Unconfirmed suggestions no longer proposed are dropped so stale
+    guesses don't linger."""
+    keep = set()
+    for s in suggestions:
+        ds = (s.get("dataset") or "").strip()
+        sub = (s.get("subpath") or s.get("dest_subpath") or "").strip("/")
+        if not ds or not sub:
+            continue
+        keep.add(ds)
+        conn.execute(
+            "INSERT INTO removable_links(agent,removable,dataset,dest_subpath,confirmed,score,updated_ts) "
+            "VALUES(?,?,?,?,0,?,?) ON CONFLICT(agent,removable,dataset) DO UPDATE SET "
+            "score=excluded.score, updated_ts=excluded.updated_ts, "
+            "dest_subpath=CASE WHEN removable_links.confirmed=1 THEN removable_links.dest_subpath "
+            "ELSE excluded.dest_subpath END",
+            (agent, removable, ds, sub, s.get("score"), now))
+    for r in conn.execute("SELECT dataset FROM removable_links WHERE agent=? AND removable=? AND confirmed=0",
+                          (agent, removable)).fetchall():
+        if r["dataset"] not in keep:
+            conn.execute("DELETE FROM removable_links WHERE agent=? AND removable=? AND dataset=? AND confirmed=0",
+                         (agent, removable, r["dataset"]))
+    conn.commit()
+
+def _link_confirm(conn, agent, removable, dataset, dest_subpath, now):
+    conn.execute(
+        "INSERT INTO removable_links(agent,removable,dataset,dest_subpath,confirmed,updated_ts) "
+        "VALUES(?,?,?,?,1,?) ON CONFLICT(agent,removable,dataset) DO UPDATE SET confirmed=1, "
+        "dest_subpath=excluded.dest_subpath, updated_ts=excluded.updated_ts",
+        (agent, removable, dataset, (dest_subpath or "").strip("/"), now))
+    conn.commit()
+
+@app.get("/api/v1/backup/agent/removable-links")
+def agent_removable_links(agent: str, removable: str = None):
+    """Agent reads its CONFIRMED links so backup-now knows what to sync. (auth: agent)"""
+    with db() as conn:
+        return {"links": _links_for(conn, removable=removable, agent=agent, confirmed_only=True)}
+
+@app.post("/api/v1/backup/agent/removable-links")
+async def agent_removable_links_push(request: Request):
+    """Agent pushes discovery suggestions (op=suggest) or a per-dataset backup stamp (op=stamp).
+    (auth: agent)"""
+    body = await _json(request)
+    agent = (body.get("agent") or "").strip(); removable = (body.get("removable") or "").strip()
+    if not agent or not removable:
+        return JSONResponse({"detail": "agent + removable required"}, status_code=400)
+    now = int(time.time())
+    with db() as conn:
+        if body.get("op") == "stamp":
+            ds = (body.get("dataset") or "").strip()
+            conn.execute("UPDATE removable_links SET last_backup_ts=? WHERE agent=? AND removable=? AND dataset=?",
+                         (int(body.get("ts") or now), agent, removable, ds)); conn.commit()
+            return {"ok": True}
+        _link_suggest(conn, agent, removable, body.get("suggestions") or [], now)
+        return {"ok": True, "links": _links_for(conn, removable=removable, agent=agent)}
+
+@app.get("/api/v1/backup/removable-links")
+def removable_links_list(removable: str = None):
+    """All links (confirmed + suggested) for the dashboard. (auth: admin/viewer via middleware)"""
+    with db() as conn:
+        return {"links": _links_for(conn, removable=removable)}
+
+@app.post("/api/v1/backup/removable-links")
+async def removable_links_confirm(request: Request):
+    """Confirm/create a link from the UI. Two forms: {id} promotes an existing discovery suggestion to
+    confirmed; {removable,dataset,dest_subpath} is a manual dataset pick. (auth: admin - mutating)"""
+    body = await _json(request); now = int(time.time())
+    with db() as conn:
+        if body.get("id"):
+            conn.execute("UPDATE removable_links SET confirmed=1, updated_ts=? WHERE id=?",
+                         (now, int(body["id"]))); conn.commit()
+            return {"ok": True}
+        removable = (body.get("removable") or "").strip(); dataset = (body.get("dataset") or "").strip()
+        dest = (body.get("dest_subpath") or "").strip()
+        if not removable or not dataset or not dest:
+            raise HTTPException(400, "removable, dataset, dest_subpath (or id) required")
+        agent = (body.get("agent") or "").strip() or _removable_agent(conn, removable)
+        if not agent:
+            raise HTTPException(404, f"no agent owns removable '{removable}'")
+        _link_confirm(conn, agent, removable, dataset, dest, now)
+        return {"ok": True}
+
+@app.delete("/api/v1/backup/removable-links/{lid}")
+def removable_links_delete(lid: int):
+    """Unlink (drop a suggestion or a confirmed link). (auth: admin via middleware)"""
+    with db() as conn:
+        conn.execute("DELETE FROM removable_links WHERE id=?", (lid,)); conn.commit()
+    return {"ok": True}
 
 # ---------------- recovery manifests: agent-walked "deleted files" cache per dataset --------------
 @app.get("/api/v1/backup/agent/recovery-due")
@@ -1529,6 +1672,19 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
   background:var(--surf);color:var(--acc2);border-radius:7px;padding:7px 10px;cursor:pointer}
 .cact button.pri{background:var(--acc);color:#fff;border-color:var(--acc)}
 .cact button.danger{color:var(--crit);border-color:var(--crit)}
+.rlinks{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}
+.rl-hd{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin-bottom:6px}
+.rl{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:3px 0}
+.rl b{font-weight:700} .rl-p{color:var(--mut);font-family:ui-monospace,monospace;font-size:11px}
+.rl-w{color:var(--mut);margin-left:auto} .rl-none{color:var(--mut);font-size:12px;font-style:italic}
+.rl-i{font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px;border:1px solid currentColor}
+.rl-i.ok{color:var(--ok)} .rl-i.q{color:var(--warn)}
+.rl button,.rl-ctl button{appearance:none;font:600 11px/1 "Red Hat Text";border:1px solid var(--line);
+  background:var(--surf);color:var(--ink);border-radius:7px;padding:4px 9px;cursor:pointer}
+.rl button.pri{background:var(--acc);color:#fff;border-color:var(--acc)}
+.rl-ctl{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;align-items:center}
+.rl-sel,.rl-sub{font:12px "Red Hat Text";padding:4px 7px;border:1px solid var(--line);border-radius:7px;
+  background:var(--surf);color:var(--ink)}
 .cact button:hover{filter:brightness(1.05)}
 .cact .ro{color:var(--unk);font-size:11.5px;font-style:italic;align-self:center}
 .crec{display:flex;gap:10px;margin-top:9px}
@@ -1777,6 +1933,26 @@ async function mirrorRemovable(name){
   var label='MIRROR '+name+' (rsync --delete - REMOVES files on the drive not present in the source)';
   if(!(await confirmRun(b, label))) return;
   post(b);
+}
+async function scanRemovable(name){   // read-only discovery scan; results appear after the agent runs
+  post({target:name, action:'removable-scan', requested_by:'ui'});
+}
+async function confirmLink(id){
+  var r=await fetch('/api/v1/backup/removable-links',{method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:id})});
+  if(r.ok) location.reload(); else alert('confirm failed');
+}
+async function unlink(id){
+  if(!confirm('Remove this dataset link?')) return;
+  var r=await fetch('/api/v1/backup/removable-links/'+id,{method:'DELETE'});
+  if(r.ok) location.reload(); else alert('unlink failed');
+}
+async function addLink(btn, removable){
+  var w=btn.parentNode, ds=w.querySelector('.rl-sel').value, sub=w.querySelector('.rl-sub').value.trim();
+  if(!ds||!sub){ alert('pick a dataset and enter a path on the drive'); return; }
+  var r=await fetch('/api/v1/backup/removable-links',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({removable:removable, dataset:ds, dest_subpath:sub})});
+  if(r.ok) location.reload(); else alert('add failed');
 }
 async function actPrompt(target, action, field, msg){
   var v=prompt(msg); if(v===null) return;
@@ -2603,6 +2779,48 @@ def _pair_card(v, capable=frozenset(), viewer=False):
             f'<div class=src>{subtitle}</div>'
             f'<div class=phalves>{half(R, "source")}{half(L, "off-site copy")}</div>{act_html}</div>')
 
+def _removable_links_html(r, viewer=False):
+    """Dataset<->drive links on a removable card: confirmed links (dataset -> subpath + last backup)
+    and discovery SUGGESTIONS (Confirm / Dismiss), plus a Detect button and a manual dataset picker.
+    Read-only for viewers."""
+    if r.get("type") != "removable":
+        return ""
+    name = _esc(r["name"])
+    with db() as conn:
+        links = _links_for(conn, removable=r["name"])
+        cands = [x["name"] for x in conn.execute(
+            "SELECT DISTINCT name FROM targets WHERE type IN ('zfs-local','zfs-repl') "
+            "AND enabled=1 ORDER BY name").fetchall()]
+    linked = {L["dataset"] for L in links}
+    out = []
+    for L in links:
+        ds = _esc(L["dataset"]); sub = _esc(L["dest_subpath"]); lid = int(L["id"])
+        if L["confirmed"]:
+            when = _ago(L["last_backup_ts"]) if L.get("last_backup_ts") else "not yet synced"
+            ctl = "" if viewer else f'<button onclick="unlink({lid})" title="remove this link">Unlink</button>'
+            out.append(f'<div class=rl><span class="rl-i ok">linked</span><b>{ds}</b>'
+                       f'<span class=rl-p>{sub}</span><span class=rl-w>{_esc(when)}</span>{ctl}</div>')
+        else:
+            sc = f"{L['score']:.0%}" if L.get("score") is not None else "?"
+            ctl = "" if viewer else (f'<button class=pri onclick="confirmLink({lid})">Confirm</button>'
+                                     f'<button onclick="unlink({lid})">Dismiss</button>')
+            out.append(f'<div class=rl><span class="rl-i q">detected</span><b>{ds}</b>'
+                       f'<span class=rl-p>{sub}</span><span class=rl-w>match {sc}</span>{ctl}</div>')
+    body = "".join(out) or '<div class=rl-none>no datasets linked yet - Detect or add one below</div>'
+    controls = ""
+    if not viewer:
+        avail = [c for c in cands if c not in linked]
+        picker = ""
+        if avail:
+            opts = "".join(f'<option value="{_esc(c)}">{_esc(c)}</option>' for c in avail)
+            picker = (f'<select class=rl-sel>{opts}</select>'
+                      f'<input class=rl-sub placeholder="path on drive (e.g. photos)">'
+                      f'<button onclick="addLink(this,\'{name}\')">Add</button>')
+        controls = (f'<div class=rl-ctl><button onclick="scanRemovable(\'{name}\')" '
+                    f'title="scan the drive and auto-detect which datasets it already holds">Detect contents</button>'
+                    f'{picker}</div>')
+    return f'<div class=rlinks><div class=rl-hd>Datasets on this drive</div>{body}{controls}</div>'
+
 def _card(r, can_act, viewer=False):
     nm = r["name"]; n = _esc(nm); sev = SEVCLS.get(r["severity"], "unk")
     src = r.get("source") or ""
@@ -2698,7 +2916,8 @@ def _card(r, can_act, viewer=False):
     return (f'<div class="card {card_cls}" data-t="{n}"><div class="ch"><span class="cn">{title}</span>'
             f'<span class="chr"><span class="cbusy" title="action running"></span>'
             f'<span class="cs">{cs_text}</span></span></div>{src_html}{sched_html}{c321_html}{mr_html}{scrub_html}{why_html}'
-            f'{ack_html}{_acts(r, can_act, viewer)}{hist_html}{log_html}{hide_html}</div>')
+            f'{ack_html}{_acts(r, can_act, viewer)}{_removable_links_html(r, viewer)}'
+            f'{hist_html}{log_html}{hide_html}</div>')
 
 def _heatmap(order_names):
     """14-day worst-severity-per-day grid, aligned to the card order."""
