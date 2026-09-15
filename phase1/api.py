@@ -1807,7 +1807,7 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .rl-ladl{font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--mut);margin-right:2px}
 .rl-t{font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:10px;border:1px solid var(--line);
   color:var(--mut);background:var(--surf)}
-.rl-t.done{color:var(--ok);border-color:var(--ok)} .rl-t.done::before{content:"\2713 "}
+.rl-t.done{color:var(--ok);border-color:var(--ok)} .rl-t.done::before{content:"\\2713 "}
 .rl-t.warn{color:var(--warn);border-color:var(--warn)}
 .rl-t.pending{color:var(--mut);opacity:.6;border-style:dashed}
 .rl-btns,.rl-ctl{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px;align-items:center}
@@ -1821,17 +1821,17 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .rl-sel,.rl-sub{font:12px "Red Hat Text";padding:5px 7px;border:1px solid var(--line);border-radius:7px;
   background:var(--surf);color:var(--ink);max-width:100%}
 .rl-diff{margin:6px 0;max-height:300px;overflow-y:auto;overflow-x:hidden;border:1px solid var(--line);border-radius:7px}
-.rl-dt{width:100%;table-layout:fixed;border-collapse:collapse;font-size:11.5px}
-.rl-dt th{text-align:right;font-weight:700;color:var(--mut);padding:5px 10px;position:sticky;top:0;
-  background:var(--rail);border-bottom:1px solid var(--line)}
+.rl-dt{width:100%;border-collapse:collapse;font-size:11.5px}
+.rl-dt th{text-align:right;font-weight:700;color:var(--mut);padding:5px 8px;position:sticky;top:0;
+  background:var(--rail);border-bottom:1px solid var(--line);white-space:nowrap}
 .rl-dt th:first-child{text-align:left}
-.rl-dt th:not(:first-child),.rl-dt td:not(:first-child){width:62px}
-.rl-dt td{padding:3px 10px;text-align:right;font-variant-numeric:tabular-nums;border-bottom:1px solid var(--line)}
-.rl-dt td:first-child{text-align:left;font-weight:600;word-break:break-all}
+.rl-dt th:not(:first-child),.rl-dt td:not(:first-child){width:1%;white-space:nowrap}
+.rl-dt td{padding:3px 8px;text-align:right;font-variant-numeric:tabular-nums;border-bottom:1px solid var(--line)}
+.rl-dt td:first-child{text-align:left;font-weight:600;word-break:break-word;width:auto}
 .rl-dt tr:last-child td{border-bottom:0}
 .rl-add{color:var(--ok)} .rl-upd{color:var(--warn)} .rl-del{color:var(--crit)}
 .rl-more{color:var(--mut);font-style:italic;text-align:center!important}
-.rl-dt th:last-child,.rl-dt td:last-child{width:40px;text-align:center}
+.rl-dt td:last-child{text-align:center}
 .rl-exbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 10px;font-size:11px;color:var(--mut)}
 .rl-exbar button{appearance:none;font:600 11px/1 "Red Hat Text";border:1px solid var(--acc);background:var(--acc);
   color:#fff;border-radius:7px;padding:5px 9px;cursor:pointer}
@@ -3058,7 +3058,7 @@ def _removable_links_html(r, viewer=False):
         # status word for the meta line
         if confirmed:
             vts = max(L.get("last_backup_ts") or 0, L.get("verify_ts") or 0)
-            status = _esc(_ago(vts) if vts else "not synced/verified")
+            status = _esc(_ago(vts) if vts else "not backed up yet")
         else:
             status = f"structure {L['score']:.0%}" if L.get("score") is not None else "detected"
         diffbtn = f'<button onclick="toggleDiff(this,\'{name}\',\'{ds_js}\')" title="folder-level diff (runs a check if none yet)">Diff</button>'
