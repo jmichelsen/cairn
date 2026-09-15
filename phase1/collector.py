@@ -681,6 +681,61 @@ def xattr_verify(src, dest, cap=1000000):
             "missing_dest": missing_dest, "dest_untagged": dest_untagged,
             "no_src_sig": no_src_sig, "pct": pct, "clean": clean}, None
 
+def _ledger_path(removable, dataset):
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{removable}-{dataset}").strip("_")
+    return os.path.join(_cairn_state_dir(), f"ledger-{slug}.b3.tsv")
+
+def hash_ledger_verify(src, dest, ledger_path=None, batch=400, timeout=None):
+    """Tier-3 DEFINITIVE verify: BLAKE3 every file on the drive (dest) and compare to the source's
+    authoritative full-hash b3sig xattr (mcz carries F<hash>). Expensive (reads all bytes) - opt-in,
+    NICE-throttled. Writes a durable ledger (F<hash>\\t<relpath>) so the work is reusable. Needs
+    `b3sum`. Returns (summary, err). Source sigs that are edge-sigs (Q...) can't be full-compared and
+    count as `no_src_sig`."""
+    if not _have("b3sum"):
+        return None, "b3sum not installed on this host - can't build a full-hash ledger"
+    dest = dest.rstrip("/"); src = src.rstrip("/")
+    def srcsig(rel):
+        try:
+            return os.getxattr(os.path.join(src, rel), "user.b3sig").decode("ascii", "replace")
+        except OSError:
+            return None
+    rels = [os.path.relpath(os.path.join(r, f), dest)
+            for r, _d, fs in os.walk(dest) for f in fs]
+    matched = mismatch = no_src_sig = hashed = 0
+    lines = []
+    for i in range(0, len(rels), batch):
+        chunk = rels[i:i + batch]
+        rc, out, err = run(NICE + ["b3sum", "--"] + [os.path.join(dest, r) for r in chunk],
+                           timeout=timeout or 3600)
+        hmap = {}
+        for line in out.splitlines():
+            m = re.match(r"^([0-9a-f]{64})\s{1,2}(.*)$", line)
+            if m:
+                hmap[m.group(2)] = m.group(1)
+        for r in chunk:
+            h = hmap.get(os.path.join(dest, r))
+            if not h:
+                continue
+            hashed += 1; lines.append(f"F{h}\t{r}")
+            s = srcsig(r)
+            if not s or s[:1] != "F":            # untagged, or an edge-sig (Q) we can't full-compare
+                no_src_sig += 1
+            elif s[1:] == h:
+                matched += 1
+            else:
+                mismatch += 1
+    comparable = matched + mismatch
+    pct = round(matched / comparable, 4) if comparable else 0.0
+    clean = mismatch == 0 and matched > 0
+    if ledger_path:
+        try:
+            with open(ledger_path, "w") as fh:
+                fh.write("\n".join(lines) + ("\n" if lines else ""))
+        except OSError:
+            pass
+    return {"method": "hash", "hashed": hashed, "matched": matched, "mismatch": mismatch,
+            "no_src_sig": no_src_sig, "pct": pct, "clean": clean, "ledger": ledger_path}, None
+
 def _dir_children(path, cap=1000):
     """Immediate child names of a directory (the cheap structural fingerprint). None if unreadable."""
     try:

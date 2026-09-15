@@ -240,20 +240,26 @@ def do_execute(cfg):
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                          {"ok": False, "output": f"no source/subpath for dataset '{ds}'"}); continue
             dest = os.path.join(pr["mount"], sub)
-            if tier == "xattr":
-                res, err = C.xattr_verify(srcp, dest)
+            if tier in ("xattr", "hash"):
+                if tier == "xattr":
+                    res, err = C.xattr_verify(srcp, dest)
+                    detail = (f"{res['matched']} match, {res['mismatch']} differ, {res['missing_dest']} missing, "
+                              f"{res['dest_untagged']} untagged" if res else "")
+                else:
+                    res, err = C.hash_ledger_verify(srcp, dest, ledger_path=C._ledger_path(target, ds),
+                                                    timeout=RECOVER_WALK_TIMEOUT * 8)
+                    detail = (f"{res['matched']} match, {res['mismatch']} differ, {res['no_src_sig']} unverifiable; "
+                              f"ledger {res['ledger']}" if res else "")
                 if err:
                     api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err}); continue
                 api_call("POST", "/api/v1/backup/agent/removable-links",
                          {"agent": NAME, "removable": target, "op": "verify", "dataset": ds,
-                          "method": "xattr", "result": res, "verified": res["clean"]})
-                note = ("" if res["clean"] else
-                        f" — NOT fresh: {res['mismatch']} differ, {res['missing_dest']} missing, "
-                        f"{res['dest_untagged']} untagged (re-sync with -X to tag)")
+                          "method": tier, "result": res, "verified": res["clean"]})
+                note = "" if res["clean"] else " — NOT counted fresh"
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result",
-                         {"ok": True, "output": f"xattr-verify {ds}: {res['pct']:.0%} content-matched"
-                                                f" ({res['matched']} files){note}"})
-                print(f"  intent {iid} {target} removable-verify[xattr] {ds} -> {res['pct']:.0%} clean={res['clean']}")
+                         {"ok": True, "output": f"{tier}-verify {ds}: {res['pct']:.0%} content-matched "
+                                                f"({detail}){note}"})
+                print(f"  intent {iid} {target} removable-verify[{tier}] {ds} -> {res['pct']:.0%} clean={res['clean']}")
                 continue
             cen, err = C.rsync_census(srcp, dest, timeout=RECOVER_WALK_TIMEOUT * 4)
             if err:
