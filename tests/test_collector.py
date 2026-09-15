@@ -481,3 +481,33 @@ def test_xattr_verify_clean_pass(tmp_path):
         pytest.skip("filesystem does not support user xattrs")
     res, _ = collector.xattr_verify(str(src), str(dst))
     assert res["clean"] is True and res["pct"] == 1.0 and res["matched"] == 1
+
+
+# ---- removable phase (c): full-hash ledger tier-3 ---------------------------------------------
+def test_hash_ledger_verify_compares_to_source_sig(tmp_path, monkeypatch):
+    import os
+    import pytest
+    src = tmp_path / "src"; dst = tmp_path / "dst"; os.makedirs(src); os.makedirs(dst)
+    for n in ("a", "b", "c"):
+        (src / n).write_text(n); (dst / n).write_text(n)
+    ha, hb, hc = "a" * 64, "b" * 64, "c" * 64
+    try:
+        os.setxattr(str(src / "a"), "user.b3sig", ("F" + ha).encode())   # will match
+        os.setxattr(str(src / "b"), "user.b3sig", ("F" + ("9" * 64)).encode())  # will mismatch
+        os.setxattr(str(src / "c"), "user.b3sig", b"Q123:deadbeef")      # edge-sig -> unverifiable
+    except OSError:
+        pytest.skip("filesystem does not support user xattrs")
+    monkeypatch.setattr(collector, "_have", lambda c: True)
+    hashes = {os.path.join(str(dst), "a"): ha, os.path.join(str(dst), "b"): hb,
+              os.path.join(str(dst), "c"): hc}
+    def fake_run(cmd, timeout=None, env=None):        # canned b3sum: "<hash>  <path>" per file
+        paths = cmd[cmd.index("--") + 1:]
+        return 0, "".join(f"{hashes[p]}  {p}\n" for p in paths), ""
+    monkeypatch.setattr(collector, "run", fake_run)
+    monkeypatch.setattr(collector, "NICE", [])
+    led = tmp_path / "l.tsv"
+    res, err = collector.hash_ledger_verify(str(src), str(dst), ledger_path=str(led))
+    assert err is None
+    assert res["matched"] == 1 and res["mismatch"] == 1 and res["no_src_sig"] == 1
+    assert res["clean"] is False and res["hashed"] == 3
+    assert led.exists() and "\tb" in led.read_text()

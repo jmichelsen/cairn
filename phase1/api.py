@@ -2016,6 +2016,10 @@ async function addLink(btn, removable){
 function verifyLink(removable, dataset, tier){   // tier: 'census' (size+mtime) | 'xattr' (content) | 'hash'
   post({target:removable, action:'removable-verify', dataset:dataset, tier:(tier||'census'), requested_by:'ui'});
 }
+function hashVerify(removable, dataset){         // tier-3: definitive but reads every byte
+  if(!confirm('Full-hash verify reads every byte on the drive - this can take hours. Start it?')) return;
+  verifyLink(removable, dataset, 'hash');
+}
 async function relocateLink(removable, dataset){
   if(!confirm('Move this dataset’s tree under cairn/ on the drive? This is an instant on-drive rename (no copy).')) return;
   post({target:removable, action:'removable-relocate', dataset:dataset, requested_by:'ui'});
@@ -2910,6 +2914,7 @@ def _removable_links_html(r, viewer=False):
             btns = "" if viewer else (
                 f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'census\')" title="re-check size+mtime match + fit">Check</button>'
                 f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'xattr\')" title="content-verify via cached b3sig xattrs (no re-read)">Verify content</button>'
+                f'<button onclick="hashVerify(\'{name}\',\'{ds_js}\')" title="full BLAKE3 ledger - definitive but reads every byte (slow)">Full hash</button>'
                 + (f'<button onclick="toggleDiff(this)">Diff</button>' if cen.get("sample") else "")
                 + (f'<button onclick="relocateLink(\'{name}\',\'{ds_js}\')" title="move this tree under cairn/ (instant, on-drive)">Move under cairn/</button>' if needs_relocate else "")
                 + f'<button onclick="unlink({lid})" title="remove this link">Unlink</button>')
