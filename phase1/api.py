@@ -955,6 +955,8 @@ async def create_action(request: Request):
     opts = {"create_snapshot": bool(body.get("create_snapshot", True))}
     if body.get("dryrun"):
         opts["dryrun"] = True   # per-action dry-run: the agent runs a native -n / read-only probe
+    if body.get("mirror"):
+        opts["mirror"] = True   # removable backup-now: rsync --delete (mirror). Destructive; opt-in.
     for k in ("path", "dest", "version"):
         if body.get(k) is not None:
             opts[k] = str(body[k])
@@ -1526,6 +1528,7 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .cact button{appearance:none;font:600 11.5px/1 "Red Hat Text";border:1px solid var(--line);
   background:var(--surf);color:var(--acc2);border-radius:7px;padding:7px 10px;cursor:pointer}
 .cact button.pri{background:var(--acc);color:#fff;border-color:var(--acc)}
+.cact button.danger{color:var(--crit);border-color:var(--crit)}
 .cact button:hover{filter:brightness(1.05)}
 .cact .ro{color:var(--unk);font-size:11.5px;font-style:italic;align-self:center}
 .crec{display:flex;gap:10px;margin-top:9px}
@@ -1766,6 +1769,13 @@ async function act(target, action, createSnap){
   var b={target:target, action:action, requested_by:'ui', dryrun:!!window.CAIRN_DRY};
   if(action==='sync') b.create_snapshot=createSnap;
   if(!(await confirmRun(b,label))) return;
+  post(b);
+}
+async function mirrorRemovable(name){
+  // Destructive: rsync --delete makes the drive an EXACT mirror, removing anything not in the source.
+  var b={target:name, action:'backup-now', mirror:true, requested_by:'ui', dryrun:!!window.CAIRN_DRY};
+  var label='MIRROR '+name+' (rsync --delete - REMOVES files on the drive not present in the source)';
+  if(!(await confirmRun(b, label))) return;
   post(b);
 }
 async function actPrompt(target, action, field, msg){
@@ -2408,8 +2418,11 @@ def _acts(r, can_act, viewer=False):
     elif t == "removable":
         # Back up now only when the drive is present AND writable (caps.backupable); a detached or
         # read-only drive shows no button - the card's reasons say why ("detached" / "read-only").
-        main = (f"<button class=pri onclick=\"act('{n}','backup-now')\" "
-                f"title=\"incremental rsync to the attached 2nd-leg drive\">Back up now</button>"
+        # Mirror is the destructive variant (rsync --delete) - separate, danger-styled, extra confirm.
+        main = ((f"<button class=pri onclick=\"act('{n}','backup-now')\" "
+                 f"title=\"incremental rsync to the attached 2nd-leg drive (additive - never deletes)\">Back up now</button>"
+                 f"<button class=danger onclick=\"mirrorRemovable('{n}')\" "
+                 f"title=\"rsync --delete: make the drive an EXACT mirror, removing files not in the source\">Mirror</button>")
                 if caps.get("backupable") else "")
     else:
         return ""

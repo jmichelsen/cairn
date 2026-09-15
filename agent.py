@@ -217,6 +217,8 @@ def do_execute(cfg):
                     pass
                 C.removable_write_state(t, last_backup_ts=ts)   # host-side fallback for when detached
             head = "[DRY-RUN] " if dry else ""
+            if not dry:   # tell the operator where the full, persistent rsync log lives
+                head += f"log: {C._removable_log_path(t)}\n"
             api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                      {"ok": rc == 0, "output": (head + full)[-1800:], "cmd": " ".join(cmd), "dryrun": dry})
             print(f"  intent {iid} {target} backup-now{' [dry]' if dry else ''} -> {'ok' if rc == 0 else 'FAIL'}")

@@ -289,8 +289,19 @@ _REMOVABLE_T = {"name": "ext", "type": "removable", "tool": "rsync",
 def test_backup_now_builds_incremental_rsync():
     cmd, err = collector.build_command("backup-now", _REMOVABLE_T)
     assert err is None
-    assert cmd == ["rsync", "-aH", "--stats", "--", "/tank/photos/", "/mnt/ext/photos/"]
+    assert cmd[:3] == ["rsync", "-aH", "--stats"]
+    assert cmd[-3:] == ["--", "/tank/photos/", "/mnt/ext/photos/"]   # contents-of via trailing slash
     assert "--delete" not in cmd            # additive by default: never auto-clobbers
+
+
+def test_backup_now_logs_to_a_persistent_file_on_real_runs():
+    cmd, _ = collector.build_command("backup-now", _REMOVABLE_T)
+    assert "--log-file" in cmd
+    log = cmd[cmd.index("--log-file") + 1]
+    assert log.endswith("removable-ext.rsync.log")
+    # a dry run does NOT write the persistent log (its output would pollute the real record)
+    dcmd, _ = collector.build_command("backup-now", _REMOVABLE_T, {"dryrun": True})
+    assert "--log-file" not in dcmd and "-n" in dcmd
 
 
 def test_backup_now_mirror_and_excludes_and_dryrun():
@@ -298,6 +309,14 @@ def test_backup_now_mirror_and_excludes_and_dryrun():
     cmd, _ = collector.build_command("backup-now", t, {"dryrun": True})
     assert "--delete" in cmd and "-n" in cmd
     assert cmd.count("--exclude") == 2 and "*.tmp" in cmd and "cache" in cmd
+
+
+def test_backup_now_mirror_opt_overrides_config():
+    # per-click opts.mirror wins over the target default (both directions)
+    on, _ = collector.build_command("backup-now", _REMOVABLE_T, {"mirror": True})
+    assert "--delete" in on                                   # opt turns it on
+    off, _ = collector.build_command("backup-now", dict(_REMOVABLE_T, mirror=True), {"mirror": False})
+    assert "--delete" not in off                              # opt turns a config default back off
 
 
 def test_backup_now_rejected_on_non_removable():
