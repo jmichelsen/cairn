@@ -1831,7 +1831,11 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .rl-dt tr:last-child td{border-bottom:0}
 .rl-add{color:var(--ok)} .rl-upd{color:var(--warn)} .rl-del{color:var(--crit)}
 .rl-more{color:var(--mut);font-style:italic;text-align:center!important}
-.rl-dt td:last-child{text-align:center}
+.rl-th2{font-weight:400;text-transform:none}
+.rl-frow{cursor:pointer;-webkit-tap-highlight-color:transparent}
+.rl-frow:hover td{background:var(--rail)}
+.rl-frow.excluded td{color:var(--mut);text-decoration:line-through}
+.rl-frow.excluded td:first-child{box-shadow:inset 3px 0 0 var(--crit)}
 .rl-exbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 10px;font-size:11px;color:var(--mut)}
 .rl-exbar button{appearance:none;font:600 11px/1 "Red Hat Text";border:1px solid var(--acc);background:var(--acc);
   color:#fff;border-radius:7px;padding:5px 9px;cursor:pointer}
@@ -2126,9 +2130,10 @@ async function relocateLink(removable, dataset){
   if(!confirm('Move this dataset’s tree under cairn/ on the drive? This is an instant on-drive rename (no copy).')) return;
   post({target:removable, action:'removable-relocate', dataset:dataset, requested_by:'ui'});
 }
-async function applyExcludes(btn, lid){   // save ticked folders as excludes, recompute census, then reload
+function toggleEx(tr){ tr.classList.toggle('excluded'); }   // tap a folder row to (un)exclude it
+async function applyExcludes(btn, lid){   // save excluded folders, recompute census, then reload
   var box=btn.closest('.rl-diff'), ex=[];
-  box.querySelectorAll('.rl-ex:checked').forEach(function(c){ ex.push('/'+c.getAttribute('data-folder')); });
+  box.querySelectorAll('tr.rl-frow.excluded').forEach(function(tr){ ex.push('/'+tr.getAttribute('data-folder')); });
   var r=await fetch('/api/v1/backup/removable-links/'+lid+'/excludes',{method:'POST',
     headers:{'Content-Type':'application/json'}, body:JSON.stringify({excludes:ex})});
   if(!r.ok){ alert('saving exclusions failed'); return; }
@@ -3036,19 +3041,21 @@ def _removable_links_html(r, viewer=False):
                     fmap.setdefault(en, {"folder": en, "add": 0, "update": 0, "delete": 0, "gone": True})
                 rowscol = sorted(fmap.values(), key=lambda b: -(b["add"] + b["update"] + b["delete"]))
                 trows = "".join(
-                    f'<tr><td>{_esc(b["folder"])}</td>'
+                    f'<tr class="rl-frow{" excluded" if b["folder"] in exset else ""}" '
+                    f'data-folder="{_esc(b["folder"])}" onclick="toggleEx(this)">'
+                    f'<td>{_esc(b["folder"])}</td>'
                     f'<td class=rl-add>{("+" + str(b["add"])) if b["add"] else ""}</td>'
                     f'<td class=rl-upd>{("~" + str(b["update"])) if b["update"] else ""}</td>'
-                    f'<td class=rl-del>{("-" + str(b["delete"])) if b["delete"] else ("excluded" if b.get("gone") else "")}</td>'
-                    f'<td><input type=checkbox class=rl-ex data-folder="{_esc(b["folder"])}"'
-                    f'{" checked" if b["folder"] in exset else ""}></td></tr>' for b in rowscol)
+                    f'<td class=rl-del>{("-" + str(b["delete"])) if b["delete"] else ("excl" if b.get("gone") else "")}</td>'
+                    f'</tr>' for b in rowscol)
                 more = (cen.get("folders_total", 0) - len(bf))
                 if more > 0:
-                    trows += f'<tr><td colspan=5 class=rl-more>+{more} more folders (not excludable here)</td></tr>'
-                diff_html = (f'<div class=rl-diff hidden><table class=rl-dt><thead><tr><th>folder</th>'
-                             f'<th>new</th><th>changed</th><th>extra</th><th>excl</th></tr></thead>'
+                    trows += f'<tr><td colspan=4 class=rl-more>+{more} more folders (not excludable here)</td></tr>'
+                diff_html = (f'<div class=rl-diff hidden><table class=rl-dt><thead><tr>'
+                             f'<th>folder <span class=rl-th2>(tap to exclude)</span></th>'
+                             f'<th>new</th><th>changed</th><th>extra</th></tr></thead>'
                              f'<tbody>{trows}</tbody></table>'
-                             f'<div class=rl-exbar><span>tick folders to exclude, then</span>'
+                             f'<div class=rl-exbar><span>tap folders to exclude, then</span>'
                              f'<button data-rem="{name}" data-ds="{ds_js}" onclick="applyExcludes(this,{lid})">'
                              f'Apply exclusions &amp; re-check fit</button></div></div>')
         ver = meta.get("verify") or {}
