@@ -643,6 +643,44 @@ def rsync_census(src, dest, excludes=None, timeout=1800):
             "update": update, "delete": deletes, "unchanged": unchanged,
             "bytes_add": bytes_add, "sample": sample}, None
 
+def xattr_verify(src, dest, cap=1000000):
+    """Tier-2 CONTENT verify with NO file reads: compare the cached user.b3sig xattr on each source
+    file to the same-relative-path file on the drive. Needs both sides tagged (an -X sync seeds the
+    drive). Returns (summary, err). `clean` = every source file with a sig has a byte-identical twin
+    on the drive; `dest_untagged` counts drive files missing the xattr (=> re-sync with -X)."""
+    B3 = "user.b3sig"
+    def getx(p):
+        try:
+            return os.getxattr(p, B3).decode("ascii", "replace")
+        except OSError:
+            return None
+    src = src.rstrip("/"); dest = dest.rstrip("/")
+    matched = mismatch = missing_dest = dest_untagged = no_src_sig = checked = 0
+    for root, _dirs, files in os.walk(src):
+        for f in files:
+            checked += 1
+            if checked > cap:
+                break
+            sp = os.path.join(root, f); ssig = getx(sp)
+            if not ssig:
+                no_src_sig += 1; continue
+            dp = os.path.join(dest, os.path.relpath(sp, src))
+            if not os.path.exists(dp):
+                missing_dest += 1; continue
+            dsig = getx(dp)
+            if dsig is None:
+                dest_untagged += 1
+            elif dsig == ssig:
+                matched += 1
+            else:
+                mismatch += 1
+    verifiable = matched + mismatch + missing_dest + dest_untagged
+    pct = round(matched / verifiable, 4) if verifiable else 0.0
+    clean = bool(matched) and mismatch == 0 and missing_dest == 0 and dest_untagged == 0
+    return {"method": "xattr", "matched": matched, "mismatch": mismatch,
+            "missing_dest": missing_dest, "dest_untagged": dest_untagged,
+            "no_src_sig": no_src_sig, "pct": pct, "clean": clean}, None
+
 def _dir_children(path, cap=1000):
     """Immediate child names of a directory (the cheap structural fingerprint). None if unreadable."""
     try:
@@ -1550,7 +1588,9 @@ def build_command(action, t, opts=None):
         mirror = opts.get("mirror")
         if mirror is None:
             mirror = t.get("mirror")
-        cmd = ["rsync", "-aH", "--stats"]
+        # -X carries xattrs (mcz's user.b3sig hash-at-rest) onto the drive, so future verification is a
+        # free xattr compare; -H preserves the dataset's internal hardlinks (space saving carries over).
+        cmd = ["rsync", "-aHX", "--stats"]
         # Persistent, appended rsync log (real runs only - a dry run's "would transfer" lines would
         # pollute the record of actual backups; dry output still comes back in the intent result).
         if not dry:
