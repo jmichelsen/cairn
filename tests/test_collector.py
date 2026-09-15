@@ -463,24 +463,25 @@ def test_xattr_verify_flags_mismatch_and_missing(tmp_path):
         os.setxattr(str(dst / "b"), "user.b3sig", b"Fzzz")     # mismatch
     except OSError:
         pytest.skip("filesystem does not support user xattrs")
+    # content coverage is PATH-INDEPENDENT: a=aaa is on the drive (present); b=bbb and c=ccc are not.
     res, err = collector.xattr_verify(str(src), str(dst))
     assert err is None
-    assert res["matched"] == 1 and res["mismatch"] == 1 and res["missing_dest"] == 1
-    assert res["clean"] is False
+    assert res["present"] == 1 and res["missing"] == 2 and res["clean"] is False
 
 
-def test_xattr_verify_clean_pass(tmp_path):
+def test_xattr_verify_content_present_ignores_path(tmp_path):
     import os
     import pytest
-    src = tmp_path / "s"; dst = tmp_path / "d"; os.makedirs(src); os.makedirs(dst)
-    (src / "x").write_text("x"); (dst / "x").write_text("x")
+    # same content on both sides but at DIFFERENT paths -> still counts as present (path-independent)
+    src = tmp_path / "s"; dst = tmp_path / "d"; os.makedirs(src); os.makedirs(dst / "elsewhere")
+    (src / "x").write_text("x"); (dst / "elsewhere" / "renamed").write_text("x")
     try:
         os.setxattr(str(src / "x"), "user.b3sig", b"Fxxx")
-        os.setxattr(str(dst / "x"), "user.b3sig", b"Fxxx")
+        os.setxattr(str(dst / "elsewhere" / "renamed"), "user.b3sig", b"Fxxx")
     except OSError:
         pytest.skip("filesystem does not support user xattrs")
     res, _ = collector.xattr_verify(str(src), str(dst))
-    assert res["clean"] is True and res["pct"] == 1.0 and res["matched"] == 1
+    assert res["clean"] is True and res["pct"] == 1.0 and res["present"] == 1 and res["missing"] == 0
 
 
 # ---- removable phase (c): full-hash ledger tier-3 ---------------------------------------------
@@ -506,8 +507,9 @@ def test_hash_ledger_verify_compares_to_source_sig(tmp_path, monkeypatch):
     monkeypatch.setattr(collector, "run", fake_run)
     monkeypatch.setattr(collector, "NICE", [])
     led = tmp_path / "l.tsv"
+    # drive set (from b3sum) = {ha,hb,hc}. source coverage: a(ha) present, b(wrong) missing, c(Q) unverifiable
     res, err = collector.hash_ledger_verify(str(src), str(dst), ledger_path=str(led))
     assert err is None
-    assert res["matched"] == 1 and res["mismatch"] == 1 and res["no_src_sig"] == 1
+    assert res["present"] == 1 and res["missing"] == 1 and res["no_src_sig"] == 1
     assert res["clean"] is False and res["hashed"] == 3
     assert led.exists() and "\tb" in led.read_text()
