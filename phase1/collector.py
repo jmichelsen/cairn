@@ -615,7 +615,17 @@ def removable_relocate(mount, from_sub, to_sub):
         os.rename(src, dst)                     # same filesystem => atomic, no data copy
     except OSError as e:
         return False, f"move failed: {e}"
-    return True, f"moved '{from_sub}' -> '{to_sub}'"
+    # prune the now-empty parent chain left behind (e.g. michlife_backup/ after moving its only child
+    # Pics out). os.rmdir only removes an EMPTY dir, so a parent that still holds other things is kept.
+    parent = os.path.dirname(src); pruned = 0
+    while parent and parent != mount and parent.startswith(mount + os.sep):
+        try:
+            os.rmdir(parent); pruned += 1
+        except OSError:
+            break                               # not empty (or can't remove) -> stop climbing
+        parent = os.path.dirname(parent)
+    return True, (f"moved '{from_sub}' -> '{to_sub}'"
+                  + (f" (removed {pruned} empty parent dir(s))" if pruned else ""))
 
 def rsync_census(src, dest, excludes=None, timeout=1800):
     """Dry-run rsync to compare a dataset SOURCE against a drive SUBPATH - the honest diff + fit, with
