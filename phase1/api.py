@@ -1822,7 +1822,7 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .rl-btns button:hover,.rl-ctl button:hover{filter:brightness(1.08)}
 .rl-sel,.rl-sub{font:12px "Red Hat Text";padding:5px 7px;border:1px solid var(--line);border-radius:7px;
   background:var(--surf);color:var(--ink);max-width:100%}
-.rl-diff{margin:6px 0;max-height:300px;overflow-y:auto;overflow-x:hidden;border:1px solid var(--line);border-radius:7px}
+.rl-diff{margin:6px 0;max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:7px}
 .rl-dt{width:100%;border-collapse:collapse;font-size:11.5px}
 .rl-dt th{text-align:right;font-weight:700;color:var(--mut);padding:5px 8px;position:sticky;top:0;
   background:var(--rail);border-bottom:1px solid var(--line);white-space:nowrap}
@@ -2817,6 +2817,13 @@ def _acts(r, can_act, viewer=False):
         return ""
     return f'<div class="cact">{main}</div>{rec}'
 
+def _kf(n):
+    """Compact file count for the narrow diff table: 24025 -> 24k, 8761 -> 8.8k, 545 -> 545."""
+    n = int(n)
+    if n >= 10000: return f"{n/1000:.0f}k"
+    if n >= 1000: return f"{n/1000:.1f}k"
+    return str(n)
+
 def _cap(b):
     if not b:
         return "-"
@@ -3048,16 +3055,15 @@ def _removable_links_html(r, viewer=False):
                     f'<tr class="rl-frow{" excluded" if b["folder"] in exset else ""}" '
                     f'data-folder="{_esc(b["folder"])}" onclick="toggleEx(this)">'
                     f'<td>{_esc(b["folder"])}</td>'
-                    f'<td class=rl-add>{("+" + str(b["add"])) if b["add"] else ""}</td>'
-                    f'<td class=rl-upd>{("~" + str(b["update"])) if b["update"] else ""}</td>'
-                    f'<td class=rl-del>{("-" + str(b["delete"])) if b["delete"] else ("excl" if b.get("gone") else "")}</td>'
+                    f'<td class=rl-add>{("+" + _kf(b["add"])) if b["add"] else ""}</td>'
+                    f'<td class=rl-upd>{("~" + _kf(b["update"])) if b["update"] else ""}</td>'
+                    f'<td class=rl-del>{("-" + _kf(b["delete"])) if b["delete"] else ("excl" if b.get("gone") else "")}</td>'
                     f'</tr>' for b in rowscol)
                 more = (cen.get("folders_total", 0) - len(bf))
                 if more > 0:
                     trows += f'<tr><td colspan=4 class=rl-more>+{more} more folders (not excludable here)</td></tr>'
                 diff_html = (f'<div class=rl-diff hidden><table class=rl-dt><thead><tr>'
-                             f'<th>folder <span class=rl-th2>(tap to exclude)</span></th>'
-                             f'<th>new</th><th>changed</th><th>extra</th></tr></thead>'
+                             f'<th>folder</th><th>new</th><th>chg</th><th>extra</th></tr></thead>'
                              f'<tbody>{trows}</tbody></table>'
                              f'<div class=rl-exbar><span>tap folders to exclude, then</span>'
                              f'<button data-rem="{name}" data-ds="{ds_js}" onclick="applyExcludes(this,{lid})">'
