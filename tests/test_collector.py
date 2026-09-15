@@ -411,9 +411,11 @@ def test_discover_ignores_weak_matches(tmp_path):
 
 # ---- removable phase (a): cairn subpath, relocate, rsync census ------------------------------
 def test_cairn_subpath_slugs_source():
-    assert collector.cairn_subpath("mcz/mclife/Pics") == "cairn/mcz_mclife_Pics"
+    assert collector.cairn_subpath("mcz/mclife/Pics") == "cairn/mcz_mclife_Pics"    # no host
     assert collector.cairn_subpath("/tank/photos/") == "cairn/tank_photos"
     assert collector.cairn_subpath("") == "cairn/dataset"
+    assert collector.cairn_subpath("mcz/mclife/Pics", "mclife") == "cairn/mclife/mcz_mclife_Pics"
+    assert collector.cairn_subpath("evo500", "mclife") == "cairn/mclife/evo500"
 
 
 def test_removable_relocate_moves_within_drive(tmp_path):
