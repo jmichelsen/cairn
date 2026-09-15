@@ -583,6 +583,15 @@ def _removable_last_backup(t, pr):
             pass
     return removable_state(t).get("last_backup_ts")
 
+def human_bytes(n):
+    """1000-based human size (matches the dashboard's _cap), for result/log messages."""
+    n = float(n or 0)
+    if n >= 1e12: return f"{n/1e12:.1f} TB"
+    if n >= 1e9: return f"{n/1e9:.1f} GB"
+    if n >= 1e6: return f"{n/1e6:.0f} MB"
+    if n >= 1e3: return f"{n/1e3:.0f} KB"
+    return f"{n:.0f} B"
+
 def cairn_subpath(dataset_source, host=None):
     """Where a cairn-managed copy of a dataset lives on a drive: cairn/<host>/<slugged-source>. Every
     cairn-written tree sits under one `cairn/` folder, namespaced by SOURCE HOST (so a drive used on
@@ -1710,8 +1719,10 @@ def build_command(action, t, opts=None):
         if mirror is None:
             mirror = t.get("mirror")
         # -X carries xattrs (mcz's user.b3sig hash-at-rest) onto the drive, so future verification is a
-        # free xattr compare; -H preserves the dataset's internal hardlinks (space saving carries over).
-        cmd = ["rsync", "-aHX", "--stats"]
+        # free xattr compare; -H preserves the dataset's internal hardlinks (space saving carries over);
+        # -h makes the --stats sizes human-readable in the result/log (this rsync's output isn't parsed,
+        # unlike the census, so -h is safe here).
+        cmd = ["rsync", "-aHXh", "--stats"]
         # Persistent, appended rsync log (real runs only - a dry run's "would transfer" lines would
         # pollute the record of actual backups; dry output still comes back in the intent result).
         if not dry:

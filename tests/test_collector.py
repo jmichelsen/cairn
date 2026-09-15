@@ -289,7 +289,7 @@ _REMOVABLE_T = {"name": "ext", "type": "removable", "tool": "rsync",
 def test_backup_now_builds_incremental_rsync():
     cmd, err = collector.build_command("backup-now", _REMOVABLE_T)
     assert err is None
-    assert cmd[:3] == ["rsync", "-aHX", "--stats"]   # -X carries user.b3sig; -H preserves hardlinks
+    assert cmd[:3] == ["rsync", "-aHXh", "--stats"]  # -X user.b3sig; -H hardlinks; -h human-readable stats
     assert cmd[-3:] == ["--", "/tank/photos/", "/mnt/ext/photos/"]   # contents-of via trailing slash
     assert "--delete" not in cmd            # additive by default: never auto-clobbers
 
@@ -546,3 +546,10 @@ def test_drive_tagged_fraction(tmp_path):
     except OSError:
         pytest.skip("filesystem does not support user xattrs")
     assert abs(collector.drive_tagged_fraction(str(d)) - 0.75) < 0.01
+
+
+def test_human_bytes():
+    assert collector.human_bytes(210261472793) == "210.3 GB"
+    assert collector.human_bytes(1500000000000) == "1.5 TB"
+    assert collector.human_bytes(4200000) == "4 MB"
+    assert collector.human_bytes(0) == "0 B"
