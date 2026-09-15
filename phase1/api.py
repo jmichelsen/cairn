@@ -3084,12 +3084,17 @@ def _removable_links_html(r, viewer=False):
     controls = ""
     if not viewer:
         avail = [(nm, src) for nm, src in cands if nm not in linked]
-        detect = (f'<div class=rl-ctl><button onclick="scanRemovable(\'{name}\')">Detect matching datasets</button>'
-                  f'<span class=rl-hint>scan <b>this drive</b> and match its folders to your datasets</span></div>')
+        # Detection is a one-time thing per drive: once a dataset is confirmed the drive's been scanned,
+        # so hide Detect. It returns once every dataset is unlinked. (Manual Add covers undetected ones.)
+        has_confirmed = any(L["confirmed"] for L in links)
+        detect = "" if has_confirmed else (
+            f'<div class=rl-ctl><button onclick="scanRemovable(\'{name}\')">Detect matching datasets</button>'
+            f'<span class=rl-hint>scan <b>this drive</b> and match its folders to your datasets</span></div>')
         picker = ""
         if avail:
+            lead = "or link a dataset manually" if detect else "link another dataset"
             opts = "".join(f'<option value="{_esc(nm)}">{_esc(src or nm)}</option>' for nm, src in avail)
-            picker = (f'<div class=rl-add><span class=rl-addl>or link a dataset manually '
+            picker = (f'<div class=rl-add><span class=rl-addl>{lead} '
                       f'(auto-filed under <code>cairn/{_esc(host)}/</code>):</span>'
                       f'<select class=rl-sel>{opts}</select>'
                       f'<button onclick="addLink(this,\'{name}\')">Add</button></div>')
