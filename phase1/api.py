@@ -1726,23 +1726,38 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .cact button.pri{background:var(--acc);color:#fff;border-color:var(--acc)}
 .cact button.danger{color:var(--crit);border-color:var(--crit)}
 .rlinks{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}
-.rl-hd{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin-bottom:6px}
-.rl{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:3px 0}
-.rl b{font-weight:700} .rl-p{color:var(--mut);font-family:ui-monospace,monospace;font-size:11px}
-.rl-w{color:var(--mut);margin-left:auto} .rl-none{color:var(--mut);font-size:12px;font-style:italic}
-.rl-i{font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px;border:1px solid currentColor}
+.rl-hd{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin-bottom:4px;
+  display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px}
+.rl-free{font-weight:400;text-transform:none;letter-spacing:0;color:var(--mut)}
+.rl{padding:9px 0;border-top:1px solid var(--line)} .rl:first-of-type{border-top:0}
+.rl-name{display:flex;align-items:center;gap:8px;font-size:13px}
+.rl-name b{font-weight:700;word-break:break-all}
+.rl-loc{display:flex;align-items:baseline;gap:10px;margin:3px 0;font:11.5px ui-monospace,monospace;
+  color:var(--mut);word-break:break-all}
+.rl-w{margin-left:auto;white-space:nowrap;font-family:"Red Hat Text",sans-serif}
+.rl-none{color:var(--mut);font-size:12px;font-style:italic}
+.rl-i{font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px;border:1px solid currentColor;white-space:nowrap}
 .rl-i.ok{color:var(--ok)} .rl-i.q{color:var(--warn)}
-.rl button,.rl-ctl button{appearance:none;font:600 11px/1 "Red Hat Text";border:1px solid var(--line);
-  background:var(--surf);color:var(--ink);border-radius:7px;padding:4px 9px;cursor:pointer}
-.rl button.pri{background:var(--acc);color:#fff;border-color:var(--acc)}
-.rl-ctl{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;align-items:center}
-.rl-sel,.rl-sub{font:12px "Red Hat Text";padding:4px 7px;border:1px solid var(--line);border-radius:7px;
-  background:var(--surf);color:var(--ink)}
-.rl-cen{font-size:11px;color:var(--mut);padding:0 0 5px 58px} .rl-cen b{color:var(--ink);font-weight:700}
+.rl-cen{font-size:11.5px;color:var(--mut);margin:3px 0} .rl-cen b{color:var(--ink);font-weight:700}
 .rl-nofit,.rl-nofit b{color:var(--crit)}
-.rl-diff{margin:0 0 6px 58px;padding:8px;background:var(--bg);border:1px solid var(--line);border-radius:7px;
-  font:11px/1.45 ui-monospace,monospace;max-height:220px;overflow:auto;white-space:pre}
-.rl-free{margin-left:10px;font-weight:400;text-transform:none;letter-spacing:0;color:var(--mut)}
+.rl-btns,.rl-ctl{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px;align-items:center}
+.rl-btns button,.rl-ctl button{appearance:none;font:600 11px/1 "Red Hat Text";border:1px solid var(--line);
+  background:var(--surf);color:var(--ink);border-radius:7px;padding:5px 9px;cursor:pointer}
+.rl-btns button.pri,.rl-ctl button.pri{background:var(--acc);color:#fff;border-color:var(--acc)}
+.rl-btns button:hover,.rl-ctl button:hover{filter:brightness(1.08)}
+.rl-sel,.rl-sub{font:12px "Red Hat Text";padding:5px 7px;border:1px solid var(--line);border-radius:7px;
+  background:var(--surf);color:var(--ink);max-width:100%}
+.rl-diff{margin:6px 0;max-height:300px;overflow-y:auto;overflow-x:hidden;border:1px solid var(--line);border-radius:7px}
+.rl-dt{width:100%;table-layout:fixed;border-collapse:collapse;font-size:11.5px}
+.rl-dt th{text-align:right;font-weight:700;color:var(--mut);padding:5px 10px;position:sticky;top:0;
+  background:var(--rail);border-bottom:1px solid var(--line)}
+.rl-dt th:first-child{text-align:left}
+.rl-dt th:not(:first-child),.rl-dt td:not(:first-child){width:62px}
+.rl-dt td{padding:3px 10px;text-align:right;font-variant-numeric:tabular-nums;border-bottom:1px solid var(--line)}
+.rl-dt td:first-child{text-align:left;font-weight:600;word-break:break-all}
+.rl-dt tr:last-child td{border-bottom:0}
+.rl-add{color:var(--ok)} .rl-upd{color:var(--warn)} .rl-del{color:var(--crit)}
+.rl-more{color:var(--mut);font-style:italic;text-align:center!important}
 .cact button:hover{filter:brightness(1.05)}
 .cact .ro{color:var(--unk);font-size:11.5px;font-style:italic;align-self:center}
 .crec{display:flex;gap:10px;margin-top:9px}
@@ -2024,11 +2039,8 @@ async function relocateLink(removable, dataset){
   if(!confirm('Move this dataset’s tree under cairn/ on the drive? This is an instant on-drive rename (no copy).')) return;
   post({target:removable, action:'removable-relocate', dataset:dataset, requested_by:'ui'});
 }
-function toggleDiff(btn){   // show/hide the itemized rsync diff sample for this link
-  var el=btn.closest('.rl');
-  while((el=el.nextElementSibling) && !el.classList.contains('rl')){
-    if(el.classList && el.classList.contains('rl-diff')){ el.hidden=!el.hidden; return; }
-  }
+function toggleDiff(btn){   // show/hide the folder-aggregated diff table for this link
+  var box=btn.closest('.rl').querySelector('.rl-diff'); if(box) box.hidden=!box.hidden;
 }
 async function actPrompt(target, action, field, msg){
   var v=prompt(msg); if(v===null) return;
@@ -2880,54 +2892,65 @@ def _removable_links_html(r, viewer=False):
     out = []
     for L in links:
         full = _esc(srcmap.get(L["dataset"]) or L["dataset"]); sub = _esc(L["dest_subpath"]); lid = int(L["id"])
-        ds_js = _esc(L["dataset"])
+        ds_js = _esc(L["dataset"]); confirmed = bool(L["confirmed"])
         try:
             meta = json.loads(L.get("meta_json") or "{}")
         except (ValueError, TypeError):
             meta = {}
         cen = meta.get("census") or {}
-        # census line: match % + add/update/delete + fit (does the delta fit in free space?)
-        cline = ""
+        # census line + folder-aggregated diff table (no per-file scroll)
+        cen_html = diff_html = ""
         if cen:
             wontfit = (free is not None and cen.get("bytes_add", 0) > free)
-            fitcls = " rl-nofit" if wontfit else ""
-            cline = (f'<div class="rl-cen{fitcls}">match <b>{cen.get("pct",0):.0%}</b> · '
-                     f'+{cen.get("add",0)} new / {cen.get("update",0)} changed / {cen.get("delete",0)} extra · '
-                     f'would add <b>{_cap(cen.get("bytes_add",0))}</b>'
-                     f'{" — WON’T FIT" if wontfit else ""}</div>')
-            samp = _esc("\n".join(cen.get("sample") or [])[:6000]) if cen.get("sample") else ""
-            if samp:
-                cline += f'<pre class=rl-diff hidden>{samp}</pre>'
+            cen_html = (f'<div class="rl-cen{" rl-nofit" if wontfit else ""}">match '
+                        f'<b>{cen.get("pct",0):.0%}</b> · +{cen.get("add",0)} new / {cen.get("update",0)} '
+                        f'changed / {cen.get("delete",0)} extra · would add <b>{_cap(cen.get("bytes_add",0))}</b>'
+                        f'{" — WON’T FIT" if wontfit else ""}</div>')
+            bf = cen.get("by_folder") or []
+            if bf:
+                trows = "".join(
+                    f'<tr><td>{_esc(b["folder"])}</td>'
+                    f'<td class=rl-add>{("+" + str(b["add"])) if b["add"] else ""}</td>'
+                    f'<td class=rl-upd>{("~" + str(b["update"])) if b["update"] else ""}</td>'
+                    f'<td class=rl-del>{("-" + str(b["delete"])) if b["delete"] else ""}</td></tr>' for b in bf)
+                more = (cen.get("folders_total", 0) - len(bf))
+                if more > 0:
+                    trows += f'<tr><td colspan=4 class=rl-more>+{more} more folders</td></tr>'
+                diff_html = (f'<div class=rl-diff hidden><table class=rl-dt><thead><tr><th>folder</th>'
+                             f'<th>new</th><th>changed</th><th>extra</th></tr></thead><tbody>{trows}</tbody></table></div>')
         ver = meta.get("verify") or {}
-        vline = ""
+        ver_html = ""
         if ver:
             vcls = "ok" if ver.get("clean") else "warn"
-            extra = ("" if ver.get("clean") else
-                     f' — {ver.get("mismatch",0)} differ, {ver.get("missing_dest",0)} missing, '
-                     f'{ver.get("dest_untagged",0)} untagged (re-sync with -X)')
-            vline = (f'<div class=rl-cen><span class="rl-i {vcls}">content {ver.get("pct",0):.0%}</span> '
-                     f'verified via {_esc(ver.get("method","?"))}{extra}</div>')
-        needs_relocate = not L["dest_subpath"].startswith("cairn/")
-        if L["confirmed"]:
+            vx = ("" if ver.get("clean") else
+                  f' — {ver.get("mismatch",0)} differ, {ver.get("missing_dest",0)} missing, '
+                  f'{ver.get("dest_untagged",0)} untagged (re-sync with -X)')
+            ver_html = (f'<div class=rl-cen><span class="rl-i {vcls}">content {ver.get("pct",0):.0%}</span> '
+                        f'verified via {_esc(ver.get("method","?"))}{vx}</div>')
+        # status word for the meta line
+        if confirmed:
             vts = max(L.get("last_backup_ts") or 0, L.get("verify_ts") or 0)
-            when = _ago(vts) if vts else "not yet synced/verified"
-            btns = "" if viewer else (
-                f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'census\')" title="re-check size+mtime match + fit">Check</button>'
-                f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'xattr\')" title="content-verify via cached b3sig xattrs (no re-read)">Verify content</button>'
-                f'<button onclick="hashVerify(\'{name}\',\'{ds_js}\')" title="full BLAKE3 ledger - definitive but reads every byte (slow)">Full hash</button>'
-                + (f'<button onclick="toggleDiff(this)">Diff</button>' if cen.get("sample") else "")
-                + (f'<button onclick="relocateLink(\'{name}\',\'{ds_js}\')" title="move this tree under cairn/ (instant, on-drive)">Move under cairn/</button>' if needs_relocate else "")
-                + f'<button onclick="unlink({lid})" title="remove this link">Unlink</button>')
-            out.append(f'<div class=rl><span class="rl-i ok">linked</span><b>{full}</b>'
-                       f'<span class=rl-p>&rarr; {sub}</span><span class=rl-w>{_esc(when)}</span>{btns}</div>{cline}{vline}')
+            status = _esc(_ago(vts) if vts else "not synced/verified")
         else:
-            sc = f"{L['score']:.0%}" if L.get("score") is not None else "?"
-            btns = "" if viewer else (
-                f'<button class=pri onclick="confirmLink({lid})">Confirm</button>'
-                + (f'<button onclick="toggleDiff(this)">Diff</button>' if cen.get("sample") else "")
-                + f'<button onclick="unlink({lid})">Dismiss</button>')
-            out.append(f'<div class=rl><span class="rl-i q">detected</span><b>{full}</b>'
-                       f'<span class=rl-p>&rarr; {sub}</span><span class=rl-w>structure {sc}</span>{btns}</div>{cline}')
+            status = f"structure {L['score']:.0%}" if L.get("score") is not None else "detected"
+        diffbtn = '<button onclick="toggleDiff(this)">Diff</button>' if cen.get("by_folder") else ""
+        if viewer:
+            btns = ""
+        elif confirmed:
+            reloc = ('<button onclick="relocateLink(\'{n}\',\'{d}\')" title="move this tree under cairn/ (instant, on-drive)">Move under cairn/</button>'.format(n=name, d=ds_js)
+                     if not L["dest_subpath"].startswith("cairn/") else "")
+            btns = (f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'census\')" title="re-check size+mtime match + fit">Check</button>'
+                    f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'xattr\')" title="content-verify via cached b3sig xattrs (no re-read)">Verify content</button>'
+                    f'<button onclick="hashVerify(\'{name}\',\'{ds_js}\')" title="full BLAKE3 ledger - reads every byte (slow)">Full hash</button>'
+                    f'{diffbtn}{reloc}<button onclick="unlink({lid})" title="remove this link">Unlink</button>')
+        else:
+            btns = f'<button class=pri onclick="confirmLink({lid})">Confirm</button>{diffbtn}<button onclick="unlink({lid})">Dismiss</button>'
+        icls, ilabel = ("ok", "linked") if confirmed else ("q", "detected")
+        out.append(
+            f'<div class=rl><div class=rl-name><span class="rl-i {icls}">{ilabel}</span><b>{full}</b></div>'
+            f'<div class=rl-loc>&rarr; {sub}<span class=rl-w>{status}</span></div>'
+            f'{cen_html}{ver_html}{diff_html}'
+            f'{("<div class=rl-btns>" + btns + "</div>") if btns else ""}</div>')
     body = "".join(out) or '<div class=rl-none>no datasets linked yet - Detect or add one below</div>'
     controls = ""
     if not viewer:
