@@ -1899,13 +1899,13 @@ function setRow(key, o){
 async function post(body){
   var key='q'+(++_seq); var dry=!!body.dryrun; var tag=dry?'[dry] ':'';
   cardBusy(body.target, +1); panePing('acts');
-  setRow(key,{title:tag+body.action+' '+body.target, state:'submitting', cls:'warn', spin:true, dry:dry});
+  setRow(key,{title:tag+actLabel(body.action,body)+' '+body.target, state:'submitting', cls:'warn', spin:true, dry:dry});
   var r,j;
   try{ r=await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify(body)}); j=await r.json(); }
   catch(e){ setRow(key,{state:'network error', cls:'crit', spin:false, out:String(e)}); cardBusy(body.target,-1); return; }
   if(!r.ok){ setRow(key,{state:'rejected', cls:'crit', spin:false, out:(j.detail||('HTTP '+r.status))}); cardBusy(body.target,-1); return; }
-  setRow(key,{title:tag+'#'+j.id+' '+body.action+' '+body.target, state:'pending', cls:'warn', spin:true});
+  setRow(key,{title:tag+'#'+j.id+' '+actLabel(body.action,body)+' '+body.target, state:'pending', cls:'warn', spin:true});
   poll(j.id, key, dry, body.target);
 }
 async function previewCmd(b){
@@ -2003,7 +2003,7 @@ async function poll(id, key, dry, target){
     var cls = st==='done'?'ok' : (st==='failed'||st==='stalled')?'crit' : 'warn';
     var res={}; try{res=JSON.parse(j.result||'{}')}catch(e){}
     if(!target) target=j.target;
-    setRow(key,{title:tag+'#'+id+' '+(j.target||'')+' '+(j.action||''), state:actState(j.action,st)+(dry?' · dry':''),
+    setRow(key,{title:tag+'#'+id+' '+(j.target||'')+' '+actLabel(j.action||'',j.opts), state:actState(j.action,st)+(dry?' · dry':''),
                 cls:cls, spin:!done, out: done?(res.output||''):undefined, expand: done&&cls==='crit'});
     if(done){ panePing('acts'); break; }             // completion is worth surfacing when collapsed
     await new Promise(s=>setTimeout(s,2000));
@@ -2059,6 +2059,11 @@ function relTime(ts){ if(!ts) return ''; var s=Math.max(0, Date.now()/1000 - ts)
 // while the scrub itself runs for hours. Label it "started" so it doesn't read as "finished" - the
 // real progress lives on the pool card's scrub bar.
 function actState(action, st){ return (action==='scrub' && st==='done') ? 'started' : st; }
+// A mirror is a backup-now with opts.mirror - surface it so the activity/history reads "backup-now (mirror)".
+function actLabel(action, opts){
+  var o=opts; if(typeof o==='string'){ try{o=JSON.parse(o)}catch(e){o={}} }
+  return (action||'') + (o && o.mirror ? ' (mirror)' : '');
+}
 function renderHist(x){
   var st=x.state||'?';
   var cls = st==='done'?'ok' : st==='failed'?'crit' : (st==='pending'||st==='claimed')?'warn':'unk';
@@ -2067,7 +2072,7 @@ function renderHist(x){
   var dry = out.indexOf('[DRYRUN]')===0 ? '<span class=hdry>dry</span>' : '';
   var when = relTime(x.result_ts||x.claimed_ts||x.created_ts);
   return '<div class=hrow><span class="hd '+cls+'"></span>'+
-    '<span class=ha>'+esc(x.action)+' · '+esc(actState(x.action,st))+dry+'</span>'+
+    '<span class=ha>'+esc(actLabel(x.action,x.opts))+' · '+esc(actState(x.action,st))+dry+'</span>'+
     '<span class=ht>'+when+'</span>'+
     (out?'<div class=hcmd>'+esc(out)+'</div>':'')+'</div>';
 }
@@ -2890,7 +2895,7 @@ def _card(r, can_act, viewer=False):
                         for d, ok, ti in legs)
         c321_html = f'<div class=c321><span class=c321l>3-2-1</span>{chips}</div>'
     hist_html = ""
-    if r["type"] in ("zfs-repl", "zfs-local"):   # the target types that receive action intents
+    if r["type"] in ("zfs-repl", "zfs-local", "removable"):   # target types that receive action intents
         hist_html = (f'<div class=chistrow><button class=histbtn data-t="{n}" onclick="toggleHist(this,\'{nm}\')">'
                      f'History</button><div class=chist hidden></div></div>')
     # collapsible job log - the real failure/warning lines captured from the journal (or backupninja log)
