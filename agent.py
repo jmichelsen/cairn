@@ -280,7 +280,7 @@ def do_execute(cfg):
                      {"agent": NAME, "removable": target, "op": "census", "dataset": ds, "census": cen})
             api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                      {"ok": True, "output": f"{ds}: {cen['pct']:.0%} match, +{cen['add']} new / {cen['update']} "
-                                            f"changed / {cen['delete']} extra, {cen['bytes_add']} bytes to add"})
+                                            f"changed / {cen['delete']} extra, {C.human_bytes(cen['bytes_add'])} to add"})
             print(f"  intent {iid} {target} removable-verify {ds} -> {cen['pct']:.0%}"); continue
         if action == "removable-relocate":
             # Move a top-level tree on the drive into cairn/<slug> - an intra-drive rename (instant, no
