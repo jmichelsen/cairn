@@ -285,7 +285,8 @@ def _init_db():
                                   ("agents", "hostname", "TEXT"),
                                   ("removable_links", "meta_json", "TEXT"),
                                   ("removable_links", "verify_method", "TEXT"),
-                                  ("removable_links", "verify_ts", "INTEGER")]:
+                                  ("removable_links", "verify_ts", "INTEGER"),
+                                  ("removable_links", "excludes", "TEXT")]:
                 try:
                     c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
                 except sqlite3.OperationalError:
@@ -319,6 +320,7 @@ def _init_db():
                 meta_json     TEXT,
                 verify_method TEXT,
                 verify_ts     INTEGER,
+                excludes      TEXT,
                 updated_ts    INTEGER NOT NULL,
                 UNIQUE(agent, removable, dataset))""")
             # CI pipeline status broker: one row per badge name (e.g. 'tests', 'deploy'), latest wins.
@@ -1285,6 +1287,23 @@ async def removable_links_confirm(request: Request):
         conn.commit()
         return {"ok": True}
 
+@app.post("/api/v1/backup/removable-links/{lid}/excludes")
+async def removable_links_excludes(lid: int, request: Request):
+    """Set the rsync exclude patterns for a link (subset the backup). Patterns are anchored top-level
+    folder names (e.g. /wyze_videos) or globs. File-tool only - links live on removable (rsync/borg/
+    restic) targets, never zfs. (auth: admin via middleware)"""
+    body = await _json(request)
+    ex = [str(e).strip() for e in (body.get("excludes") or []) if str(e).strip()][:200]
+    with db() as conn:
+        row = conn.execute("SELECT removable,dataset FROM removable_links WHERE id=?", (lid,)).fetchone()
+        conn.execute("UPDATE removable_links SET excludes=?, updated_ts=? WHERE id=?",
+                     (json.dumps(ex), int(time.time()), lid))
+        if row:
+            _log_link_event(conn, row["removable"], "excludes-set",
+                            f"{_ds_source(conn, row['dataset'])}: {', '.join(ex) if ex else '(none)'}")
+        conn.commit()
+    return {"ok": True, "excludes": ex}
+
 @app.delete("/api/v1/backup/removable-links/{lid}")
 def removable_links_delete(lid: int):
     """Unlink (drop a suggestion or a confirmed link). (auth: admin via middleware)"""
@@ -1812,6 +1831,10 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .rl-dt tr:last-child td{border-bottom:0}
 .rl-add{color:var(--ok)} .rl-upd{color:var(--warn)} .rl-del{color:var(--crit)}
 .rl-more{color:var(--mut);font-style:italic;text-align:center!important}
+.rl-dt th:last-child,.rl-dt td:last-child{width:40px;text-align:center}
+.rl-exbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 10px;font-size:11px;color:var(--mut)}
+.rl-exbar button{appearance:none;font:600 11px/1 "Red Hat Text";border:1px solid var(--acc);background:var(--acc);
+  color:#fff;border-radius:7px;padding:5px 9px;cursor:pointer}
 .cact button:hover{filter:brightness(1.05)}
 .cact .ro{color:var(--unk);font-size:11.5px;font-style:italic;align-self:center}
 .crec{display:flex;gap:10px;margin-top:9px}
@@ -2102,6 +2125,15 @@ function verifyContent(btn, removable, dataset){   // confirmed: fast if tagged,
 async function relocateLink(removable, dataset){
   if(!confirm('Move this dataset’s tree under cairn/ on the drive? This is an instant on-drive rename (no copy).')) return;
   post({target:removable, action:'removable-relocate', dataset:dataset, requested_by:'ui'});
+}
+async function applyExcludes(btn, lid){   // save the ticked top-level folders as excludes, then re-check fit
+  var box=btn.closest('.rl-diff'), ex=[];
+  box.querySelectorAll('.rl-ex:checked').forEach(function(c){ ex.push('/'+c.getAttribute('data-folder')); });
+  var r=await fetch('/api/v1/backup/removable-links/'+lid+'/excludes',{method:'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify({excludes:ex})});
+  if(!r.ok){ alert('saving exclusions failed'); return; }
+  btn.textContent='re-checking fit…'; btn.disabled=true;
+  verifyLink(btn.getAttribute('data-rem'), btn.getAttribute('data-ds'), 'census');   // recompute with excludes
 }
 function toggleDiff(btn, removable, dataset){   // show/hide the folder diff; if none computed yet, run a check
   var box=btn.closest('.rl').querySelector('.rl-diff');
@@ -2967,8 +2999,13 @@ def _removable_links_html(r, viewer=False):
             meta = json.loads(L.get("meta_json") or "{}")
         except (ValueError, TypeError):
             meta = {}
+        try:
+            excl = json.loads(L.get("excludes") or "[]")
+        except (ValueError, TypeError):
+            excl = []
+        exnames = [e.lstrip("/") for e in excl]; exset = set(exnames)
         cen = meta.get("census") or {}
-        # census line + folder-aggregated diff table (no per-file scroll)
+        # census line + folder-aggregated diff table (with per-folder exclude checkboxes)
         cen_html = diff_html = ""
         if cen:
             wontfit = (free is not None and cen.get("bytes_add", 0) > free)
@@ -2976,18 +3013,32 @@ def _removable_links_html(r, viewer=False):
                         f'<b>{cen.get("pct",0):.0%}</b> · +{cen.get("add",0)} new / {cen.get("update",0)} '
                         f'changed / {cen.get("delete",0)} extra · would add <b>{_cap(cen.get("bytes_add",0))}</b>'
                         f'{" — WON’T FIT" if wontfit else ""}</div>')
+            if exnames:
+                cen_html += f'<div class=rl-cen>excluding: <b>{_esc(", ".join(exnames))}</b></div>'
             bf = cen.get("by_folder") or []
-            if bf:
+            if bf or exnames:
+                # merge census folders with currently-excluded folders (which drop out of a re-run
+                # census), so an excluded folder stays visible and can be un-checked to re-include.
+                fmap = {b["folder"]: b for b in bf}
+                for en in exnames:
+                    fmap.setdefault(en, {"folder": en, "add": 0, "update": 0, "delete": 0, "gone": True})
+                rowscol = sorted(fmap.values(), key=lambda b: -(b["add"] + b["update"] + b["delete"]))
                 trows = "".join(
                     f'<tr><td>{_esc(b["folder"])}</td>'
                     f'<td class=rl-add>{("+" + str(b["add"])) if b["add"] else ""}</td>'
                     f'<td class=rl-upd>{("~" + str(b["update"])) if b["update"] else ""}</td>'
-                    f'<td class=rl-del>{("-" + str(b["delete"])) if b["delete"] else ""}</td></tr>' for b in bf)
+                    f'<td class=rl-del>{("-" + str(b["delete"])) if b["delete"] else ("excluded" if b.get("gone") else "")}</td>'
+                    f'<td><input type=checkbox class=rl-ex data-folder="{_esc(b["folder"])}"'
+                    f'{" checked" if b["folder"] in exset else ""}></td></tr>' for b in rowscol)
                 more = (cen.get("folders_total", 0) - len(bf))
                 if more > 0:
-                    trows += f'<tr><td colspan=4 class=rl-more>+{more} more folders</td></tr>'
+                    trows += f'<tr><td colspan=5 class=rl-more>+{more} more folders (not excludable here)</td></tr>'
                 diff_html = (f'<div class=rl-diff hidden><table class=rl-dt><thead><tr><th>folder</th>'
-                             f'<th>new</th><th>changed</th><th>extra</th></tr></thead><tbody>{trows}</tbody></table></div>')
+                             f'<th>new</th><th>changed</th><th>extra</th><th>excl</th></tr></thead>'
+                             f'<tbody>{trows}</tbody></table>'
+                             f'<div class=rl-exbar><span>tick folders to exclude, then</span>'
+                             f'<button data-rem="{name}" data-ds="{ds_js}" onclick="applyExcludes(this,{lid})">'
+                             f'Apply exclusions &amp; re-check fit</button></div></div>')
         ver = meta.get("verify") or {}
         # verification ladder: which levels have been run + their result. structure/census are ANALYSIS
         # (a match %); content (xattr/hash) is a PASS (clean = every source file's content is on the drive).
