@@ -513,3 +513,18 @@ def test_hash_ledger_verify_compares_to_source_sig(tmp_path, monkeypatch):
     assert res["present"] == 1 and res["missing"] == 1 and res["no_src_sig"] == 1
     assert res["clean"] is False and res["hashed"] == 3
     assert led.exists() and "\tb" in led.read_text()
+
+
+def test_drive_tagged_fraction(tmp_path):
+    import os
+    import pytest
+    d = tmp_path / "d"; os.makedirs(d)
+    for n in ("a", "b", "c", "e"):
+        (d / n).write_text(n)
+    try:
+        os.setxattr(str(d / "a"), "user.b3sig", b"Fa")
+        os.setxattr(str(d / "b"), "user.b3sig", b"Fb")
+        os.setxattr(str(d / "c"), "user.b3sig", b"Fc")   # 3 of 4 tagged
+    except OSError:
+        pytest.skip("filesystem does not support user xattrs")
+    assert abs(collector.drive_tagged_fraction(str(d)) - 0.75) < 0.01

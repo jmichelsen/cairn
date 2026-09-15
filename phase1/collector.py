@@ -674,6 +674,22 @@ def _xattr_hashset(root):
                 untagged += 1
     return hs, untagged
 
+def drive_tagged_fraction(dest, sample=300):
+    """Quick probe: of the first `sample` files on the drive, what fraction carry a b3sig xattr? Used to
+    auto-pick the content-verify method - xattrs (free) if the drive is tagged, else a full hash."""
+    seen = tagged = 0
+    for r, _d, files in os.walk(dest):
+        for f in files:
+            seen += 1
+            try:
+                if os.getxattr(os.path.join(r, f), "user.b3sig"):
+                    tagged += 1
+            except OSError:
+                pass
+            if seen >= sample:
+                return tagged / seen
+    return (tagged / seen) if seen else 0.0
+
 def xattr_verify(src, dest, cap=1000000):
     """Tier-2 CONTENT coverage with NO file reads - PATH-INDEPENDENT: is each source file's content
     present ANYWHERE on the drive (by cached b3sig hash)? Ignores reorganization (unlike the path-based
