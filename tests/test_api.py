@@ -168,3 +168,22 @@ def test_deploy_status_stored_but_never_public():
     assert api.ci_badge("deploy").status_code == 404
     names = {r["name"]: r["status"] for r in api.ci_status_list()["status"]}
     assert names.get("deploy") == "failed"
+
+
+# ---- removable 2nd-leg action button ---------------------------------------------------------
+def _removable_row(backupable):
+    return {"name": "ext", "type": "removable", "source": "/tank/photos", "severity": "OK",
+            "agent": "local", "detail_json": json.dumps({"caps": {"backupable": backupable},
+                                                          "reasons": ["attached"]})}
+
+
+def test_backup_now_is_an_allowed_action():
+    assert "backup-now" in api.ALLOWED_ACTIONS
+
+
+def test_backup_now_button_shows_only_when_backupable():
+    on = api._acts(_removable_row(True), can_act=True, viewer=False)
+    assert "backup-now" in on and "Back up now" in on
+    off = api._acts(_removable_row(False), can_act=True, viewer=False)
+    assert "backup-now" not in off        # detached / read-only -> no button
+    assert api._acts(_removable_row(True), can_act=True, viewer=True) == ""  # viewer: no controls

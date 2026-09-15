@@ -47,6 +47,24 @@ targets:
   #     collector needs read access (ALLOW_USERS in /etc/snapper/configs/<name>). ---
   # - { name: snapper-root, type: snapper, source: root }
 
+  # --- REMOVABLE external drive as a 2nd-media leg (the "2" in 3-2-1). cairn recognizes it by a
+  #     STABLE id (filesystem `uuid` or `by_id` under /dev/disk/by-id, never /dev/sdX), monitors
+  #     presence + freshness, and backs up ON DEMAND ("Back up now") with an incremental rsync.
+  #     Absence is a NEUTRAL state ("detached"), never CRIT - an unplugged 2nd-leg is expected.
+  #     No privilege needed (monitoring reads only symlinks + the mount table; rsync runs as you).
+  #       uuid / by_id : how to recognize the drive (one of them). `blkid` / `ls /dev/disk/by-*`.
+  #       mount        : where it is mounted when present (fstab: UUID + `nofail` so boot survives absence).
+  #       source       : what to back up (the live tree).
+  #       dest_subpath : path UNDER the mount to sync into (created if absent).
+  #       exclude      : optional rsync --exclude patterns.
+  #       mirror       : true => rsync --delete (mirror). DEFAULT false = additive (never clobbers a
+  #                      stale/diverged drive; surface + let a human decide, don't auto-delete).
+  #       detach_warn_d: days detached before a gentle WARN nudge (default 45). ---
+  # - { name: ext-photos, type: removable, tool: rsync,
+  #     uuid: 1234abcd-....,  mount: /mnt/ext-backup,
+  #     source: /tank/photos, dest_subpath: photos, tier: B, location: removable,
+  #     exclude: ["*.tmp"], backs_up: "photos -> external drive (2nd media)" }
+
   # --- SMART health of physical disks (needs device access - see docker-compose.yml) ---
   - { name: smart, type: smart }
 
