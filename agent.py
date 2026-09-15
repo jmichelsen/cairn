@@ -243,13 +243,14 @@ def do_execute(cfg):
             if tier in ("xattr", "hash"):
                 if tier == "xattr":
                     res, err = C.xattr_verify(srcp, dest)
-                    detail = (f"{res['matched']} match, {res['mismatch']} differ, {res['missing_dest']} missing, "
-                              f"{res['dest_untagged']} untagged" if res else "")
+                    detail = (f"{res['present']} present, {res['missing']} missing content "
+                              f"({res['missing_bytes']/1e9:.1f} GB), {res['dest_untagged']} drive files untagged"
+                              if res else "")
                 else:
                     res, err = C.hash_ledger_verify(srcp, dest, ledger_path=C._ledger_path(target, ds),
                                                     timeout=RECOVER_WALK_TIMEOUT * 8)
-                    detail = (f"{res['matched']} match, {res['mismatch']} differ, {res['no_src_sig']} unverifiable; "
-                              f"ledger {res['ledger']}" if res else "")
+                    detail = (f"{res['present']} present, {res['missing']} missing content "
+                              f"({res['missing_bytes']/1e9:.1f} GB); ledger {res['ledger']}" if res else "")
                 if err:
                     api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err}); continue
                 api_call("POST", "/api/v1/backup/agent/removable-links",

@@ -658,43 +658,53 @@ def rsync_census(src, dest, excludes=None, timeout=1800):
             "update": update, "delete": deletes, "unchanged": unchanged, "bytes_add": bytes_add,
             "folders_total": len(by_folder), "by_folder": by_folder[:40]}, None
 
-def xattr_verify(src, dest, cap=1000000):
-    """Tier-2 CONTENT verify with NO file reads: compare the cached user.b3sig xattr on each source
-    file to the same-relative-path file on the drive. Needs both sides tagged (an -X sync seeds the
-    drive). Returns (summary, err). `clean` = every source file with a sig has a byte-identical twin
-    on the drive; `dest_untagged` counts drive files missing the xattr (=> re-sync with -X)."""
-    B3 = "user.b3sig"
-    def getx(p):
-        try:
-            return os.getxattr(p, B3).decode("ascii", "replace")
-        except OSError:
-            return None
-    src = src.rstrip("/"); dest = dest.rstrip("/")
-    matched = mismatch = missing_dest = dest_untagged = no_src_sig = checked = 0
-    for root, _dirs, files in os.walk(src):
+def _xattr_hashset(root):
+    """Set of full-hash b3sig values (hex, F stripped) under a tree, via cached xattrs. Also returns
+    how many files carried NO usable sig (untagged)."""
+    hs = set(); untagged = 0
+    for r, _d, files in os.walk(root):
         for f in files:
-            checked += 1
-            if checked > cap:
-                break
-            sp = os.path.join(root, f); ssig = getx(sp)
-            if not ssig:
-                no_src_sig += 1; continue
-            dp = os.path.join(dest, os.path.relpath(sp, src))
-            if not os.path.exists(dp):
-                missing_dest += 1; continue
-            dsig = getx(dp)
-            if dsig is None:
-                dest_untagged += 1
-            elif dsig == ssig:
-                matched += 1
+            try:
+                s = os.getxattr(os.path.join(r, f), "user.b3sig").decode("ascii", "replace")
+            except OSError:
+                s = None
+            if s and s[:1] == "F":
+                hs.add(s[1:])
             else:
-                mismatch += 1
-    verifiable = matched + mismatch + missing_dest + dest_untagged
-    pct = round(matched / verifiable, 4) if verifiable else 0.0
-    clean = bool(matched) and mismatch == 0 and missing_dest == 0 and dest_untagged == 0
-    return {"method": "xattr", "matched": matched, "mismatch": mismatch,
-            "missing_dest": missing_dest, "dest_untagged": dest_untagged,
-            "no_src_sig": no_src_sig, "pct": pct, "clean": clean}, None
+                untagged += 1
+    return hs, untagged
+
+def xattr_verify(src, dest, cap=1000000):
+    """Tier-2 CONTENT coverage with NO file reads - PATH-INDEPENDENT: is each source file's content
+    present ANYWHERE on the drive (by cached b3sig hash)? Ignores reorganization (unlike the path-based
+    census). Needs both sides tagged (an -X sync or a hash-ledger apply seeds the drive). `clean` =
+    every source file's content is on the drive (a complete copy); `missing`/`missing_bytes` = the true
+    content gap; `dest_untagged` flags a drive that isn't hash-tagged yet (=> re-sync with -X)."""
+    src = src.rstrip("/"); dest = dest.rstrip("/")
+    drive, dest_untagged = _xattr_hashset(dest)
+    present = missing = no_src_sig = 0; missing_bytes = 0
+    for r, _d, files in os.walk(src):
+        for f in files:
+            p = os.path.join(r, f)
+            try:
+                s = os.getxattr(p, "user.b3sig").decode("ascii", "replace")
+            except OSError:
+                s = None
+            if not s or s[:1] != "F":
+                no_src_sig += 1; continue
+            if s[1:] in drive:
+                present += 1
+            else:
+                missing += 1
+                try:
+                    missing_bytes += os.path.getsize(p)
+                except OSError:
+                    pass
+    total = present + missing
+    pct = round(present / total, 4) if total else 0.0
+    clean = missing == 0 and present > 0
+    return {"method": "xattr", "present": present, "missing": missing, "missing_bytes": missing_bytes,
+            "dest_untagged": dest_untagged, "no_src_sig": no_src_sig, "pct": pct, "clean": clean}, None
 
 def _ledger_path(removable, dataset):
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{removable}-{dataset}").strip("_")
@@ -709,15 +719,9 @@ def hash_ledger_verify(src, dest, ledger_path=None, batch=400, timeout=None):
     if not _have("b3sum"):
         return None, "b3sum not installed on this host - can't build a full-hash ledger"
     dest = dest.rstrip("/"); src = src.rstrip("/")
-    def srcsig(rel):
-        try:
-            return os.getxattr(os.path.join(src, rel), "user.b3sig").decode("ascii", "replace")
-        except OSError:
-            return None
-    rels = [os.path.relpath(os.path.join(r, f), dest)
-            for r, _d, fs in os.walk(dest) for f in fs]
-    matched = mismatch = no_src_sig = hashed = 0
-    lines = []
+    # 1) BLAKE3 every drive file -> the drive's content SET (+ a durable ledger, reusable later).
+    rels = [os.path.relpath(os.path.join(r, f), dest) for r, _d, fs in os.walk(dest) for f in fs]
+    drive = set(); lines = []
     for i in range(0, len(rels), batch):
         chunk = rels[i:i + batch]
         rc, out, err = run(NICE + ["b3sum", "--"] + [os.path.join(dest, r) for r in chunk],
@@ -729,27 +733,40 @@ def hash_ledger_verify(src, dest, ledger_path=None, batch=400, timeout=None):
                 hmap[m.group(2)] = m.group(1)
         for r in chunk:
             h = hmap.get(os.path.join(dest, r))
-            if not h:
-                continue
-            hashed += 1; lines.append(f"F{h}\t{r}")
-            s = srcsig(r)
-            if not s or s[:1] != "F":            # untagged, or an edge-sig (Q) we can't full-compare
-                no_src_sig += 1
-            elif s[1:] == h:
-                matched += 1
-            else:
-                mismatch += 1
-    comparable = matched + mismatch
-    pct = round(matched / comparable, 4) if comparable else 0.0
-    clean = mismatch == 0 and matched > 0
+            if h:
+                drive.add(h); lines.append(f"F{h}\t{r}")
     if ledger_path:
         try:
             with open(ledger_path, "w") as fh:
                 fh.write("\n".join(lines) + ("\n" if lines else ""))
         except OSError:
             pass
-    return {"method": "hash", "hashed": hashed, "matched": matched, "mismatch": mismatch,
-            "no_src_sig": no_src_sig, "pct": pct, "clean": clean, "ledger": ledger_path}, None
+    # 2) content coverage: is each SOURCE file's content on the drive (path-independent)? Source (mcz)
+    #    carries authoritative F<hash> xattrs, so trust those rather than re-reading the source.
+    present = missing = no_src_sig = 0; missing_bytes = 0
+    for r, _d, files in os.walk(src):
+        for f in files:
+            p = os.path.join(r, f)
+            try:
+                s = os.getxattr(p, "user.b3sig").decode("ascii", "replace")
+            except OSError:
+                s = None
+            if not s or s[:1] != "F":
+                no_src_sig += 1; continue
+            if s[1:] in drive:
+                present += 1
+            else:
+                missing += 1
+                try:
+                    missing_bytes += os.path.getsize(p)
+                except OSError:
+                    pass
+    total = present + missing
+    pct = round(present / total, 4) if total else 0.0
+    clean = missing == 0 and present > 0
+    return {"method": "hash", "hashed": len(lines), "present": present, "missing": missing,
+            "missing_bytes": missing_bytes, "no_src_sig": no_src_sig, "pct": pct, "clean": clean,
+            "ledger": ledger_path}, None
 
 def _dir_children(path, cap=1000):
     """Immediate child names of a directory (the cheap structural fingerprint). None if unreadable."""

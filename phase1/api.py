@@ -1770,6 +1770,13 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .rl-i.ok{color:var(--ok)} .rl-i.q{color:var(--warn)}
 .rl-cen{font-size:11.5px;color:var(--mut);margin:3px 0} .rl-cen b{color:var(--ink);font-weight:700}
 .rl-nofit,.rl-nofit b{color:var(--crit)}
+.rl-lad{display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin:4px 0}
+.rl-ladl{font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--mut);margin-right:2px}
+.rl-t{font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:10px;border:1px solid var(--line);
+  color:var(--mut);background:var(--surf)}
+.rl-t.done{color:var(--ok);border-color:var(--ok)} .rl-t.done::before{content:"\2713 "}
+.rl-t.warn{color:var(--warn);border-color:var(--warn)}
+.rl-t.pending{color:var(--mut);opacity:.6;border-style:dashed}
 .rl-btns,.rl-ctl{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px;align-items:center}
 .rl-hint{font-size:11px;color:var(--mut)} .rl-hint b{color:var(--ink);font-weight:600}
 .rl-add{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}
@@ -2072,8 +2079,11 @@ async function relocateLink(removable, dataset){
   if(!confirm('Move this dataset’s tree under cairn/ on the drive? This is an instant on-drive rename (no copy).')) return;
   post({target:removable, action:'removable-relocate', dataset:dataset, requested_by:'ui'});
 }
-function toggleDiff(btn){   // show/hide the folder-aggregated diff table for this link
-  var box=btn.closest('.rl').querySelector('.rl-diff'); if(box) box.hidden=!box.hidden;
+function toggleDiff(btn, removable, dataset){   // show/hide the folder diff; if none computed yet, run a check
+  var box=btn.closest('.rl').querySelector('.rl-diff');
+  if(box){ box.hidden=!box.hidden; return; }
+  verifyLink(removable, dataset, 'census');     // no diff yet -> compute it (appears on next refresh)
+  btn.textContent='computing…'; btn.disabled=true;
 }
 async function actPrompt(target, action, field, msg){
   var v=prompt(msg); if(v===null) return;
@@ -2952,21 +2962,28 @@ def _removable_links_html(r, viewer=False):
                 diff_html = (f'<div class=rl-diff hidden><table class=rl-dt><thead><tr><th>folder</th>'
                              f'<th>new</th><th>changed</th><th>extra</th></tr></thead><tbody>{trows}</tbody></table></div>')
         ver = meta.get("verify") or {}
-        ver_html = ""
+        # verification ladder: which levels have been run + their result. structure/census are ANALYSIS
+        # (a match %); content (xattr/hash) is a PASS (clean = every source file's content is on the drive).
+        def _chip(state, label):
+            return f'<span class="rl-t {state}">{_esc(label)}</span>'
+        lad = [_chip("done", f"structure {L['score']:.0%}") if L.get("score") is not None else _chip("pending", "structure"),
+               _chip("done", f"size+mtime {cen.get('pct',0):.0%}") if cen else _chip("pending", "size+mtime")]
         if ver:
-            vcls = "ok" if ver.get("clean") else "warn"
-            vx = ("" if ver.get("clean") else
-                  f' — {ver.get("mismatch",0)} differ, {ver.get("missing_dest",0)} missing, '
-                  f'{ver.get("dest_untagged",0)} untagged (re-sync with -X)')
-            ver_html = (f'<div class=rl-cen><span class="rl-i {vcls}">content {ver.get("pct",0):.0%}</span> '
-                        f'verified via {_esc(ver.get("method","?"))}{vx}</div>')
+            lad.append(_chip("done" if ver.get("clean") else "warn",
+                             f"content {ver.get('pct',0):.0%} ({ver.get('method','?')})"))
+        else:
+            lad.append(_chip("pending", "content"))
+        ver_html = f'<div class=rl-lad><span class=rl-ladl>verified</span>{"".join(lad)}</div>'
+        if ver and not ver.get("clean") and ver.get("missing"):
+            ver_html += (f'<div class=rl-cen><b>{ver["missing"]:,}</b> files / '
+                         f'<b>{_cap(ver.get("missing_bytes",0))}</b> of source content is NOT on the drive</div>')
         # status word for the meta line
         if confirmed:
             vts = max(L.get("last_backup_ts") or 0, L.get("verify_ts") or 0)
             status = _esc(_ago(vts) if vts else "not synced/verified")
         else:
             status = f"structure {L['score']:.0%}" if L.get("score") is not None else "detected"
-        diffbtn = '<button onclick="toggleDiff(this)">Diff</button>' if cen.get("by_folder") else ""
+        diffbtn = f'<button onclick="toggleDiff(this,\'{name}\',\'{ds_js}\')" title="folder-level diff (runs a check if none yet)">Diff</button>'
         if viewer:
             btns = ""
         elif confirmed:
@@ -2988,8 +3005,8 @@ def _removable_links_html(r, viewer=False):
     controls = ""
     if not viewer:
         avail = [(nm, src) for nm, src in cands if nm not in linked]
-        detect = (f'<div class=rl-ctl><button onclick="scanRemovable(\'{name}\')">Detect contents</button>'
-                  f'<span class=rl-hint>scan <b>this drive</b> and auto-match its folders to your datasets</span></div>')
+        detect = (f'<div class=rl-ctl><button onclick="scanRemovable(\'{name}\')">Detect matching datasets</button>'
+                  f'<span class=rl-hint>scan <b>this drive</b> and match its folders to your datasets</span></div>')
         picker = ""
         if avail:
             opts = "".join(f'<option value="{_esc(nm)}" data-sub="{_esc(_cmd.cairn_subpath(src or nm))}">'
