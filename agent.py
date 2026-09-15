@@ -155,6 +155,13 @@ def _dataset_paths(cfg):
             out.append({"name": t["name"], "path": src, "source": src})
     return out
 
+def _exlist(link):
+    """Per-link rsync exclude patterns (JSON list on the link row), safe-parsed."""
+    try:
+        return json.loads((link or {}).get("excludes") or "[]")
+    except (ValueError, TypeError):
+        return []
+
 def do_execute(cfg):
     tmap = {t["name"]: t for t in cfg.get("targets", [])}
     res = api_call("GET", f"/api/v1/backup/intents?agent={NAME}") or {}
@@ -266,7 +273,7 @@ def do_execute(cfg):
                                                 f"({detail}){note}"})
                 print(f"  intent {iid} {target} removable-verify[{tier}] {ds} -> {res['pct']:.0%} clean={res['clean']}")
                 continue
-            cen, err = C.rsync_census(srcp, dest, timeout=RECOVER_WALK_TIMEOUT * 4)
+            cen, err = C.rsync_census(srcp, dest, excludes=_exlist(link), timeout=RECOVER_WALK_TIMEOUT * 4)
             if err:
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err}); continue
             api_call("POST", "/api/v1/backup/agent/removable-links",
@@ -324,8 +331,8 @@ def do_execute(cfg):
                 jobs = []
                 for L in links:
                     srcp = dsmap.get(L["dataset"])
-                    jobs.append((L["dataset"], dict(t, source=srcp, dest_subpath=L["dest_subpath"]),
-                                 srcp is not None))
+                    jobs.append((L["dataset"], dict(t, source=srcp, dest_subpath=L["dest_subpath"],
+                                                    exclude=_exlist(L)), srcp is not None))
             else:
                 jobs = [(None, t, bool(t.get("source")))]
             head = ("[DRY-RUN] " if dry else "") + (f"log: {C._removable_log_path(t)}\n" if not dry else "")
