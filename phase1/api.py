@@ -2126,14 +2126,26 @@ async function relocateLink(removable, dataset){
   if(!confirm('Move this dataset’s tree under cairn/ on the drive? This is an instant on-drive rename (no copy).')) return;
   post({target:removable, action:'removable-relocate', dataset:dataset, requested_by:'ui'});
 }
-async function applyExcludes(btn, lid){   // save the ticked top-level folders as excludes, then re-check fit
+async function applyExcludes(btn, lid){   // save ticked folders as excludes, recompute census, then reload
   var box=btn.closest('.rl-diff'), ex=[];
   box.querySelectorAll('.rl-ex:checked').forEach(function(c){ ex.push('/'+c.getAttribute('data-folder')); });
   var r=await fetch('/api/v1/backup/removable-links/'+lid+'/excludes',{method:'POST',
     headers:{'Content-Type':'application/json'}, body:JSON.stringify({excludes:ex})});
   if(!r.ok){ alert('saving exclusions failed'); return; }
   btn.textContent='re-checking fit…'; btn.disabled=true;
-  verifyLink(btn.getAttribute('data-rem'), btn.getAttribute('data-ds'), 'census');   // recompute with excludes
+  var rem=btn.getAttribute('data-rem'), ds=btn.getAttribute('data-ds'), j;
+  // census is read-only (ignores the dry toggle); WAIT for it to actually finish, then reload so the
+  // new fit shows and the button resets - the agent runs it on its poll loop, so this can take a bit.
+  try{ j=await (await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({target:rem, action:'removable-verify', dataset:ds, tier:'census', requested_by:'ui'})})).json(); }
+  catch(e){ location.reload(); return; }
+  if(!j||!j.id){ location.reload(); return; }
+  for(var i=0;i<150;i++){
+    await new Promise(function(s){ setTimeout(s,2000); });
+    var st; try{ st=(await (await fetch('/api/v1/backup/actions/'+j.id)).json()).state; }catch(e){ break; }
+    if(st==='done'||st==='failed'||st==='stalled') break;
+  }
+  location.reload();
 }
 function toggleDiff(btn, removable, dataset){   // show/hide the folder diff; if none computed yet, run a check
   var box=btn.closest('.rl').querySelector('.rl-diff');
