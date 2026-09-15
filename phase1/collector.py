@@ -1718,9 +1718,12 @@ def build_command(action, t, opts=None):
             cmd += ["--log-file", _removable_log_path(t)]
         if dry:
             cmd.append("-n")
+        exc = t.get("exclude") or []
         if mirror:
             cmd.append("--delete")
-        for ex in (t.get("exclude") or []):
+            if exc and opts.get("prune_excluded"):   # OPT-IN: also remove excluded folders from the
+                cmd.append("--delete-excluded")       # drive (reclaim their space); default leaves them
+        for ex in exc:
             cmd += ["--exclude", str(ex)]
         # trailing slashes: copy the CONTENTS of src into dest
         return cmd + ["--", src.rstrip("/") + "/", dest.rstrip("/") + "/"], None

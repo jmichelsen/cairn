@@ -1004,6 +1004,8 @@ async def create_action(request: Request):
         opts["dryrun"] = True   # per-action dry-run: the agent runs a native -n / read-only probe
     if body.get("mirror"):
         opts["mirror"] = True   # removable backup-now: rsync --delete (mirror). Destructive; opt-in.
+    if body.get("prune_excluded"):
+        opts["prune_excluded"] = True   # also --delete-excluded: remove excluded folders from the drive
     for k in ("path", "dest", "version", "dataset", "dest_subpath", "tier"):
         if body.get(k) is not None:
             opts[k] = str(body[k])
@@ -2086,6 +2088,8 @@ async function mirrorRemovable(name){
   var b={target:name, action:'backup-now', mirror:true, requested_by:'ui', dryrun:!!window.CAIRN_DRY};
   var label='MIRROR '+name+' (rsync --delete - REMOVES files on the drive not present in the source)';
   if(!(await confirmRun(b, label))) return;
+  // opt-in second choice: also delete the EXCLUDED folders from the drive (reclaim their space)?
+  b.prune_excluded = confirm('Also PRUNE excluded folders from the drive?\\n\\nOK = delete excluded folders too (drive becomes exactly the included subset, reclaims their space).\\nCancel = leave excluded folders on the drive.');
   post(b);
 }
 async function scanRemovable(name){   // read-only discovery scan; results appear after the agent runs

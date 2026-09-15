@@ -309,6 +309,20 @@ def test_backup_now_mirror_and_excludes_and_dryrun():
     cmd, _ = collector.build_command("backup-now", t, {"dryrun": True})
     assert "--delete" in cmd and "-n" in cmd
     assert cmd.count("--exclude") == 2 and "*.tmp" in cmd and "cache" in cmd
+    assert "--delete-excluded" not in cmd      # prune is OPT-IN, not implied by mirror+excludes
+
+
+def test_delete_excluded_is_opt_in():
+    t = dict(_REMOVABLE_T, mirror=True, exclude=["x"])
+    # mirror + excludes but no prune_excluded -> --delete but NOT --delete-excluded
+    cmd, _ = collector.build_command("backup-now", t)
+    assert "--delete" in cmd and "--delete-excluded" not in cmd
+    # opt in -> --delete-excluded
+    cmd, _ = collector.build_command("backup-now", t, {"prune_excluded": True})
+    assert "--delete-excluded" in cmd
+    # prune opt without excludes is a no-op
+    cmd, _ = collector.build_command("backup-now", dict(_REMOVABLE_T, mirror=True), {"prune_excluded": True})
+    assert "--delete-excluded" not in cmd
 
 
 def test_backup_now_mirror_opt_overrides_config():
