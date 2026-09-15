@@ -137,8 +137,9 @@ def self_update():
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def _dataset_paths(cfg):
-    """Monitored dataset-backed targets as [{name, path}], path = a real local directory (zfs
-    mountpoint resolved). Feeds removable discovery (structural tree matching) + link-driven backups."""
+    """Monitored dataset-backed targets as [{name, path, source}]: path = the live root (zfs
+    mountpoint resolved) rsync reads from; source = the dataset identity (e.g. mcz/mclife/Pics) used
+    to slug its cairn/ subfolder. Feeds removable discovery, census, and link-driven backups."""
     out = []
     for t in cfg.get("targets", []):
         typ = t.get("type"); src = t.get("source")
@@ -147,9 +148,9 @@ def _dataset_paths(cfg):
         if typ in ("zfs-local", "zfs-repl"):
             mp, err = C._mountpoint(src)
             if not err and mp:
-                out.append({"name": t["name"], "path": mp})
+                out.append({"name": t["name"], "path": mp, "source": src})
         elif os.path.isdir(src):
-            out.append({"name": t["name"], "path": src})
+            out.append({"name": t["name"], "path": src, "source": src})
     return out
 
 def do_execute(cfg):
@@ -199,20 +200,76 @@ def do_execute(cfg):
             print(f"  intent {iid} {target} recover-walk -> {'ok' if ok else 'FAIL'} ({count})")
             continue
         if action == "removable-scan":
-            # Discover which monitored datasets this drive already holds, by structural tree match, and
-            # push the suggestions (the dashboard shows them for the user to confirm). READ-ONLY.
+            # Discover which monitored datasets this drive already holds: structural match to LOCATE a
+            # candidate subtree, then a dry-run rsync CENSUS on each hit for real file-level confidence
+            # (size+mtime match %, add/update/delete, bytes-to-add). READ-ONLY. Push as suggestions.
             pr = C.removable_probe(t)
             if not pr["attached"] or not pr["mounted"]:
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                          {"ok": False, "output": f"drive not attached/mounted at {pr['mount']}"}); continue
-            sugg = C.discover_removable_links(pr["mount"], _dataset_paths(cfg))
+            dsp = _dataset_paths(cfg); pmap = {d["name"]: d["path"] for d in dsp}
+            sugg = C.discover_removable_links(pr["mount"], dsp)
+            for s in sugg:
+                srcp = pmap.get(s["dataset"]); dest = os.path.join(pr["mount"], s["subpath"])
+                if srcp:
+                    cen, err = C.rsync_census(srcp, dest, timeout=RECOVER_WALK_TIMEOUT * 4)
+                    if cen:
+                        s["census"] = cen
             api_call("POST", "/api/v1/backup/agent/removable-links",
                      {"agent": NAME, "removable": target, "suggestions": sugg})
-            msg = ("; ".join(f"{s['dataset']}->{s['subpath']} ({s['score']})" for s in sugg)
+            msg = ("; ".join(f"{s['dataset']}->{s['subpath']} struct {s['score']}"
+                             + (f" census {s['census']['pct']:.0%}" if s.get("census") else "") for s in sugg)
                    or "no dataset trees recognized on this drive")
             api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                      {"ok": True, "output": f"{len(sugg)} match(es): {msg}"})
             print(f"  intent {iid} {target} removable-scan -> {len(sugg)} match(es)"); continue
+        if action == "removable-verify":
+            # Re-run the census (tier-1 size+mtime diff/fit) for one confirmed/suggested dataset link.
+            # (tier-2 xattr and tier-3 full-hash verify are added in later phases.) READ-ONLY.
+            pr = C.removable_probe(t)
+            if not pr["attached"] or not pr["mounted"]:
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                         {"ok": False, "output": f"drive not attached/mounted at {pr['mount']}"}); continue
+            ds = opts.get("dataset") or ""
+            lr = api_call("GET", f"/api/v1/backup/agent/removable-links?agent={NAME}&removable={target}") or {}
+            link = next((L for L in (lr.get("links") or []) if L["dataset"] == ds), None)
+            # confirmed links come from the GET (confirmed_only); for an unconfirmed one, fall back to opts
+            sub = (link or {}).get("dest_subpath") or opts.get("dest_subpath") or ""
+            srcp = {d["name"]: d["path"] for d in _dataset_paths(cfg)}.get(ds)
+            if not srcp or not sub:
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                         {"ok": False, "output": f"no source/subpath for dataset '{ds}'"}); continue
+            cen, err = C.rsync_census(srcp, os.path.join(pr["mount"], sub), timeout=RECOVER_WALK_TIMEOUT * 4)
+            if err:
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err}); continue
+            api_call("POST", "/api/v1/backup/agent/removable-links",
+                     {"agent": NAME, "removable": target, "op": "census", "dataset": ds, "census": cen})
+            api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                     {"ok": True, "output": f"{ds}: {cen['pct']:.0%} match, +{cen['add']} new / {cen['update']} "
+                                            f"changed / {cen['delete']} extra, {cen['bytes_add']} bytes to add"})
+            print(f"  intent {iid} {target} removable-verify {ds} -> {cen['pct']:.0%}"); continue
+        if action == "removable-relocate":
+            # Move a top-level tree on the drive into cairn/<slug> - an intra-drive rename (instant, no
+            # copy) - so cairn-managed data is namespaced and multiple datasets can share the drive.
+            pr = C.removable_probe(t)
+            if not pr["attached"] or not pr["mounted"] or pr["ro"]:
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                         {"ok": False, "output": f"drive not attached/mounted rw at {pr['mount']}"}); continue
+            ds = opts.get("dataset") or ""
+            dmap = {d["name"]: d for d in _dataset_paths(cfg)}
+            lr = api_call("GET", f"/api/v1/backup/agent/removable-links?agent={NAME}&removable={target}") or {}
+            link = next((L for L in (lr.get("links") or []) if L["dataset"] == ds), None)
+            if not link or ds not in dmap:
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                         {"ok": False, "output": f"no confirmed link for dataset '{ds}'"}); continue
+            newsub = C.cairn_subpath(dmap[ds]["source"])
+            ok2, msg = C.removable_relocate(pr["mount"], link["dest_subpath"], newsub)
+            if ok2:
+                api_call("POST", "/api/v1/backup/agent/removable-links",
+                         {"agent": NAME, "removable": target, "op": "relocate", "dataset": ds, "dest_subpath": newsub})
+            api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                     {"ok": ok2, "output": msg})
+            print(f"  intent {iid} {target} removable-relocate {ds} -> {'ok' if ok2 else 'FAIL'}"); continue
         if action == "backup-now":
             # Removable 2nd-leg incremental backup. Guard presence/rw HERE (a clear message beats an
             # opaque rsync failure). If the drive has CONFIRMED dataset links, back up each of them

@@ -407,3 +407,41 @@ def test_discover_ignores_weak_matches(tmp_path):
     for n in ["a", "zzz"]:                          # only 1 of 5 overlaps -> below min_score
         os.makedirs(drive / "x" / n)
     assert collector.discover_removable_links(str(drive), [{"name": "Pics", "path": str(ds)}]) == []
+
+
+# ---- removable phase (a): cairn subpath, relocate, rsync census ------------------------------
+def test_cairn_subpath_slugs_source():
+    assert collector.cairn_subpath("mcz/mclife/Pics") == "cairn/mcz_mclife_Pics"
+    assert collector.cairn_subpath("/tank/photos/") == "cairn/tank_photos"
+    assert collector.cairn_subpath("") == "cairn/dataset"
+
+
+def test_removable_relocate_moves_within_drive(tmp_path):
+    import os
+    mount = tmp_path / "mnt"; os.makedirs(mount / "old" / "Pics")
+    (mount / "old" / "Pics" / "a.jpg").write_text("x")
+    ok, msg = collector.removable_relocate(str(mount), "old/Pics", "cairn/mcz_Pics")
+    assert ok, msg
+    assert (mount / "cairn" / "mcz_Pics" / "a.jpg").exists()
+    assert not (mount / "old" / "Pics").exists()
+
+
+def test_removable_relocate_refuses_existing_dest_and_escape(tmp_path):
+    import os
+    mount = tmp_path / "mnt"; os.makedirs(mount / "a"); os.makedirs(mount / "cairn" / "x")
+    ok, _ = collector.removable_relocate(str(mount), "a", "cairn/x"); assert not ok
+    ok, _ = collector.removable_relocate(str(mount), "a", "../escape"); assert not ok
+
+
+def test_rsync_census_parses_counts(monkeypatch):
+    canned = (">f+++++++++ new1.jpg\n>f..t...... changed1.jpg\n*deleting old/gone.jpg\n\n"
+              "Number of files: 1,000 (reg: 950, dir: 50)\n"
+              "Number of created files: 10 (reg: 8, dir: 2)\n"
+              "Number of regular files transferred: 12\n"
+              "Total transferred file size: 4,200,000 bytes\n")
+    monkeypatch.setattr(collector, "run", lambda *a, **k: (0, canned, ""))
+    cen, err = collector.rsync_census("/src", "/dst")
+    assert err is None
+    assert cen["reg_total"] == 950 and cen["transfer"] == 12
+    assert cen["add"] == 8 and cen["update"] == 4 and cen["delete"] == 1
+    assert cen["bytes_add"] == 4200000 and abs(cen["pct"] - 938/950) < 0.001

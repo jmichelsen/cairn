@@ -248,3 +248,26 @@ def test_scorecard_ignores_stale_removable_copy():
         conn.commit()
     card = {c["name"]: c for c in api.scorecard()["cards"]}["PicsB"]
     assert card["copies"] == 2 and card["removable"] is False and "STALE" in card["note"]
+
+
+# ---- removable phase (a): subpath policy + verify-freshness ----------------------------------
+def test_subpath_conflict_rejects_root_and_nesting():
+    with api.db() as conn:
+        api._link_confirm(conn, "local", "drv", "A", "cairn/A", 1)
+        assert api._subpath_conflict(conn, "local", "drv", "B", "") is not None          # root
+        assert api._subpath_conflict(conn, "local", "drv", "B", "cairn/A") is not None    # exact overlap
+        assert api._subpath_conflict(conn, "local", "drv", "B", "cairn/A/sub") is not None  # nested under
+        assert api._subpath_conflict(conn, "local", "drv", "B", "cairn") is not None      # parent of A
+        assert api._subpath_conflict(conn, "local", "drv", "B", "cairn/B") is None        # distinct - ok
+        assert api._subpath_conflict(conn, "local", "drv", "A", "cairn/A") is None        # same dataset - ok
+
+
+def test_scorecard_credits_verify_freshness_without_a_sync():
+    now = int(time.time())
+    _seed_repl("PicsV", "mcz/mclife/PicsV", "vault/PicsV")
+    with api.db() as conn:
+        api._link_confirm(conn, "local", "extV", "PicsV", "cairn/PicsV", now)
+        conn.execute("UPDATE removable_links SET verify_ts=? WHERE removable='extV'", (now,))  # no sync, just a verify
+        conn.commit()
+    card = {c["name"]: c for c in api.scorecard()["cards"]}["PicsV"]
+    assert card["removable"] is True and card["copies"] == 3
