@@ -1842,6 +1842,34 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .rl-exbar button{appearance:none;font:600 11px/1 "Red Hat Text";border:1px solid var(--acc);background:var(--acc);
   color:#fff;border-radius:7px;padding:5px 9px;cursor:pointer}
 .cact button:hover{filter:brightness(1.05)}
+/* custom modal + toast (replaces native confirm/alert/prompt) */
+.uim-ov{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;
+  z-index:1000;padding:18px;animation:uimfade .12s ease}
+@keyframes uimfade{from{opacity:0}to{opacity:1}}
+.uim-box{background:var(--surf);border:1px solid var(--line);border-radius:14px;max-width:440px;width:100%;
+  padding:18px 18px 14px;box-shadow:0 18px 50px rgba(0,0,0,.5)}
+.uim-t{font-weight:800;font-size:16px;margin-bottom:8px}
+.uim-b{font-size:13.5px;color:var(--ink);line-height:1.5} .uim-b p{margin:0 0 8px}
+.uim-b b{font-weight:700} .uim-danger{color:var(--crit)} .uim-note{color:var(--mut);font-weight:400}
+.uim-cmd{margin:8px 0 0;padding:8px;background:var(--bg);border:1px solid var(--line);border-radius:8px;
+  font:11px/1.4 ui-monospace,monospace;max-height:160px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+.uim-chk{display:flex;gap:8px;align-items:flex-start;margin-top:12px;font-size:12.5px;cursor:pointer;
+  padding:9px;border:1px solid var(--line);border-radius:9px}
+.uim-chk input{margin-top:2px;flex:none}
+.uim-in{width:100%;box-sizing:border-box;margin-top:10px;padding:9px;border:1px solid var(--line);border-radius:9px;
+  background:var(--bg);color:var(--ink);font:13px "Red Hat Text"}
+.uim-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:16px;flex-wrap:wrap}
+.uim-btn{appearance:none;font:700 13px/1 "Red Hat Text";border:1px solid var(--line);background:var(--surf);
+  color:var(--ink);border-radius:9px;padding:9px 16px;cursor:pointer}
+.uim-btn.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+.uim-btn.danger{background:var(--crit);border-color:var(--crit);color:#fff}
+.uim-btn:focus-visible,.uim-btn.uim-focus{outline:2px solid var(--acc);outline-offset:2px}
+#uim-toasts{position:fixed;left:0;right:0;bottom:20px;display:flex;flex-direction:column;align-items:center;
+  gap:8px;z-index:1100;pointer-events:none;padding:0 16px}
+.uim-toast{background:var(--surf);color:var(--ink);border:1px solid var(--line);font:600 13px/1.4 "Red Hat Text";
+  padding:10px 16px;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.4);opacity:0;transform:translateY(10px);
+  transition:opacity .25s,transform .25s;max-width:480px}
+.uim-toast.show{opacity:1;transform:none} .uim-toast.err{background:var(--crit);color:#fff;border-color:var(--crit)}
 .cact .ro{color:var(--unk);font-size:11.5px;font-style:italic;align-self:center}
 .crec{display:flex;gap:10px;margin-top:9px}
 .crec button{appearance:none;font:500 11px/1 "Red Hat Text";border:0;background:transparent;
@@ -2070,11 +2098,52 @@ async function previewCmd(b){
   if(b.path!=null) q+='&path='+encodeURIComponent(b.path);
   try{ var j=await (await fetch(q)).json(); return j.cmd||j.note||j.error||''; }catch(e){ return ''; }
 }
+// ---- custom modal + toast (replaces native confirm/alert/prompt) ----
+function uiModal(opts){
+  return new Promise(function(resolve){
+    var ov=document.createElement('div'); ov.className='uim-ov';
+    var box=document.createElement('div'); box.className='uim-box'; box.setAttribute('role','dialog');
+    var html='';
+    if(opts.title) html+='<div class=uim-t>'+esc(opts.title)+'</div>';
+    if(opts.body) html+='<div class=uim-b>'+opts.body+'</div>';   // body is trusted HTML from our code
+    if(opts.input) html+='<input id=uim-input class=uim-in '+(opts.input.placeholder?('placeholder="'+esc(opts.input.placeholder)+'" '):'')+'value="'+esc(opts.input.value||'')+'">';
+    var btns=opts.buttons||[{label:'OK',value:true,cls:'pri uim-focus'}];
+    html+='<div class=uim-actions>'+btns.map(function(b,i){ return '<button type=button class="uim-btn '+(b.cls||'')+'" data-i="'+i+'">'+esc(b.label)+'</button>'; }).join('')+'</div>';
+    box.innerHTML=html; ov.appendChild(box); document.body.appendChild(ov);
+    function collect(){ var d={}; box.querySelectorAll('input,select,textarea').forEach(function(f){ var k=f.id||f.name; if(k) d[k]=(f.type==='checkbox')?f.checked:f.value; }); return d; }
+    function close(val){ document.removeEventListener('keydown',onkey); var d=collect(); ov.remove(); resolve({value:val, data:d}); }
+    box.querySelectorAll('.uim-btn').forEach(function(el){ el.onclick=function(){ close(btns[+el.getAttribute('data-i')].value); }; });
+    ov.onclick=function(e){ if(e.target===ov) close(false); };
+    function onkey(e){ if(e.key==='Escape') close(false); }
+    document.addEventListener('keydown',onkey);
+    if(opts.input){ box.querySelector('.uim-in').addEventListener('keydown',function(e){ if(e.key==='Enter') close(true); }); }
+    var f=opts.input?box.querySelector('.uim-in'):(box.querySelector('.uim-btn.uim-focus')||box.querySelector('.uim-btn'));
+    if(f) setTimeout(function(){ f.focus(); },30);
+  });
+}
+async function uiConfirm(title, body, o){ o=o||{};
+  var r=await uiModal({title:title, body:body||'', buttons:[
+    {label:o.cancelText||'Cancel', value:false, cls:'uim-safe'+(o.danger?' uim-focus':'')},
+    {label:o.okText||'OK', value:true, cls:(o.danger?'danger':'pri uim-focus')}]});
+  return r.value===true;
+}
+async function uiPrompt(title, body, o){ o=o||{};
+  var r=await uiModal({title:title, body:body||'', input:{placeholder:(o.placeholder||''), value:(o.value||'')},
+    buttons:[{label:'Cancel',value:false,cls:'uim-safe'},{label:o.okText||'OK',value:true,cls:'pri'}]});
+  return r.value===true ? (r.data['uim-input']||'') : null;
+}
+function toast(msg, kind){
+  var c=document.getElementById('uim-toasts');
+  if(!c){ c=document.createElement('div'); c.id='uim-toasts'; document.body.appendChild(c); }
+  var t=document.createElement('div'); t.className='uim-toast'+(kind?(' '+kind):''); t.textContent=msg; c.appendChild(t);
+  requestAnimationFrame(function(){ t.classList.add('show'); });
+  setTimeout(function(){ t.classList.remove('show'); setTimeout(function(){ t.remove(); },250); }, kind==='err'?5000:2800);
+}
 async function confirmRun(b, label){
   var cmd=await previewCmd(b);
-  var head = b.dryrun ? ('DRY-RUN - preview '+label+'?\\n(runs a safe probe / native -n, changes nothing)')
-                      : ('Run '+label+'?');
-  return confirm(head+(cmd?('\\n\\nwill run:\\n'+cmd):''));
+  var head = b.dryrun ? ('Preview <b>'+esc(label)+'</b>? <span class=uim-note>(dry-run: a safe probe / native -n, changes nothing)</span>')
+                      : ('Run <b>'+esc(label)+'</b>?');
+  return uiConfirm(b.dryrun?'Dry-run':'Confirm', head+(cmd?('<pre class=uim-cmd>'+esc(cmd)+'</pre>'):''), {okText:(b.dryrun?'Preview':'Run')});
 }
 async function act(target, action, createSnap){
   var label=action+' '+target+(action==='sync'?(' (new snap: '+createSnap+')'):'');
@@ -2086,10 +2155,15 @@ async function act(target, action, createSnap){
 async function mirrorRemovable(name){
   // Destructive: rsync --delete makes the drive an EXACT mirror, removing anything not in the source.
   var b={target:name, action:'backup-now', mirror:true, requested_by:'ui', dryrun:!!window.CAIRN_DRY};
-  var label='MIRROR '+name+' (rsync --delete - REMOVES files on the drive not present in the source)';
-  if(!(await confirmRun(b, label))) return;
-  // opt-in second choice: also delete the EXCLUDED folders from the drive (reclaim their space)?
-  b.prune_excluded = confirm('Also PRUNE excluded folders from the drive?\\n\\nOK = delete excluded folders too (drive becomes exactly the included subset, reclaims their space).\\nCancel = leave excluded folders on the drive.');
+  var body='<p>Mirror <b>'+esc(name)+'</b>: makes the drive match the source, <b class=uim-danger>deleting</b> '
+    +'files on the drive that are not in the source.</p>'
+    +'<label class=uim-chk><input type=checkbox id=uim-prune> Also delete <b>excluded</b> folders from the '
+    +'drive (reclaim their space — drive becomes exactly the included subset)</label>';
+  var r=await uiModal({title:(b.dryrun?'Preview mirror':'Mirror'), body:body, buttons:[
+    {label:'Cancel', value:false, cls:'uim-safe uim-focus'},
+    {label:(b.dryrun?'Preview':'Mirror'), value:true, cls:'danger'}]});
+  if(r.value!==true) return;
+  b.prune_excluded=!!r.data['uim-prune'];
   post(b);
 }
 async function scanRemovable(name){   // read-only discovery scan; results appear after the agent runs
@@ -2098,40 +2172,41 @@ async function scanRemovable(name){   // read-only discovery scan; results appea
 async function confirmLink(id){
   var r=await fetch('/api/v1/backup/removable-links',{method:'POST',
     headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:id})});
-  if(r.ok) location.reload(); else alert('confirm failed');
+  if(r.ok) location.reload(); else toast('Confirm failed','err');
 }
 async function unlink(id){
-  if(!confirm('Remove this dataset link?')) return;
+  if(!(await uiConfirm('Unlink dataset','Remove this dataset link? It stops being backed up to this drive; nothing on the drive is deleted.',{danger:true, okText:'Unlink'}))) return;
   var r=await fetch('/api/v1/backup/removable-links/'+id,{method:'DELETE'});
-  if(r.ok) location.reload(); else alert('unlink failed');
+  if(r.ok) location.reload(); else toast('Unlink failed','err');
 }
 async function addLink(btn, removable){   // subpath is auto-computed server-side: cairn/<host>/<dataset>
   var ds=btn.parentNode.querySelector('.rl-sel').value;
-  if(!ds){ alert('pick a dataset'); return; }
+  if(!ds){ toast('Pick a dataset','err'); return; }
   var r=await fetch('/api/v1/backup/removable-links',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({removable:removable, dataset:ds})});
-  if(r.ok) location.reload(); else { var j={}; try{j=await r.json()}catch(e){} alert('add failed: '+(j.detail||r.status)); }
+  if(r.ok) location.reload(); else { var j={}; try{j=await r.json()}catch(e){} toast('Add failed: '+(j.detail||r.status),'err'); }
 }
 function verifyLink(removable, dataset, tier){   // tier: 'census' (size+mtime) | 'content' (auto) | 'xattr' | 'hash'
   post({target:removable, action:'removable-verify', dataset:dataset, tier:(tier||'census'), requested_by:'ui'});
 }
-function verifyContent(btn, removable, dataset){   // confirmed: fast if tagged, else warn with a hash ETA
+async function verifyContent(btn, removable, dataset){   // fast if tagged, else warn with a hash ETA
   var tagged=parseFloat(btn.getAttribute('data-tagged'));   // NaN until the agent reports it
-  var used=parseFloat(btn.getAttribute('data-used'))||0, gb=used/1e9, msg;
+  var used=parseFloat(btn.getAttribute('data-used'))||0, gb=used/1e9, body, danger=false;
   if(tagged>=0.8){
-    msg='Verify '+dataset+' content using the drive’s cached hashes (fast, no re-read). Proceed?';
+    body='Verify <b>'+esc(dataset)+'</b> content using the drive’s cached hashes — fast, no re-read.';
   } else {
     var mins=used/1e6/60/60;   // ~60 MB/s rough
     var eta = mins<1 ? '<1 min' : (mins<90 ? Math.round(mins)+' min' : (mins/60).toFixed(1)+' h');
     var untag = (tagged>=0) ? 'only '+Math.round(tagged*100)+'% of the drive is hash-tagged' : 'the drive isn’t hash-tagged';
-    msg='Content verify for '+dataset+': '+untag+', so it must READ EVERY BYTE (~'+gb.toFixed(0)+
-        ' GB, roughly '+eta+' at ~60 MB/s). Proceed?';
+    body='<b>'+esc(dataset)+'</b>: '+untag+', so verification must <b class=uim-danger>read every byte</b> (~'
+      +gb.toFixed(0)+' GB, roughly '+eta+' at ~60 MB/s).';
+    danger=true;
   }
-  if(!confirm(msg)) return;
+  if(!(await uiConfirm('Verify content', body, {okText:'Verify', danger:danger}))) return;
   verifyLink(removable, dataset, 'content');
 }
 async function relocateLink(removable, dataset){
-  if(!confirm('Move this dataset’s tree under cairn/ on the drive? This is an instant on-drive rename (no copy).')) return;
+  if(!(await uiConfirm('Move under cairn/','Move <b>'+esc(dataset)+'</b>’s tree under cairn/ on the drive? An instant on-drive rename (no copy).',{okText:'Move'}))) return;
   post({target:removable, action:'removable-relocate', dataset:dataset, requested_by:'ui'});
 }
 function toggleEx(tr){ tr.classList.toggle('excluded'); }   // tap a folder row to (un)exclude it
@@ -2140,7 +2215,7 @@ async function applyExcludes(btn, lid){   // save excluded folders, recompute ce
   box.querySelectorAll('tr.rl-frow.excluded').forEach(function(tr){ ex.push('/'+tr.getAttribute('data-folder')); });
   var r=await fetch('/api/v1/backup/removable-links/'+lid+'/excludes',{method:'POST',
     headers:{'Content-Type':'application/json'}, body:JSON.stringify({excludes:ex})});
-  if(!r.ok){ alert('saving exclusions failed'); return; }
+  if(!r.ok){ toast('Saving exclusions failed','err'); return; }
   btn.textContent='re-checking fit…'; btn.disabled=true;
   var rem=btn.getAttribute('data-rem'), ds=btn.getAttribute('data-ds'), j;
   // census is read-only (ignores the dry toggle); WAIT for it to actually finish, then reload so the
@@ -2163,7 +2238,7 @@ function toggleDiff(btn, removable, dataset){   // show/hide the folder diff; if
   btn.textContent='computing…'; btn.disabled=true;
 }
 async function actPrompt(target, action, field, msg){
-  var v=prompt(msg); if(v===null) return;
+  var v=await uiPrompt(action+' '+target, esc(msg)); if(v===null) return;
   var b={target:target, action:action, requested_by:'ui', dryrun:!!window.CAIRN_DRY}; b[field]=v;
   if(!(await confirmRun(b, action+' '+target+' ['+(v||'(all)')+']'))) return;
   post(b);
@@ -2175,31 +2250,31 @@ async function replicateNow(name, agent, dry){
   post(b);
 }
 async function updateAgent(name){
-  if(!confirm('Update agent "'+name+'" to the latest version?\\nIt fetches new code and restarts, keeping every setting.')) return;
+  if(!(await uiConfirm('Update agent','Update agent <b>'+esc(name)+'</b> to the latest version? It fetches new code and restarts, keeping every setting.',{okText:'Update'}))) return;
   try{ await fetch('/api/v1/backup/agents/'+encodeURIComponent(name)+'/update',{method:'POST'}); }
-  catch(e){ alert('failed to queue update: '+e); return; }
-  alert('Update queued for "'+name+'".\\nIt runs on the agent\\'s next check-in; its version here updates when done.');
+  catch(e){ toast('Failed to queue update: '+e,'err'); return; }
+  toast('Update queued for "'+name+'" - runs on its next check-in');
 }
 async function ackTarget(t){
-  if(!confirm('Acknowledge '+t+'?\\nSilences this warning until the condition changes or 14 days pass.')) return;
+  if(!(await uiConfirm('Acknowledge','Acknowledge <b>'+esc(t)+'</b>? Silences this warning until the condition changes or 14 days pass.',{okText:'Acknowledge'}))) return;
   try{ await fetch('/api/v1/backup/acks',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({target:t})}); }catch(e){ alert('ack failed: '+e); return; }
+        body:JSON.stringify({target:t})}); }catch(e){ toast('Ack failed: '+e,'err'); return; }
   location.reload();
 }
 async function unackTarget(t){
   try{ await fetch('/api/v1/backup/acks/'+encodeURIComponent(t),{method:'DELETE'}); }
-  catch(e){ alert('clear failed: '+e); return; }
+  catch(e){ toast('Clear failed: '+e,'err'); return; }
   location.reload();
 }
 async function hideTarget(tid){
-  if(!confirm('Hide this target? It stops being monitored until you restore it from the Hidden section.')) return;
+  if(!(await uiConfirm('Hide target','Hide this target? It stops being monitored until you restore it from the Hidden section.',{okText:'Hide'}))) return;
   try{ await fetch('/api/v1/backup/targets/'+tid+'/retire',{method:'POST'}); }
-  catch(e){ alert('hide failed: '+e); return; }
+  catch(e){ toast('Hide failed: '+e,'err'); return; }
   location.reload();
 }
 async function unhideTarget(tid){
   try{ await fetch('/api/v1/backup/targets/'+tid+'/unretire',{method:'POST'}); }
-  catch(e){ alert('unhide failed: '+e); return; }
+  catch(e){ toast('Unhide failed: '+e,'err'); return; }
   location.reload();
 }
 async function poll(id, key, dry, target){
@@ -2748,7 +2823,7 @@ function renderDeletedManifest(m, walkedTs, total){
 }
 async function doRestore(btn){
   var vp=_recVers[parseInt(btn.getAttribute('data-vi'),10)]; if(vp==null) return;
-  if(!confirm("Restore this version?\\nIt is copied into the dataset's .cairn-restores/ staging dir. Live files are not touched.")) return;
+  if(!(await uiConfirm('Restore version','Restore this version? It is copied into the dataset’s <code>.cairn-restores/</code> staging dir. Live files are not touched.',{okText:'Restore'}))) return;
   btn.disabled=true; var td=btn.parentNode; td.innerHTML='<span class=recwait>restoring\\u2026</span>';
   var b={target:_recTarget, action:'restore', version:vp, requested_by:'ui'};
   var r,j;
