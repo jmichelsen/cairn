@@ -2427,15 +2427,32 @@ function metricRowHtml(r){
 }
 var _SEVC={CRIT:'crit',WARN:'warn',UNKNOWN:'unk',OK:'ok'};
 var _cardSev={};
+function fmtAge(s){ s=Math.max(0,Math.round(+s||0));   // mirrors server _ago_s: Ns / Nm / Nh / Nd
+  if(s<90) return s+'s'; if(s<5400) return Math.round(s/60)+'m';
+  if(s<172800) return Math.round(s/3600)+'h'; return Math.round(s/86400)+'d'; }
+function updatePairHalf(c, r){   // keep one half's dot + severity word + snapshot age live inside a pair card
+  var h=c.querySelector('.phalf[data-half="'+String(r.agent||'').replace(/"/g,'')+'"]'); if(!h) return;
+  var sev=(r.severity||'').toUpperCase(), age=r.snap_age_src_s;
+  if(h.getAttribute('data-role')==='source' && sev==='UNKNOWN' && age!=null)   // show source's real freshness
+    sev = age>=50*3600?'CRIT' : age>=28*3600?'WARN' : 'OK';                     // (matches server half())
+  var dot=h.querySelector('.pd'); if(dot) dot.style.background='var(--'+(_SEVC[sev]||'unk')+')';
+  var sv=h.querySelector('.psev'); if(sv) sv.textContent=sev;
+  var ag=h.querySelector('.page'); if(ag) ag.textContent=(age!=null?(fmtAge(age)+' old'):'no snapshot');
+}
 async function refreshCards(){
   var j; try{ j=await (await fetch('/api/v1/backup/status')).json(); }catch(e){ return; }
   (j.targets||[]).forEach(function(r){
-    var c=document.querySelector('.card[data-t="'+String(r.name).replace(/"/g,'')+'"]'); if(!c) return;
-    // A replication PAIR card shares its name with BOTH status rows (home + off-site). The home half is
-    // structurally UNKNOWN (its dest lives on the other agent), and the server already defers the pair's
-    // severity to the off-site copy - so only the off-site half may drive the pair chip here, else the
-    // home row's UNKNOWN would clobber the deferred severity on every refresh.
-    if(c.classList.contains('pair') && c.getAttribute('data-off') && (r.agent||'')!==c.getAttribute('data-off')) return;
+   // querySelectorAll, not querySelector: a PAIR card is duplicated into BOTH agent tabs, so update every
+   // copy (the old single-match left the other tab's copy stale until a full reload).
+   document.querySelectorAll('.card[data-t="'+String(r.name).replace(/"/g,'')+'"]').forEach(function(c){
+    // A replication PAIR card shows BOTH halves (home + off-site). Keep every half's dot/severity/age
+    // live, but let only the OFF-SITE half drive the card-level chip - the home half is structurally
+    // UNKNOWN and the server already defers the pair severity to the off-site copy, so the home row must
+    // not clobber the chip (it still updates its own half above).
+    if(c.classList.contains('pair')){
+      updatePairHalf(c, r);
+      if(c.getAttribute('data-off') && (r.agent||'')!==c.getAttribute('data-off')) return;
+    }
     var cls=r.acked?'ack':(_SEVC[(r.severity||'').toUpperCase()]||'unk');
     var key=(r.agent||'')+'/'+r.name;            // per-(agent,name): a repl PAIR has TWO status rows
     var prev=_cardSev[key]; _cardSev[key]=cls;   // (home + vault) sharing a name - don't flap between them
@@ -2472,6 +2489,7 @@ async function refreshCards(){
         if(lbl){ var tx='scrubbing'+(sc.pct!=null?(' '+Number(sc.pct).toFixed(1)+'%'):'')+(sc.eta?(' · '+sc.eta+' to go'):''); lbl.textContent=tx; }
       } else { sp.hidden=true; }
     }
+   });
   });
   document.querySelectorAll('.histbtn.open[data-t]').forEach(function(btn){   // keep open History current
     var box=btn.nextElementSibling, target=btn.getAttribute('data-t');       // ([data-t] excludes SMART-detail toggles)
@@ -3122,10 +3140,14 @@ def _pair_card(v, capable=frozenset(), viewer=False):
         # which rendered as a meaningless "key -".
         _ks = (row.get("key_status") or "").strip()
         ks = f' &middot; key {_esc(_ks)}' if _ks and _ks not in ("-", "none", "n/a") else ""
-        return (f'<div class=phalf><span class=pd style="background:var(--{hs})"></span>'
+        # data-half/data-role + the .page span let the live refresh keep this half's dot, severity word,
+        # and snapshot age current (refreshCards only patched the card-level chip, so a half's stale
+        # dot/age used to linger - e.g. a WARN off-site dot next to an OK header - until a full reload).
+        return (f'<div class=phalf data-half="{_esc(row.get("agent") or "")}" data-role="{_esc(role)}">'
+                f'<span class=pd style="background:var(--{hs})"></span>'
                 f'<div class=phinfo><b>{_esc(row.get("agent") or "?")}</b> '
                 f'<span class=psev>{_esc(sevw)}</span> <span class=prole>{role}</span>'
-                f'<small>{_esc(row.get("source") or "")}<br>newest snapshot {age}{ks}</small></div></div>')
+                f'<small>{_esc(row.get("source") or "")}<br>newest snapshot <span class=page>{age}</span>{ks}</small></div></div>')
     # On-demand pull: only when the off-site (L) agent can execute, and never for a read-only viewer.
     act_html = ""
     if not viewer and L.get("agent") in capable:
