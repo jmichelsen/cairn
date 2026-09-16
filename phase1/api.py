@@ -2444,7 +2444,11 @@ async function refreshCards(){
       var sec=c.closest('.pane.grp');            // only an ESCALATION to a problem pings a collapsed pane
       if(sec && sec.classList.contains('collapsed')) sec.classList.add('alerted');
     }
-    var keep=(c.classList.contains('busy')?' busy':'')+(c.classList.contains('smartcard')?' smartcard':'');
+    // preserve card VARIANTS when rebuilding className - dropping 'pair' both broke the pair layout AND
+    // disabled the data-off guard below (it's gated on .pair), letting a home half's UNKNOWN clobber the
+    // deferred pair severity on the next row/refresh.
+    var keep=(c.classList.contains('busy')?' busy':'')+(c.classList.contains('smartcard')?' smartcard':'')
+            +(c.classList.contains('pair')?' pair':'');
     c.className='card '+cls+keep;   // updates the severity stripe, preserving card variants
     var cs=c.querySelector('.cs'); if(cs) cs.textContent=r.acked?'ACK\u2019D':(r.severity||'').toUpperCase();
     var mr=metricRowHtml(r), rowEl=c.querySelector('.row');
