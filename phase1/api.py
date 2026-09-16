@@ -2392,9 +2392,11 @@ async function refreshCards(){
   (j.targets||[]).forEach(function(r){
     var c=document.querySelector('.card[data-t="'+String(r.name).replace(/"/g,'')+'"]'); if(!c) return;
     var cls=r.acked?'ack':(_SEVC[(r.severity||'').toUpperCase()]||'unk');
-    var prev=_cardSev[r.name]; _cardSev[r.name]=cls;
-    if(prev!==undefined && prev!==cls){          // a card changed state → flag its section if collapsed
-      var sec=c.closest('.pane.grp');
+    var key=(r.agent||'')+'/'+r.name;            // per-(agent,name): a repl PAIR has TWO status rows
+    var prev=_cardSev[key]; _cardSev[key]=cls;   // (home + vault) sharing a name - don't flap between them
+    var rk={ok:0,ack:0,unk:1,warn:2,crit:3};
+    if(prev!==undefined && (rk[cls]||0)>(rk[prev]||0) && (cls==='warn'||cls==='crit')){
+      var sec=c.closest('.pane.grp');            // only an ESCALATION to a problem pings a collapsed pane
       if(sec && sec.classList.contains('collapsed')) sec.classList.add('alerted');
     }
     var keep=(c.classList.contains('busy')?' busy':'')+(c.classList.contains('smartcard')?' smartcard':'');
