@@ -608,6 +608,22 @@ def spawn_detached(script, out_path, done_path):
     except OSError:
         return None
 
+# rsync --info=progress2 whole-transfer line, e.g.  "  1.23G  45%   12.34MB/s    0:12:34"
+# (with -h the byte + rate columns are human-formatted). progress2 rewrites one line via \r, so the
+# LAST match in a chunk of output is the freshest sample.
+_RSYNC_PROG_RE = re.compile(
+    r'([\d.,]+[kKMGTP]?)\s+(\d+)%\s+([\d.,]+[kKMGTP]?B/s)\s+(\d+:\d{2}:\d{2})')
+
+def parse_rsync_progress(text):
+    """Return the newest rsync --info=progress2 sample as {bytes,pct,rate,eta}, or None. Splitting on \\r
+    isn't needed - finditer scans the whole chunk and we keep the last match (the current progress)."""
+    m = None
+    for m in _RSYNC_PROG_RE.finditer(text or ""):
+        pass
+    if not m:
+        return None
+    return {"bytes": m.group(1), "pct": int(m.group(2)), "rate": m.group(3), "eta": m.group(4)}
+
 def human_bytes(n):
     """1000-based human size (matches the dashboard's _cap), for result/log messages."""
     n = float(n or 0)
@@ -1750,8 +1766,11 @@ def build_command(action, t, opts=None):
         cmd = ["rsync", "-aHXh", "--stats"]
         # Persistent, appended rsync log (real runs only - a dry run's "would transfer" lines would
         # pollute the record of actual backups; dry output still comes back in the intent result).
+        # --info=progress2 emits ONE running whole-transfer line (bytes / % / rate / ETA), rewritten via
+        # \r; the detached runner's reaper parses its tail each loop and posts progress to the dashboard,
+        # so a long backup shows an ETA instead of a static 'claimed'. Real runs only (a dry run is quick).
         if not dry:
-            cmd += ["--log-file", _removable_log_path(t)]
+            cmd += ["--info=progress2", "--log-file", _removable_log_path(t)]
         if dry:
             cmd.append("-n")
         exc = t.get("exclude") or []

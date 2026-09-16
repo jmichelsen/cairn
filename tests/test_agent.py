@@ -87,5 +87,21 @@ def test_reap_leaves_unfinished_job_untouched(monkeypatch, tmp_path):
     agent._jobs_add(5, {"removable": "seagate", "out": str(tmp_path / "job-5.out"),
                         "done": str(tmp_path / "job-5.done"), "datasets": [], "started": int(time.time())})
     agent._reap_detached()
-    assert posts == []                    # nothing reported yet
-    assert "5" in agent._jobs_load()      # still tracked
+    # no result posted (job not done); still tracked. A progress post is fine but must not be a /result.
+    assert all(not p.endswith("/result") for m, p, b in posts)
+    assert "5" in agent._jobs_load()
+
+
+def test_reap_posts_progress_for_running_job(monkeypatch, tmp_path):
+    posts = _capture(monkeypatch, tmp_path)
+    out = tmp_path / "job-8.out"
+    out.write_text("=== mcz/Pics ===\r     1.23G  45%   12.34MB/s    0:12:34\r")
+    cur = tmp_path / "job-8.cur"; cur.write_text("mcz/Pics\n")
+    agent._jobs_add(8, {"removable": "seagate", "out": str(out), "done": str(tmp_path / "job-8.done"),
+                        "cur": str(cur), "nlinks": 2, "datasets": [], "started": int(time.time())})
+    agent._reap_detached()
+    prog = [b for m, p, b in posts if p.endswith("/progress")]
+    assert prog, "expected a progress post for the running job"
+    assert prog[0]["pct"] == 45 and prog[0]["eta"] == "0:12:34"
+    assert prog[0]["label"] == "mcz/Pics" and prog[0]["total"] == 2
+    assert "8" in agent._jobs_load()      # still running, still tracked

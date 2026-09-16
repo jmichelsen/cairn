@@ -189,10 +189,31 @@ def _jobs_del(iid):
     if d.pop(str(iid), None) is not None:
         _jobs_save(d)
 
+def _tail(path, n=8192):
+    """Last n bytes of a file as text (progress files grow with \\r spam - never read the whole thing)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2); sz = f.tell(); f.seek(max(0, sz - n))
+            return f.read().decode("utf-8", "replace")
+    except (OSError, TypeError):
+        return ""
+
+def _report_progress(iid, rec):
+    # Parse the rsync --info=progress2 tail + the current-dataset marker and post it, so a running
+    # detached backup shows % / rate / ETA on the dashboard instead of a static 'claimed'.
+    prog = C.parse_rsync_progress(_tail(rec.get("out")))
+    label = _tail(rec.get("cur"), 256).strip() if rec.get("cur") else ""
+    if not prog and not label:
+        return
+    body = {"label": label or None, "total": rec.get("nlinks")}
+    if prog:
+        body.update(prog)
+    api_call("POST", f"/api/v1/backup/intents/{iid}/progress", body)
+
 def _reap_detached():
-    # Report any detached backup whose done-marker has appeared. Survives an agent restart because
-    # the registry lives on disk; a job whose done-marker never shows (e.g. box rebooted mid-backup)
-    # keeps its files but is retried at 12h so the registry can't wedge forever.
+    # Report any detached backup whose done-marker has appeared, and post live progress for those still
+    # running. Survives an agent restart because the registry lives on disk; a job whose done-marker never
+    # shows (e.g. box rebooted mid-backup) keeps its files but is retried at 12h so the registry can't wedge.
     d = _jobs_load()
     if not d:
         return
@@ -205,16 +226,18 @@ def _reap_detached():
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                          {"ok": False, "output": "detached backup produced no completion marker within 12h (agent or box likely restarted mid-run)"})
                 print(f"  reap: job {iid} abandoned (no marker in 12h)")
+                continue
+            try:
+                _report_progress(iid, rec)
+            except Exception:
+                pass   # progress is best-effort; never let it break the reap loop
             continue
         try:
             rc = int(open(done).read().strip() or "1")
         except (OSError, ValueError):
             rc = 1
         ok = rc == 0
-        try:
-            tail = open(out).read().strip()[-1600:] if out and os.path.exists(out) else ""
-        except OSError:
-            tail = ""
+        tail = _tail(out, 4096).strip()[-1600:]
         if ok:   # credit each dataset's freshness from the on-drive stamp the script wrote
             for ds in rec.get("datasets", []):
                 try:
@@ -229,13 +252,12 @@ def _reap_detached():
         print(f"  reap: job {iid} {rec.get('removable')} backup-now -> {'ok' if ok else 'FAIL'} (rc={rc})")
 
 def _cleanup_job(rec):
-    for k in ("out", "done"):
-        p = rec.get(k)
-        for f in ((p, p + ".sh") if k == "out" else (p,)):
-            try:
-                if f: os.remove(f)
-            except OSError:
-                pass
+    out = rec.get("out")
+    for f in (out, (out + ".sh") if out else None, rec.get("done"), rec.get("cur")):
+        try:
+            if f: os.remove(f)
+        except OSError:
+            pass
 
 def do_execute(cfg):
     tmap = {t["name"]: t for t in cfg.get("targets", [])}
@@ -429,6 +451,7 @@ def do_execute(cfg):
             # does NOT block the agent's report+intent loop. Result + per-dataset stamps are posted later
             # by _reap_detached (survives an agent restart - the registry is on disk).
             sd = C._cairn_state_dir(); jout = os.path.join(sd, f"job-{iid}.out"); jdone = os.path.join(sd, f"job-{iid}.done")
+            jcur = os.path.join(sd, f"job-{iid}.cur")   # current-dataset marker (reaper reads it for the label)
             sl = ['ok=1']; ds_stamps = []
             for ds, jt, have_src in jobs:
                 label = ds or "source"
@@ -439,6 +462,7 @@ def do_execute(cfg):
                     sl.append(f'echo "{label}: FAIL ({err})"; ok=0'); continue
                 dest = C._removable_dest(jt); stamp = os.path.join(dest, ".cairn-lastbackup") if dest else None
                 sl.append(f'echo "=== {label} ==="')
+                sl.append(f'echo {C.shlex.quote(label)} > {C.shlex.quote(jcur)}')   # which dataset is copying NOW
                 if stamp:
                     sl.append(f'if {C.shlex.join(cmd)}; then date +%s > {C.shlex.quote(stamp)}; else ok=0; fi')
                     if ds:
@@ -447,8 +471,8 @@ def do_execute(cfg):
                     sl.append(f'{C.shlex.join(cmd)} || ok=0')
             sl.append('[ "$ok" = 1 ]')   # the script's exit code = overall success
             pid = C.spawn_detached("\n".join(sl), jout, jdone)
-            _jobs_add(iid, {"removable": target, "out": jout, "done": jdone, "datasets": ds_stamps,
-                            "started": int(time.time()), "log": C._removable_log_path(t)})
+            _jobs_add(iid, {"removable": target, "out": jout, "done": jdone, "cur": jcur, "nlinks": len(jobs),
+                            "datasets": ds_stamps, "started": int(time.time()), "log": C._removable_log_path(t)})
             print(f"  intent {iid} {target} backup-now -> DETACHED pid={pid} ({len(jobs)} dataset(s))")
             continue   # result + stamps posted later by _reap_detached
         cmd, err = C.build_command(action, t, opts)

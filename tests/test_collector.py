@@ -304,6 +304,26 @@ def test_backup_now_logs_to_a_persistent_file_on_real_runs():
     assert "--log-file" not in dcmd and "-n" in dcmd
 
 
+def test_backup_now_emits_progress_on_real_runs_only():
+    # real runs get --info=progress2 so the detached reaper can post % / ETA to the dashboard
+    assert "--info=progress2" in collector.build_command("backup-now", _REMOVABLE_T)[0]
+    # a dry run stays quiet (it is quick and its output is the intent result, not parsed for progress)
+    assert "--info=progress2" not in collector.build_command("backup-now", _REMOVABLE_T, {"dryrun": True})[0]
+
+
+def test_parse_rsync_progress():
+    # human-formatted (-h) progress2 line
+    p = collector.parse_rsync_progress("stuff\r        1.23G  45%   12.34MB/s    0:12:34\r")
+    assert p == {"bytes": "1.23G", "pct": 45, "rate": "12.34MB/s", "eta": "0:12:34"}
+    # last (freshest) sample wins when several are present
+    assert collector.parse_rsync_progress(
+        "  10M   1%  1MB/s 0:10:00\r  900M  90%  5MB/s 0:00:20")["pct"] == 90
+    # raw-byte form (no -h) still parses
+    assert collector.parse_rsync_progress("1,234,567  12%  3.00kB/s 1:02:03")["pct"] == 12
+    assert collector.parse_rsync_progress("no progress here") is None
+    assert collector.parse_rsync_progress("") is None
+
+
 def test_backup_now_mirror_and_excludes_and_dryrun():
     t = dict(_REMOVABLE_T, mirror=True, exclude=["*.tmp", "cache"])
     cmd, _ = collector.build_command("backup-now", t, {"dryrun": True})

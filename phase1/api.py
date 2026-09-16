@@ -276,6 +276,8 @@ def _init_db():
             c.executescript(schema.read_text())
             # idempotent migrations for DBs created before these columns existed
             for tbl, col, typ in [("targets", "agent", "TEXT"), ("intents", "opts", "TEXT"),
+                                  ("intents", "progress", "TEXT"),
+                                  ("intents", "progress_ts", "INTEGER"),
                                   ("auth_tokens", "kind", "TEXT DEFAULT 'access'"),
                                   ("auth_tokens", "parent", "TEXT"),
                                   ("auth_tokens", "expires_ts", "INTEGER"),
@@ -973,7 +975,7 @@ async def intent_result(iid: int, request: Request):
         # can carry many files x versions, so it gets a bigger ceiling. Other actions keep the small cap.
         act = r["action"] if r else None
         cap = 1048576 if act == "recover-versions" else (262144 if act in RECOVER_ACTIONS else 4000)
-        conn.execute("UPDATE intents SET state=?,result=?,result_ts=? WHERE id=?",
+        conn.execute("UPDATE intents SET state=?,result=?,result_ts=?,progress=NULL,progress_ts=NULL WHERE id=?",
                      (state, json.dumps(body)[:cap], int(time.time()), iid))
         conn.commit()
     tgt = r["target"] if r else "?"; act = r["action"] if r else "?"
@@ -985,6 +987,18 @@ async def intent_result(iid: int, request: Request):
     else:
         dispatch_alert("CRIT", f"action FAILED: {tgt} {act}", out, f"act-{iid}")
     return {"ok": True, "state": state}
+
+@app.post("/api/v1/backup/intents/{iid}/progress")
+async def intent_progress(iid: int, request: Request):
+    """A long-running detached action (e.g. a removable backup-now rsync) reports live progress so the
+    dashboard shows more than a static 'claimed'. Stored only while the intent is still claimed, so a
+    late progress post can't resurrect a finished intent. (auth: middleware - agent role)"""
+    body = await _json(request)
+    with db() as conn:
+        conn.execute("UPDATE intents SET progress=?,progress_ts=? WHERE id=? AND state='claimed'",
+                     (json.dumps(body)[:1000], int(time.time()), iid))
+        conn.commit()
+    return {"ok": True}
 
 # ---------------- actions: the dashboard queues an intent (routed to the owning agent) ----------------
 # No files, no host executor. The intent waits in the DB until the target's agent polls for it.
@@ -1895,6 +1909,11 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
   background:var(--rail);border:1px solid var(--line);border-radius:6px;padding:5px 7px;
   white-space:pre-wrap;word-break:break-all}
 .chist .hempty{color:var(--mut);font-size:11.5px;font-style:italic}
+/* live progress for a running detached backup */
+.chist .hprog{grid-column:1/-1;display:flex;flex-direction:column;gap:3px}
+.chist .hprogbar{height:5px;border-radius:3px;background:var(--rail);border:1px solid var(--line);overflow:hidden}
+.chist .hprogbar>span{display:block;height:100%;background:var(--warn);border-radius:3px;transition:width .4s ease}
+.chist .hprogtxt{color:var(--mut);font-family:"Roboto Mono";font-size:10px;font-variant-numeric:tabular-nums}
 /* scheduled-job card: backs-up + schedule + next/last run */
 .jsched{margin-top:11px;display:flex;flex-direction:column;gap:5px}
 .jrow{display:grid;grid-template-columns:62px 1fr;gap:9px;align-items:baseline}
@@ -2354,9 +2373,25 @@ function renderHist(x){
   var out=(res.output||res.cmd||'').toString();
   var dry = out.indexOf('[DRYRUN]')===0 ? '<span class=hdry>dry</span>' : '';
   var when = relTime(x.result_ts||x.claimed_ts||x.created_ts);
+  // live progress for a still-running (claimed) detached backup: "dataset · 45% · 12MB/s · ETA 0:12:34"
+  var prog='';
+  if(st==='claimed' && x.progress){
+    var p={}; try{p=JSON.parse(x.progress)}catch(e){}
+    var bits=[];
+    if(p.label) bits.push(esc(p.label));
+    if(p.pct!=null) bits.push(p.pct+'%');
+    if(p.rate) bits.push(esc(p.rate));
+    if(p.eta) bits.push('ETA '+esc(p.eta));
+    if(bits.length){
+      var pc = (p.pct!=null)?p.pct:0;
+      prog='<div class=hprog><div class=hprogbar><span style="width:'+pc+'%"></span></div>'+
+           '<div class=hprogtxt>'+bits.join(' · ')+'</div></div>';
+    }
+  }
   return '<div class=hrow><span class="hd '+cls+'"></span>'+
     '<span class=ha>'+esc(actLabel(x.action,x.opts))+' · '+esc(actState(x.action,st))+dry+'</span>'+
     '<span class=ht>'+when+'</span>'+
+    prog+
     (out?'<div class=hcmd>'+esc(out)+'</div>':'')+'</div>';
 }
 async function loadHist(target, box){
