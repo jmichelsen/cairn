@@ -288,7 +288,8 @@ def _init_db():
                                   ("removable_links", "meta_json", "TEXT"),
                                   ("removable_links", "verify_method", "TEXT"),
                                   ("removable_links", "verify_ts", "INTEGER"),
-                                  ("removable_links", "excludes", "TEXT")]:
+                                  ("removable_links", "excludes", "TEXT"),
+                                  ("removable_links", "mirror", "INTEGER DEFAULT 0")]:
                 try:
                     c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
                 except sqlite3.OperationalError:
@@ -1320,6 +1321,23 @@ async def removable_links_excludes(lid: int, request: Request):
         conn.commit()
     return {"ok": True, "excludes": ex}
 
+@app.post("/api/v1/backup/removable-links/{lid}/mirror")
+async def removable_links_mirror(lid: int, request: Request):
+    """Set a link's per-dataset MIRROR flag. When on, a plain 'Back up now' mirrors this dataset
+    (rsync --delete: removes drive files not in the source); off = additive. Lets you mirror some
+    datasets and only add to others on the same drive. (auth: admin via middleware)"""
+    body = await _json(request)
+    mirror = 1 if body.get("mirror") else 0
+    with db() as conn:
+        row = conn.execute("SELECT removable,dataset FROM removable_links WHERE id=?", (lid,)).fetchone()
+        conn.execute("UPDATE removable_links SET mirror=?, updated_ts=? WHERE id=?",
+                     (mirror, int(time.time()), lid))
+        if row:
+            _log_link_event(conn, row["removable"], "mirror-set",
+                            f"{_ds_source(conn, row['dataset'])}: mirror {'ON' if mirror else 'off'}")
+        conn.commit()
+    return {"ok": True, "mirror": bool(mirror)}
+
 @app.delete("/api/v1/backup/removable-links/{lid}")
 def removable_links_delete(lid: int):
     """Unlink (drop a suggestion or a confirmed link). (auth: admin via middleware)"""
@@ -1825,6 +1843,12 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .rl-none{color:var(--mut);font-size:12px;font-style:italic}
 .rl-i{font-size:10px;font-weight:700;padding:1px 6px;border-radius:10px;border:1px solid currentColor;white-space:nowrap}
 .rl-i.ok{color:var(--ok)} .rl-i.q{color:var(--warn)}
+.rl-sz{margin-left:8px;font:600 10px/1 "Roboto Mono",monospace;color:var(--mut);background:var(--rail);
+  border:1px solid var(--line);border-radius:4px;padding:2px 5px;vertical-align:middle}
+.rl-mirb{margin-left:6px;font:700 9px/1;text-transform:uppercase;letter-spacing:.04em;color:var(--warn);
+  border:1px solid var(--warn);border-radius:4px;padding:2px 5px;vertical-align:middle}
+.rl-btns .rl-mir.on{border-color:var(--warn);color:var(--warn);font-weight:700}
+.rl-btns .rl-gate{opacity:.4;cursor:not-allowed}
 .rl-cen{font-size:11.5px;color:var(--mut);margin:3px 0} .rl-cen b{color:var(--ink);font-weight:700}
 .rl-nofit,.rl-nofit b{color:var(--crit)}
 .rl-lad{display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin:4px 0}
@@ -2215,6 +2239,23 @@ async function addLink(btn, removable){   // subpath is auto-computed server-sid
 }
 function verifyLink(removable, dataset, tier){   // tier: 'census' (size+mtime) | 'content' (auto) | 'xattr' | 'hash'
   post({target:removable, action:'removable-verify', dataset:dataset, tier:(tier||'census'), requested_by:'ui'});
+}
+async function toggleMirror(btn, lid, cur){   // per-dataset mirror flag: honored by a plain Back up now
+  var turnOn = !cur;
+  if(turnOn){
+    var ok = await uiConfirm('Mirror this dataset?',
+      'On <b>Back up now</b> this dataset will be <b>mirrored</b>: rsync <code>--delete</code> removes files on the '
+      +'drive that are not in the source. Your other datasets stay additive.', {okText:'Enable mirror', danger:true});
+    if(!ok) return;
+  }
+  try{
+    var r=await fetch('/api/v1/backup/removable-links/'+lid+'/mirror',{method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({mirror:turnOn})});
+    var j=await r.json();
+    if(!r.ok){ toast(j.detail||'failed','err'); return; }
+    btn.classList.toggle('on', j.mirror); btn.textContent = j.mirror ? 'Mirror ✓' : 'Mirror';
+    toast('Mirror '+(j.mirror?'enabled':'disabled')+' for this dataset');
+  }catch(e){ toast('network error','err'); }
 }
 async function verifyContent(btn, removable, dataset){   // fast if tagged, else warn with a hash ETA
   var tagged=parseFloat(btn.getAttribute('data-tagged'));   // NaN until the agent reports it
@@ -3235,6 +3276,12 @@ def _removable_links_html(r, viewer=False):
             excl = []
         exnames = [e.lstrip("/") for e in excl]; exset = set(exnames)
         cen = meta.get("census") or {}
+        # per-link state: size/mount of the SOURCE (from zfs, in the census), whether this is a fresh
+        # link (never synced), and its per-dataset mirror flag.
+        src_bytes = cen.get("src_bytes"); src_mounted = cen.get("src_mounted", True); src_locked = cen.get("src_locked", False)
+        fresh = confirmed and not (L.get("last_backup_ts"))
+        mirror_on = bool(L.get("mirror"))
+        sz_chip = f'<span class=rl-sz data-tip="dataset size (uncompressed)">{_cap(src_bytes)}</span>' if src_bytes else ""
         # census line + folder-aggregated diff table (with per-folder exclude checkboxes)
         cen_html = diff_html = ""
         if cen:
@@ -3286,6 +3333,24 @@ def _removable_links_html(r, viewer=False):
         if ver and not ver.get("clean") and ver.get("missing"):
             ver_html += (f'<div class=rl-cen><b>{ver["missing"]:,}</b> files / '
                          f'<b>{_cap(ver.get("missing_bytes",0))}</b> of source content is NOT on the drive</div>')
+        # FRESH link (never synced): the census/verify are all-zeros and meaningless, and diff/verify have
+        # nothing to compare. Show size + fit + a first-sync prompt instead, and flag a locked/unmounted source.
+        fresh_html = ""
+        if fresh:
+            cen_html = diff_html = ver_html = ""
+            if src_locked:
+                fresh_html = ('<div class="rl-cen rl-nofit">source is encrypted and its key isn’t loaded — '
+                              'load its key / mount it before backing up (files aren’t readable)</div>')
+            elif not src_mounted:
+                fresh_html = '<div class="rl-cen rl-nofit">source dataset isn’t mounted — mount it before backing up</div>'
+            elif src_bytes and free is not None:
+                fits = src_bytes <= free
+                fresh_html = (f'<div class="rl-cen{"" if fits else " rl-nofit"}">Not on this drive yet — first sync '
+                              f'copies <b>{_cap(src_bytes)}</b> · {"fits" if fits else "WON’T FIT"} in {_cap(free)} free. '
+                              f'Use <b>Back up now</b> above to seed it.</div>')
+            else:
+                fresh_html = ('<div class=rl-cen>Not on this drive yet — run <b>Check</b> to size it, then '
+                              '<b>Back up now</b> above to seed it.</div>')
         # status word for the meta line
         if confirmed:
             vts = max(L.get("last_backup_ts") or 0, L.get("verify_ts") or 0)
@@ -3293,8 +3358,17 @@ def _removable_links_html(r, viewer=False):
         else:
             status = f"structure {L['score']:.0%}" if L.get("score") is not None else "detected"
         diffbtn = f'<button onclick="toggleDiff(this,\'{name}\',\'{ds_js}\')" data-tip="folder-level diff (runs a check if none yet)">Diff</button>'
+        mbtn = (f'<button class="rl-mir{" on" if mirror_on else ""}" onclick="toggleMirror(this,{lid},{1 if mirror_on else 0})" '
+                f'data-tip="mirror this dataset on Back up now (rsync --delete: removes drive files not in the source). '
+                f'Off = additive.">Mirror{" ✓" if mirror_on else ""}</button>')
         if viewer:
             btns = ""
+        elif confirmed and fresh:
+            # nothing on the drive yet: Diff/Verify have nothing to compare, so gate them; keep Check (size/fit)
+            gated = ('<button class=rl-gate data-tip="available after the first sync">Diff</button>'
+                     '<button class=rl-gate data-tip="available after the first sync">Verify content</button>')
+            btns = (f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'census\')" data-tip="calculate size + fit">Check size &amp; fit</button>'
+                    f'{gated}{mbtn}<button onclick="unlink({lid})" data-tip="remove this link">Unlink</button>')
         elif confirmed:
             reloc = ('<button onclick="relocateLink(\'{n}\',\'{d}\')" data-tip="move this tree under cairn/ (instant, on-drive)">Move under cairn/</button>'.format(n=name, d=ds_js)
                      if not L["dest_subpath"].startswith("cairn/") else "")
@@ -3302,14 +3376,15 @@ def _removable_links_html(r, viewer=False):
                     f'<button data-tagged="{tagged if tagged is not None else ""}" data-used="{used}" '
                     f'onclick="verifyContent(this,\'{name}\',\'{ds_js}\')" '
                     f'data-tip="content-verify: cached b3sig xattrs if the drive is tagged, else a full BLAKE3 hash (slow)">Verify content</button>'
-                    f'{diffbtn}{reloc}<button onclick="unlink({lid})" data-tip="remove this link">Unlink</button>')
+                    f'{diffbtn}{mbtn}{reloc}<button onclick="unlink({lid})" data-tip="remove this link">Unlink</button>')
         else:
             btns = f'<button class=pri onclick="confirmLink({lid})">Confirm</button>{diffbtn}<button onclick="unlink({lid})">Dismiss</button>'
         icls, ilabel = ("ok", "linked") if confirmed else ("q", "detected")
+        mir_badge = '<span class=rl-mirb data-tip="mirrors on Back up now (deletes drive files not in the source)">mirror</span>' if mirror_on else ""
         out.append(
-            f'<div class=rl><div class=rl-name><span class="rl-i {icls}">{ilabel}</span><b>{full}</b></div>'
+            f'<div class=rl><div class=rl-name><span class="rl-i {icls}">{ilabel}</span><b>{full}</b>{sz_chip}{mir_badge}</div>'
             f'<div class=rl-loc>&rarr; {sub}<span class=rl-w>{status}</span></div>'
-            f'{cen_html}{ver_html}{diff_html}'
+            f'{fresh_html}{cen_html}{ver_html}{diff_html}'
             f'{("<div class=rl-btns>" + btns + "</div>") if btns else ""}</div>')
     body = "".join(out) or '<div class=rl-none>no datasets linked yet - Detect or add one below</div>'
     controls = ""
