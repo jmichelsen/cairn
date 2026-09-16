@@ -11,7 +11,7 @@ Usage:
   collector.py [--once] [--db PATH] [--targets PATH] [--alert]
 Env (or /etc/cairn/cairn.env): CAIRN_DB, CAIRN_TARGETS, BORG_PASSPHRASE_*
 """
-import argparse, json, os, re, shutil, sqlite3, subprocess, sys, time
+import argparse, json, os, re, shlex, shutil, sqlite3, subprocess, sys, time
 from pathlib import Path
 
 try:
@@ -589,6 +589,24 @@ def _removable_last_backup(t, pr):
         except (OSError, ValueError):
             pass
     return removable_state(t).get("last_backup_ts")
+
+def spawn_detached(script, out_path, done_path):
+    """Run a shell SCRIPT fully detached (new session via setsid + start_new_session) so it SURVIVES an
+    agent restart and does NOT block the agent's report/intent loop. Combined output -> out_path; the
+    script's exit code lands in done_path when it finishes (the presence of done_path = 'job complete').
+    Returns the child pid, or None if it couldn't spawn."""
+    sp = out_path + ".sh"
+    try:
+        with open(sp, "w") as f:
+            f.write("#!/bin/sh\n" + script + "\n")
+        os.chmod(sp, 0o700)
+        wrap = (f"sh {shlex.quote(sp)} > {shlex.quote(out_path)} 2>&1; "
+                f"echo $? > {shlex.quote(done_path)}")
+        p = subprocess.Popen(["setsid", "sh", "-c", wrap], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        return p.pid
+    except OSError:
+        return None
 
 def human_bytes(n):
     """1000-based human size (matches the dashboard's _cap), for result/log messages."""
