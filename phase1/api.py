@@ -1808,6 +1808,14 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .rl-hd{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin-bottom:4px;
   display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px}
 .rl-free{font-weight:400;text-transform:none;letter-spacing:0;color:var(--mut)}
+.tierbadge{display:inline-flex;align-items:center;justify-content:center;min-width:17px;height:17px;
+  padding:0 4px;margin-left:8px;border-radius:5px;font:700 10.5px/1 "Roboto Mono",monospace;
+  background:var(--rail);border:1px solid var(--line);color:var(--mut);vertical-align:middle;cursor:default}
+#tiptip{position:fixed;z-index:9999;max-width:270px;background:var(--ink);color:var(--bg);
+  font:500 11.5px/1.45 -apple-system,system-ui,sans-serif;padding:6px 9px;border-radius:7px;
+  box-shadow:0 6px 20px rgba(0,0,0,.4);pointer-events:none;opacity:0;transform:translateY(3px);
+  transition:opacity .12s ease,transform .12s ease}
+#tiptip.show{opacity:1;transform:none}
 .rl{padding:9px 0;border-top:1px solid var(--line)} .rl:first-of-type{border-top:0}
 .rl-name{display:flex;align-items:center;gap:8px;font-size:13px}
 .rl-name b{font-weight:700;word-break:break-all}
@@ -2439,6 +2447,8 @@ function updatePairHalf(c, r){   // keep one half's dot + severity word + snapsh
   var sv=h.querySelector('.psev'); if(sv) sv.textContent=sev;
   var ag=h.querySelector('.page'); if(ag) ag.textContent=(age!=null?(fmtAge(age)+' old'):'no snapshot');
 }
+function capBytes(b){ b=+b||0; if(!b) return '-';   // mirrors server _cap (1000-based)
+  if(b>=1e12) return (b/1e12).toFixed(1)+' TB'; if(b>=1e9) return Math.round(b/1e9)+' GB'; return Math.round(b/1e6)+' MB'; }
 async function refreshCards(){
   var j; try{ j=await (await fetch('/api/v1/backup/status')).json(); }catch(e){ return; }
   (j.targets||[]).forEach(function(r){
@@ -2472,6 +2482,10 @@ async function refreshCards(){
     if(mr && rowEl) rowEl.innerHTML=mr; else if(!mr && rowEl) rowEl.remove();
     var d=r.detail||{}, why=(d.reasons&&d.reasons.length)?d.reasons.join(', '):(r.last_error||'');
     var whyEl=c.querySelector('.why'); if(whyEl) whyEl.textContent=why;
+    // removable card: keep the "drive: X free of Y" line live (it used to only refresh on a full reload)
+    var rf=c.querySelector('.rl-free');
+    if(rf && d.free_bytes!=null && d.total_bytes!=null)
+      rf.textContent='drive: '+capBytes(d.free_bytes)+' free of '+capBytes(d.total_bytes);
     // live scrub state: disable/relabel the Scrub button + show/update the progress bar
     var sc=d.scrub||{}, running=(sc.state==='in_progress');
     var sb=c.querySelector('[data-scrub]');
@@ -2499,6 +2513,24 @@ async function refreshCards(){
 }
 window.addEventListener('load', refreshCards);
 setInterval(refreshCards, 20000);
+// ---- custom tooltips: styled, viewport-clamped, hover + keyboard focus (replaces native title=) ----
+(function(){
+  var el=null, ht=null;
+  function box(){ if(!el){ el=document.createElement('div'); el.id='tiptip'; el.setAttribute('role','tooltip'); document.body.appendChild(el); } return el; }
+  function show(t){ var tip=t.getAttribute('data-tip'); if(!tip) return; clearTimeout(ht);
+    var b=box(); b.textContent=tip; b.style.display='block';
+    var r=t.getBoundingClientRect(), bw=b.offsetWidth, bh=b.offsetHeight;
+    var left=Math.min(Math.max(6, r.left+r.width/2-bw/2), window.innerWidth-bw-6);
+    var top=r.top-bh-8; if(top<6) top=r.bottom+8;
+    b.style.left=left+'px'; b.style.top=top+'px'; b.classList.add('show'); }
+  function hide(){ if(!el) return; el.classList.remove('show'); ht=setTimeout(function(){ if(el) el.style.display='none'; }, 140); }
+  document.addEventListener('mouseover', function(e){ var t=e.target.closest&&e.target.closest('[data-tip]'); if(t) show(t); });
+  document.addEventListener('mouseout',  function(e){ var t=e.target.closest&&e.target.closest('[data-tip]'); if(t) hide(); });
+  document.addEventListener('focusin',   function(e){ var t=e.target.closest&&e.target.closest('[data-tip]'); if(t) show(t); });
+  document.addEventListener('focusout',  hide);
+  document.addEventListener('keydown',   function(e){ if(e.key==='Escape') hide(); });
+  window.addEventListener('scroll', hide, true);
+})();
 function setHero(h){var p=document.querySelector('.panel'); if(!p) return;
   p.dataset.hero=h; try{localStorage.setItem('bm_hero',h)}catch(e){}}
 (function(){try{var s=localStorage.getItem('bm_hero');
@@ -2983,6 +3015,14 @@ def _kf(n):
     if n >= 1000: return f"{n/1000:.1f}k"
     return str(n)
 
+def _tier_badge(tier):
+    """Small tier chip for the card header (next to the name), with a custom tooltip. Keeps 'tier X' out
+    of the subtitle, where a long source->dest path split it across the line break at random spots."""
+    if not tier:
+        return ""
+    t = _esc(str(tier))
+    return f'<span class="tierbadge" data-tip="Tier {t} dataset">{t}</span>'
+
 def _cap(b):
     if not b:
         return "-"
@@ -3023,7 +3063,7 @@ def _agent_card(a, viewer=False, tab=None, active=False):
         # stopPropagation so pressing Update on a tab doesn't also switch tabs.
         upd = (f'<span class=verold>update to {_esc(CAIRN_VERSION)}</span>' if viewer else
                f'<button class=verbtn onclick="event.stopPropagation();updateAgent(\'{n}\')" '
-               f'title="fetch the latest code on this agent and restart it, keeping every setting">'
+               f'data-tip="fetch the latest code on this agent and restart it, keeping every setting">'
                f'update to {_esc(CAIRN_VERSION)}</button>')
         ver_html = (f'<div class=jrow><span class=jk>version</span>'
                     f'<span class=jv data-ver>{_esc(ver)} {upd}</span></div>')
@@ -3095,15 +3135,15 @@ def _smart_card(r):
     why_html = f'<div class="why">{why}</div>' if why else ""
     if acked:
         ack_html = (f'<button class="ackbtn on" onclick="unackTarget(\'{nm}\')" '
-                    f'title="acknowledged - click to clear">✓ acknowledged</button>')
+                    f'data-tip="acknowledged - click to clear">✓ acknowledged</button>')
     elif r["severity"] in ("WARN", "CRIT"):
         ack_html = f'<button class=ackbtn onclick="ackTarget(\'{nm}\')">Acknowledge</button>'
     else:
         ack_html = ""
-    probed = f'<span class=smprobe title="SMART is cached and refreshed periodically, not on every poll">read {_ago(d.get("probed_ts"))}</span>' if d.get("probed_ts") else ""
+    probed = f'<span class=smprobe data-tip="SMART is cached and refreshed periodically, not on every poll">read {_ago(d.get("probed_ts"))}</span>' if d.get("probed_ts") else ""
     return (f'<div class="card smartcard {card_cls}" data-t="{n}"><div class="ch">'
             f'<span class="cn">{devname}</span><span class="chr">'
-            f'<span class="cbusy" title="action running"></span><span class="cs">{cs_text}</span></span></div>'
+            f'<span class="cbusy" data-tip="action running"></span><span class="cs">{cs_text}</span></span></div>'
             f'<div class="src">{ident}</div><div class="skpirow">{kpi}</div>{why_html}{ack_html}'
             f'<div class=chistrow><button class="histbtn" onclick="toggleSmart(this)">SMART details</button>'
             f'{probed}<div class="smdet" hidden>{tbl}</div></div></div>')
@@ -3122,8 +3162,7 @@ def _pair_card(v, capable=frozenset(), viewer=False):
     R = v["r"]; L = v["l"]; sev = SEVCLS.get(v["severity"], "unk")
     name = _esc(R["name"])
     subtitle = f'{_esc(R.get("source") or "")} &rarr; {_esc(v["dataset"])}'
-    meta = []
-    if R.get("tier"): meta.append(f'tier {R["tier"]}')
+    meta = []   # tier now lives as a header badge (see below), not in the subtitle
     if R.get("encrypted") or L.get("encrypted"): meta.append("enc")
     if meta: subtitle += " &middot; " + " &middot; ".join(_esc(m) for m in meta)
     def half(row, role):
@@ -3156,8 +3195,8 @@ def _pair_card(v, capable=frozenset(), viewer=False):
                     '<button onclick="replicateNow('
                     f"'{_esc(L['name'])}','{_esc(L['agent'])}',true)\">dry-run</button></div>")
     return (f'<div class="card pair {sev}" data-t="{name}" data-off="{_esc(L.get("agent") or "")}"><div class=ch>'
-            f'<span class=cn>{PAIR_ICON}{name}</span><span class=chr>'
-            f'<span class="cbusy" title="pull running"></span>'
+            f'<span class=cn>{PAIR_ICON}{name}{_tier_badge(R.get("tier"))}</span><span class=chr>'
+            f'<span class="cbusy" data-tip="pull running"></span>'
             f'<span class=pbadge>replication pair</span><span class=cs>{_esc(v["severity"])}</span></span></div>'
             f'<div class=src>{subtitle}</div>'
             f'<div class=phalves>{half(R, "source")}{half(L, "off-site copy")}</div>{act_html}</div>')
@@ -3253,17 +3292,17 @@ def _removable_links_html(r, viewer=False):
             status = _esc(_ago(vts) if vts else "not backed up yet")
         else:
             status = f"structure {L['score']:.0%}" if L.get("score") is not None else "detected"
-        diffbtn = f'<button onclick="toggleDiff(this,\'{name}\',\'{ds_js}\')" title="folder-level diff (runs a check if none yet)">Diff</button>'
+        diffbtn = f'<button onclick="toggleDiff(this,\'{name}\',\'{ds_js}\')" data-tip="folder-level diff (runs a check if none yet)">Diff</button>'
         if viewer:
             btns = ""
         elif confirmed:
-            reloc = ('<button onclick="relocateLink(\'{n}\',\'{d}\')" title="move this tree under cairn/ (instant, on-drive)">Move under cairn/</button>'.format(n=name, d=ds_js)
+            reloc = ('<button onclick="relocateLink(\'{n}\',\'{d}\')" data-tip="move this tree under cairn/ (instant, on-drive)">Move under cairn/</button>'.format(n=name, d=ds_js)
                      if not L["dest_subpath"].startswith("cairn/") else "")
-            btns = (f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'census\')" title="re-check size+mtime match + fit">Check</button>'
+            btns = (f'<button onclick="verifyLink(\'{name}\',\'{ds_js}\',\'census\')" data-tip="re-check size+mtime match + fit">Check</button>'
                     f'<button data-tagged="{tagged if tagged is not None else ""}" data-used="{used}" '
                     f'onclick="verifyContent(this,\'{name}\',\'{ds_js}\')" '
-                    f'title="content-verify: cached b3sig xattrs if the drive is tagged, else a full BLAKE3 hash (slow)">Verify content</button>'
-                    f'{diffbtn}{reloc}<button onclick="unlink({lid})" title="remove this link">Unlink</button>')
+                    f'data-tip="content-verify: cached b3sig xattrs if the drive is tagged, else a full BLAKE3 hash (slow)">Verify content</button>'
+                    f'{diffbtn}{reloc}<button onclick="unlink({lid})" data-tip="remove this link">Unlink</button>')
         else:
             btns = f'<button class=pri onclick="confirmLink({lid})">Confirm</button>{diffbtn}<button onclick="unlink({lid})">Dismiss</button>'
         icls, ilabel = ("ok", "linked") if confirmed else ("q", "detected")
@@ -3298,8 +3337,7 @@ def _card(r, can_act, viewer=False):
     nm = r["name"]; n = _esc(nm); sev = SEVCLS.get(r["severity"], "unk")
     src = r.get("source") or ""
     src_line = f"{src} → {r['dest']}" if r.get("dest") else src
-    meta = []
-    if r.get("tier"): meta.append(f"tier {r['tier']}")
+    meta = []   # tier now lives as a header badge (see the return), not in the subtitle
     if r.get("encrypted"): meta.append("enc")
     if r.get("location") == "offsite": meta.append("off-site")
     if meta: src_line = (src_line + " · " if src_line else "") + " · ".join(meta)
@@ -3354,7 +3392,7 @@ def _card(r, can_act, viewer=False):
         legs = [("3", copies >= 3, f"≥3 copies - {copies} of 3"),
                 ("2", media >= 2, f"≥2 media - {media}"),
                 ("1", offsite >= 1, "off-site copy" if offsite else "off-site - none (on-site only)")]
-        chips = "".join(f'<span class="c321p {"met" if ok else "unmet"}" title="{ti}">{d}</span>'
+        chips = "".join(f'<span class="c321p {"met" if ok else "unmet"}" data-tip="{ti}">{d}</span>'
                         for d, ok, ti in legs)
         c321_html = f'<div class=c321><span class=c321l>3-2-1</span>{chips}</div>'
     hist_html = ""
@@ -3372,10 +3410,10 @@ def _card(r, can_act, viewer=False):
     acked = r.get("acked")
     card_cls, cs_text = ("ack", "ACK’D") if acked else (sev, r["severity"])
     if viewer:      # read-only: show the ACK'D state as a static badge, but no acknowledge control
-        ack_html = ('<span class="ackbtn on" title="acknowledged">✓ acknowledged</span>' if acked else "")
+        ack_html = ('<span class="ackbtn on" data-tip="acknowledged">✓ acknowledged</span>' if acked else "")
     elif acked:
         ack_html = (f'<button class="ackbtn on" onclick="unackTarget(\'{nm}\')" '
-                    f'title="acknowledged - click to clear">✓ acknowledged</button>')
+                    f'data-tip="acknowledged - click to clear">✓ acknowledged</button>')
     elif r["severity"] in ("WARN", "CRIT"):
         ack_html = f'<button class=ackbtn onclick="ackTarget(\'{nm}\')">Acknowledge</button>'
     else:
@@ -3385,9 +3423,9 @@ def _card(r, can_act, viewer=False):
     # up). Admin-only; restorable from the Hidden pane. target_id comes from the joined status row.
     hide_html = "" if (viewer or not r.get("target_id")) else (
         f'<button class=hidebtn onclick="hideTarget({int(r["target_id"])})" '
-        f'title="stop monitoring this target (restore it from the Hidden section)">Hide</button>')
-    return (f'<div class="card {card_cls}" data-t="{n}"><div class="ch"><span class="cn">{title}</span>'
-            f'<span class="chr"><span class="cbusy" title="action running"></span>'
+        f'data-tip="stop monitoring this target (restore it from the Hidden section)">Hide</button>')
+    return (f'<div class="card {card_cls}" data-t="{n}"><div class="ch"><span class="cn">{title}{_tier_badge(r.get("tier"))}</span>'
+            f'<span class="chr"><span class="cbusy" data-tip="action running"></span>'
             f'<span class="cs">{cs_text}</span></span></div>{src_html}{sched_html}{c321_html}{mr_html}{scrub_html}{why_html}'
             f'{ack_html}{_acts(r, can_act, viewer)}{_removable_links_html(r, viewer)}'
             f'{hist_html}{log_html}{hide_html}</div>')
@@ -3403,7 +3441,7 @@ def _heatmap(order_names):
         for dstr in days:
             sev = g.get(dstr)
             cls = SEVCLS.get(sev, "") if sev else ""
-            cells += f'<td><div class="c {cls}" title="{dstr}: {sev or "no data"}"></div></td>'
+            cells += f'<td><div class="c {cls}" data-tip="{dstr}: {sev or "no data"}"></div></td>'
         out += f'<tr><td class="hname">{_esc(name)}</td>{cells}</tr>'
     return out, f"{days[0]} → {days[-1]}"
 
@@ -3434,7 +3472,7 @@ def _hero_steel(rows, h, gpct, glabel):
     cap_cls = "crit" if gpct >= 92 else "warn" if gpct >= 85 else "ok"
     c = h["counts"]
     chips = "".join(f'<button class=sumchip data-sev={SEVCLS[k]} onclick="toggleFilter(\'{SEVCLS[k]}\')" '
-                    f'title="show only {k} - click again to clear"><i style="background:var(--{SEVCLS[k]})"></i>'
+                    f'data-tip="show only {k} - click again to clear"><i style="background:var(--{SEVCLS[k]})"></i>'
                     f'<b>{c.get(k,0)}</b> {k}</button>' for k in ("OK", "WARN", "CRIT", "UNKNOWN"))
     vcls = SEVCLS.get(h["severity"], "unk")
     verdict = {"OK": "All healthy", "WARN": "Attention", "CRIT": "Critical",
@@ -3632,9 +3670,9 @@ def index(request: Request):
     vcls = SEVCLS.get(h["severity"], "unk")
     steel_hero = _hero_steel(rows, h, gpct, glabel)
     dry_html = "" if viewer else (
-        '<label class=drysw title="When on, every action runs a safe dry-run probe (native -n / read-only) instead of executing">'
+        '<label class=drysw data-tip="When on, every action runs a safe dry-run probe (native -n / read-only) instead of executing">'
         '<input type=checkbox id=drychk onchange="setDry(this.checked)"><span>Dry-run</span></label>')
-    ro_badge = '<span class=robadge title="read-only account - viewing only">read-only</span>' if viewer else ""
+    ro_badge = '<span class=robadge data-tip="read-only account - viewing only">read-only</span>' if viewer else ""
     return _shell(f"""
   <div class=topbar2><h2 class=applogo>Cairn</h2>
     <div class=seg role=tablist>
@@ -3670,7 +3708,7 @@ def index(request: Request):
   <div id=recmodal class=modalwrap hidden onclick="if(event.target===this)closeRec()">
     <div class=modalbox>
       <div class=modalhd><span id=rectitle>Recovery</span>
-        <span class=rechdbtns><button class=recrefresh id=recrefresh onclick="recRefresh()" title="re-run the scan (bypass cache)" hidden>Refresh</button>
+        <span class=rechdbtns><button class=recrefresh id=recrefresh onclick="recRefresh()" data-tip="re-run the scan (bypass cache)" hidden>Refresh</button>
         <button class=modalx onclick="closeRec()">&times;</button></span></div>
       <div id=recbody class=modalbody></div>
     </div></div>
