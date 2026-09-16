@@ -326,6 +326,17 @@ def test_removable_last_backup_uses_freshest_per_link_stamp(tmp_path):
     assert collector._removable_last_backup(t, {"mounted": True, "mount": str(empty)}) is None
 
 
+def test_dev_is_removable_skips_usb(monkeypatch):
+    # USB/removable transport (sysfs path contains /usb) -> excluded from SMART discovery
+    monkeypatch.setattr(collector.os.path, "realpath",
+                        lambda p: "/sys/devices/pci0000:00/usb2/2-3/2-3:1.0/host11/block/sdk")
+    assert collector._dev_is_removable("/dev/sdk") is True
+    # internal SATA (no /usb in path, and no /sys/block/<fake>/removable) -> kept
+    monkeypatch.setattr(collector.os.path, "realpath",
+                        lambda p: "/sys/devices/pci0000:00/ata1/host0/block/sdzz")
+    assert collector._dev_is_removable("/dev/sdzz") is False
+
+
 def test_parse_rsync_progress():
     # human-formatted (-h) progress2 line
     p = collector.parse_rsync_progress("stuff\r        1.23G  45%   12.34MB/s    0:12:34\r")
