@@ -14,6 +14,11 @@ per-agent token, so there is no phone-home to a cloud and nothing to expose at a
   rclone, snapper, backupninja, SMART, and a removable 2nd-leg drive. Each returns a normalized
   status the control plane stores and scores.
 
+[![Cairn dashboard](img/dashboard.png)](img/dashboard-full.png)
+
+*The dashboard is server-rendered by the control plane. Names here are anonymized;
+[full-page capture](img/dashboard-full.png).*
+
 ## System topology
 
 ```mermaid
@@ -99,6 +104,11 @@ Per-agent tokens are individual rows, so any one host can be revoked without tou
 A dedicated, single-purpose **CI token** may push pipeline status to one badge route and nothing
 else, so it is safe to hand to CI.
 
+<img src="img/viewer-readonly.png" width="640" alt="The dashboard in read-only viewer mode: a READ-ONLY badge and no action controls">
+
+*The same dashboard for a **viewer**: a READ-ONLY badge, and every action control (dry-run toggle,
+Replicate now) is gone - the role is enforced server-side, not just hidden.*
+
 ## Adapters (what each agent monitors)
 
 The collector normalizes every backup technology into the same status shape (severity + freshness
@@ -140,6 +150,11 @@ copy** - the meaningful end-to-end 3-2-1 signal (it goes stale if the source sto
 *or* the pull stalls). The hero counters are pair-aware, so a merged pair is counted once, at its
 off-site half.
 
+<img src="img/pair-card.png" width="380" alt="A replication pair card: source and off-site half, dataset size, tier badge">
+
+*A pair card: the two halves (source + off-site copy), the source dataset size for capacity
+planning, and a tier badge - severity defers to the off-site half.*
+
 ## Removable 2nd-leg drive
 
 An external drive is modeled as a `removable` target - the "2nd media" of 3-2-1. It is recognized
@@ -154,6 +169,11 @@ each link can independently:
 
 A freshly-linked dataset (nothing on the drive yet) shows its size + fit + a first-sync prompt
 rather than an empty diff, and flags a source that is unmounted or encrypted-and-locked.
+
+<img src="img/removable-card.png" width="360" alt="A removable 2nd-leg card: capacity, per-link mirror, census, and a fresh-add first-sync prompt">
+
+*A removable card: drive capacity, a confirmed link (census/verify/mirror per dataset), and a
+freshly-added dataset showing its size + fit + first-sync prompt instead of empty action buttons.*
 
 ## Off-site pull
 

@@ -15,6 +15,21 @@ computes real **replication lag** (newest snapshot common to source and destinat
 **3-2-1 compliance scorecard**, a **coverage-gap** view ("what is backed up by nothing"), and
 respects zero-knowledge encrypted replicas (flags a destination whose key unexpectedly loads).
 
+## Screenshots
+
+[![Cairn dashboard](docs/img/dashboard.png)](docs/img/dashboard-full.png)
+
+The summary view: 3-2-1 scorecard, busiest-pool capacity, agent tiles (with self-update prompts),
+and replication **pair cards** that merge a source and its off-site copy into one end-to-end signal.
+*(Anonymized - generic host/dataset names stand in for a real deployment.
+[Full-page capture](docs/img/dashboard-full.png).)*
+
+| Replication pair | Removable 2nd-leg | Read-only viewer |
+| --- | --- | --- |
+| [<img src="docs/img/pair-card.png" width="260">](docs/img/pair-card.png) | [<img src="docs/img/removable-card.png" width="260">](docs/img/removable-card.png) | [<img src="docs/img/viewer-readonly.png" width="260">](docs/img/viewer-readonly.png) |
+
+See [docs/architecture.md](docs/architecture.md) for how it all fits together.
+
 ## Quick start (`./install.sh`)
 
 One entry point. It **installs any missing prerequisites** (docker, compose, python3-yaml, …),
