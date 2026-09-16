@@ -578,16 +578,27 @@ def removable_probe(t):
     return dict(attached=dev is not None, mounted=mounted, ro=ro, mount=mount, dev=dev)
 
 def _removable_last_backup(t, pr):
-    """Authoritative last-backup epoch: the on-drive stamp when the drive is present+mounted, else the
-    host-side state written on the last successful run."""
-    dest = _removable_dest(t)
-    if pr["mounted"] and dest:
-        stamp = os.path.join(dest, ".cairn-lastbackup")
-        try:
-            with open(stamp) as f:
-                return int(f.read().strip())
-        except (OSError, ValueError):
-            pass
+    """Authoritative last-backup epoch = the FRESHEST on-drive stamp when present+mounted, else host-side
+    state. A link-driven drive (no target-level dest_subpath) writes one `.cairn-lastbackup` per dataset
+    under cairn/<host>/<slug>/, so the drive's 'last backup' is the newest of those - NOT the (absent)
+    stamp at the drive root, which is why a freshly-backed-up drive used to read 'no last backup found'."""
+    if pr["mounted"] and pr["mount"]:
+        import glob
+        cands = []
+        dest = _removable_dest(t)
+        if dest:
+            cands.append(os.path.join(dest, ".cairn-lastbackup"))          # single-source / target-level
+        cands += glob.glob(os.path.join(pr["mount"], "cairn", "*", "*", ".cairn-lastbackup"))  # cairn/<host>/<slug>
+        cands += glob.glob(os.path.join(pr["mount"], "cairn", "*", ".cairn-lastbackup"))        # cairn/<slug> (flat)
+        stamps = []
+        for c in cands:
+            try:
+                with open(c) as f:
+                    stamps.append(int(f.read().strip()))
+            except (OSError, ValueError):
+                pass
+        if stamps:
+            return max(stamps)
     return removable_state(t).get("last_backup_ts")
 
 def spawn_detached(script, out_path, done_path):
