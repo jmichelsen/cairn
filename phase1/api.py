@@ -2296,13 +2296,18 @@ async function unhideTarget(tid){
   catch(e){ toast('Unhide failed: '+e,'err'); return; }
   location.reload();
 }
+// Terminal action states: nothing more will happen, so never spin/poll/mark-busy for these. canceled
+// and skipped are terminal too - omitting them left a canceled intent seeded as "running" forever.
+function actIsDone(st){ return ['done','failed','stalled','canceled','cancelled','skipped'].indexOf(st)>=0; }
+function actCls(st){ return st==='done'?'ok' : (st==='failed'||st==='stalled')?'crit'
+                          : (st==='canceled'||st==='cancelled'||st==='skipped')?'unk' : 'warn'; }
 async function poll(id, key, dry, target){
   var tag=dry?'[dry] ':'';
   for(var i=0;i<180;i++){
     var j; try{ j=await (await fetch('/api/v1/backup/actions/'+id)).json(); }catch(e){ break; }
     var st=j.state||'?';
-    var done=['done','failed','stalled'].includes(st);
-    var cls = st==='done'?'ok' : (st==='failed'||st==='stalled')?'crit' : 'warn';
+    var done=actIsDone(st);
+    var cls = actCls(st);
     var res={}; try{res=JSON.parse(j.result||'{}')}catch(e){}
     if(!target) target=j.target;
     setRow(key,{title:tag+'#'+id+' '+(j.target||'')+' '+actLabel(j.action||'',j.opts), state:actState(j.action,st)+(dry?' · dry':''),
@@ -2488,8 +2493,8 @@ async function loadStream(){
     var j=await (await fetch('/api/v1/backup/actions?limit=10')).json();
     var a=(j.actions||[]).slice().sort(function(x,y){return (x.created_ts||0)-(y.created_ts||0);});
     for(var i=0;i<a.length;i++){
-      var x=a[i], st=x.state||'?', done=['done','failed','stalled'].indexOf(st)>=0;
-      var cls = st==='done'?'ok':(st==='failed'||st==='stalled')?'crit':'warn';
+      var x=a[i], st=x.state||'?', done=actIsDone(st);
+      var cls = actCls(st);
       var res={}; try{res=JSON.parse(x.result||'{}')}catch(e){}
       var dry=false; try{dry=!!JSON.parse(x.opts||'{}').dryrun}catch(e){}
       var key='srv'+x.id, tag=dry?'[dry] ':'';
