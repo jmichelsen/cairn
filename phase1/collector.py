@@ -320,8 +320,15 @@ def adapter_zfs_repl(t, defaults, now, pools):
     st["snap_age_dst_s"] = newest_age(dsnaps, now)
     reasons = []
     if not ssnaps or not dsnaps:
-        st["severity"] = "UNKNOWN"; st["last_error"] = "missing snapshots on src or dst"
-        st["detail_json"] = json.dumps(dict(reasons=["no snapshots"], src_n=len(ssnaps), dst_n=len(dsnaps)))
+        dpool = (dst or "").split("/")[0]
+        if dpool and dpool not in pools:           # the whole dest pool is gone/exported
+            reason = f"dest pool '{dpool}' not imported"
+        elif not dsnaps:
+            reason = "dest has no snapshots (replication never ran?)"
+        else:
+            reason = "src has no snapshots"
+        st["severity"] = "UNKNOWN"; st["last_error"] = reason
+        st["detail_json"] = json.dumps(dict(reasons=[reason], src_n=len(ssnaps), dst_n=len(dsnaps)))
         return [st]
     dguids = {g for _, g, _ in dsnaps}
     common = [(n, g, c) for (n, g, c) in ssnaps if g in dguids]
