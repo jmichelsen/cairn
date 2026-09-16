@@ -311,6 +311,21 @@ def test_backup_now_emits_progress_on_real_runs_only():
     assert "--info=progress2" not in collector.build_command("backup-now", _REMOVABLE_T, {"dryrun": True})[0]
 
 
+def test_removable_last_backup_uses_freshest_per_link_stamp(tmp_path):
+    # link-driven drive: no target-level dest_subpath; each dataset writes its own stamp under cairn/
+    mount = tmp_path
+    d1 = mount / "cairn" / "mclife" / "mcz_mclife_Pics"; d1.mkdir(parents=True)
+    d2 = mount / "cairn" / "mclife" / "mcz_mclife_karly"; d2.mkdir(parents=True)
+    (d1 / ".cairn-lastbackup").write_text("1700000000")
+    (d2 / ".cairn-lastbackup").write_text("1700009999")   # the freshest -> should win
+    t = {"name": "seagate", "type": "removable", "mount": str(mount)}
+    pr = {"mounted": True, "mount": str(mount)}
+    assert collector._removable_last_backup(t, pr) == 1700009999
+    # nothing on the drive -> falls back (no stamps) to host-side state (None here)
+    empty = tmp_path / "empty"; empty.mkdir()
+    assert collector._removable_last_backup(t, {"mounted": True, "mount": str(empty)}) is None
+
+
 def test_parse_rsync_progress():
     # human-formatted (-h) progress2 line
     p = collector.parse_rsync_progress("stuff\r        1.23G  45%   12.34MB/s    0:12:34\r")

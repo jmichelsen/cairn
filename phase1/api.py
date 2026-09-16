@@ -2426,6 +2426,11 @@ async function refreshCards(){
   var j; try{ j=await (await fetch('/api/v1/backup/status')).json(); }catch(e){ return; }
   (j.targets||[]).forEach(function(r){
     var c=document.querySelector('.card[data-t="'+String(r.name).replace(/"/g,'')+'"]'); if(!c) return;
+    // A replication PAIR card shares its name with BOTH status rows (home + off-site). The home half is
+    // structurally UNKNOWN (its dest lives on the other agent), and the server already defers the pair's
+    // severity to the off-site copy - so only the off-site half may drive the pair chip here, else the
+    // home row's UNKNOWN would clobber the deferred severity on every refresh.
+    if(c.classList.contains('pair') && c.getAttribute('data-off') && (r.agent||'')!==c.getAttribute('data-off')) return;
     var cls=r.acked?'ack':(_SEVC[(r.severity||'').toUpperCase()]||'unk');
     var key=(r.agent||'')+'/'+r.name;            // per-(agent,name): a repl PAIR has TWO status rows
     var prev=_cardSev[key]; _cardSev[key]=cls;   // (home + vault) sharing a name - don't flap between them
@@ -3119,7 +3124,7 @@ def _pair_card(v, capable=frozenset(), viewer=False):
                     f"'{_esc(L['name'])}','{_esc(L['agent'])}')\">Replicate now</button>"
                     '<button onclick="replicateNow('
                     f"'{_esc(L['name'])}','{_esc(L['agent'])}',true)\">dry-run</button></div>")
-    return (f'<div class="card pair {sev}" data-t="{name}"><div class=ch>'
+    return (f'<div class="card pair {sev}" data-t="{name}" data-off="{_esc(L.get("agent") or "")}"><div class=ch>'
             f'<span class=cn>{PAIR_ICON}{name}</span><span class=chr>'
             f'<span class="cbusy" title="pull running"></span>'
             f'<span class=pbadge>replication pair</span><span class=cs>{_esc(v["severity"])}</span></span></div>'
