@@ -972,6 +972,12 @@ def adapter_removable(t, defaults, now):
         sv = os.statvfs(pr["mount"])
         detail["free_bytes"] = sv.f_bavail * sv.f_frsize
         detail["total_bytes"] = sv.f_blocks * sv.f_frsize
+        # same used-% indicator the pool cards show (df-style, reserved-block aware). DISPLAY only - a full
+        # 2nd-leg drive is expected and never escalates severity here (that stays presence/freshness driven).
+        used_b = (sv.f_blocks - sv.f_bfree)
+        denom = used_b + sv.f_bavail
+        if denom > 0:
+            st["pool_cap_pct"] = round(used_b / denom * 100)
     except OSError:
         pass
     try:                                        # is the drive hash-tagged? (lets the UI warn before a
