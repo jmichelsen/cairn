@@ -373,6 +373,11 @@ def do_execute(cfg):
             cen, err = C.rsync_census(srcp, dest, excludes=_exlist(link), timeout=RECOVER_WALK_TIMEOUT * 4)
             if err:
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err}); continue
+            # source dataset size + mount/lock (from zfs, reliable even when unmounted/empty) so a fresh
+            # link with an empty census still shows its real size, fit, and a 'source locked' hint.
+            srcds = next((d.get("source") for d in _dataset_paths(cfg) if d["name"] == ds), None)
+            if srcds:
+                cen.update(C.dataset_size_info(srcds))
             api_call("POST", "/api/v1/backup/agent/removable-links",
                      {"agent": NAME, "removable": target, "op": "census", "dataset": ds, "census": cen})
             api_call("POST", f"/api/v1/backup/intents/{iid}/result",
@@ -428,8 +433,11 @@ def do_execute(cfg):
                 jobs = []
                 for L in links:
                     srcp = dsmap.get(L["dataset"])
+                    # per-link mirror flag: a plain "Back up now" (opts.mirror unset) honors EACH link's
+                    # own mirror setting; the card's "Mirror" button (opts.mirror=True) still forces all.
                     jobs.append((L["dataset"], dict(t, source=srcp, dest_subpath=L["dest_subpath"],
-                                                    exclude=_exlist(L)), srcp is not None))
+                                                    exclude=_exlist(L), mirror=bool(L.get("mirror"))),
+                                 srcp is not None))
             else:
                 jobs = [(None, t, bool(t.get("source")))]
             if dry:   # dry-runs are quick and want immediate feedback -> stay synchronous

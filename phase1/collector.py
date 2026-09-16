@@ -170,6 +170,20 @@ def zfs_props(ds, props):
                 d[f[0]] = f[1]
     return d
 
+def dataset_size_info(ds):
+    """Source dataset size + mount/lock state for a removable link's fit + fresh-add flow. Uses zfs
+    props so it works even when the dataset is UNMOUNTED or its encryption key isn't loaded (where a
+    file-level census sees nothing). logicalreferenced ~= the uncompressed bytes that land on an ext4
+    external. locked = encrypted with its key not loaded (can't be file-backed-up)."""
+    p = zfs_props(ds, ["logicalreferenced", "used", "mounted", "encryption", "keystatus"])
+    def _int(k):
+        try: return int(p[k])
+        except (KeyError, ValueError): return None
+    enc = p.get("encryption", "off") not in ("off", "", None)
+    return {"src_bytes": _int("logicalreferenced"), "src_used": _int("used"),
+            "src_mounted": p.get("mounted") == "yes",
+            "src_locked": bool(enc and p.get("keystatus") != "available")}
+
 def newest_age(snaps, now):
     return (now - snaps[-1][2]) if snaps else None
 

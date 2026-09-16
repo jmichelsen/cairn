@@ -358,6 +358,29 @@ def test_backup_now_mirror_and_excludes_and_dryrun():
     assert "--delete-excluded" not in cmd      # prune is OPT-IN, not implied by mirror+excludes
 
 
+def test_backup_now_per_link_mirror_via_target_flag():
+    # a plain Back up now (no opts.mirror) falls back to the target/link's own mirror flag
+    t = dict(_REMOVABLE_T, mirror=True)
+    assert "--delete" in collector.build_command("backup-now", t)[0]
+    # opts.mirror=False (explicit additive) overrides a link mirror flag
+    assert "--delete" not in collector.build_command("backup-now", t, {"mirror": False})[0]
+    # opts.mirror=True (card 'Mirror' button) forces it regardless
+    assert "--delete" in collector.build_command("backup-now", dict(_REMOVABLE_T), {"mirror": True})[0]
+
+
+def test_dataset_size_info(monkeypatch):
+    monkeypatch.setattr(collector, "run", lambda c, **k: (
+        0, "logicalreferenced\t281912738304\nused\t264548249600\nmounted\tno\n"
+           "encryption\taes-256-gcm\nkeystatus\tunavailable\n", ""))
+    info = collector.dataset_size_info("mcz/mclife/michxps")
+    assert info["src_bytes"] == 281912738304 and info["src_mounted"] is False
+    assert info["src_locked"] is True                     # encrypted + key not loaded
+    monkeypatch.setattr(collector, "run", lambda c, **k: (
+        0, "logicalreferenced\t100\nused\t120\nmounted\tyes\nencryption\toff\nkeystatus\t-\n", ""))
+    info2 = collector.dataset_size_info("mcz/mclife/Pics")
+    assert info2["src_mounted"] is True and info2["src_locked"] is False
+
+
 def test_delete_excluded_is_opt_in():
     t = dict(_REMOVABLE_T, mirror=True, exclude=["x"])
     # mirror + excludes but no prune_excluded -> --delete but NOT --delete-excluded
