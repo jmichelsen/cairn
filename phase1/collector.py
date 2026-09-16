@@ -1494,12 +1494,31 @@ def _smart_bare(st):
         return True
     return not d.get("model") or not d.get("attrs")
 
+def _dev_is_removable(dev):
+    """A /dev/sdX on a USB/removable transport - SKIP it in SMART discovery. A come-and-go external is
+    already monitored by its removable-target card, and its enclosure usually blocks SMART passthrough
+    anyway (the Seagate Expansion returns nothing on any -d type), so a SMART row would sit permanently
+    UNKNOWN and flap to missing whenever it's unplugged. Detected via sysfs - no command or privilege."""
+    base = re.sub(r"\d+$", "", os.path.basename(dev))   # sdk1 -> sdk (scan yields whole-disk; be safe)
+    if not base:
+        return False
+    try:
+        if "/usb" in os.path.realpath("/sys/block/" + base):
+            return True
+    except OSError:
+        pass
+    try:
+        with open("/sys/block/" + base + "/removable") as f:
+            return f.read().strip() == "1"
+    except OSError:
+        return False
+
 def _smart_probe_all(now):
     rc, out, _ = run(["smartctl", "--scan"])
     devs = []
     for ln in out.splitlines():
         m = re.match(r"(/dev/\S+)\s+-d\s+(\S+)", ln)
-        if m:
+        if m and not _dev_is_removable(m.group(1)):   # removable/USB drives are covered by their own card
             devs.append((m.group(1), m.group(2)))
     if not devs:
         return [dict(severity="UNKNOWN", last_error="smartctl --scan found no devices")]
@@ -1603,7 +1622,7 @@ def _smart_scan_only():
     results = []
     for ln in out.splitlines():
         m = re.match(r"(/dev/\S+)\s+-d\s+(\S+)", ln)
-        if m:
+        if m and not _dev_is_removable(m.group(1)):   # removable/USB drives are covered by their own card
             results.append(dict(severity="OK", name_suffix=_disk_byid(m.group(1)), last_error=None,
                                 detail_json=json.dumps({"dev": m.group(1), "typ": m.group(2),
                                                         "detail_optin": True})))
