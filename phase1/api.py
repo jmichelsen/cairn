@@ -1808,6 +1808,7 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .card.ok .cs{color:var(--ok)} .card.warn .cs{color:var(--warn)} .card.crit .cs{color:var(--crit)} .card.unk .cs{color:var(--unk)}
 .card.ack .cs{color:var(--ack)}
 .card .src{font-family:"Roboto Mono";font-size:11.5px;color:var(--mut);margin-top:3px;overflow-wrap:anywhere;word-break:normal}
+.card .src .psz{color:var(--ink);font-weight:700}
 .card .row{display:flex;gap:16px;margin-top:12px;flex-wrap:wrap}
 .card .mv{font-family:"Roboto Mono";font-weight:500;font-size:16px}
 .card .ml{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}
@@ -3203,6 +3204,9 @@ def _pair_card(v, capable=frozenset(), viewer=False):
     R = v["r"]; L = v["l"]; sev = SEVCLS.get(v["severity"], "unk")
     name = _esc(R["name"])
     subtitle = f'{_esc(R.get("source") or "")} &rarr; {_esc(v["dataset"])}'
+    dsz = R.get("logical_size") or L.get("logical_size")   # source dataset size (plan what fits an external)
+    if dsz:
+        subtitle += f' &middot; <b class=psz data-tip="dataset size (uncompressed)">{_cap(dsz)}</b>'
     meta = []   # tier now lives as a header badge (see below), not in the subtitle
     if R.get("encrypted") or L.get("encrypted"): meta.append("enc")
     if meta: subtitle += " &middot; " + " &middot; ".join(_esc(m) for m in meta)
