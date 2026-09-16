@@ -162,6 +162,81 @@ def _exlist(link):
     except (ValueError, TypeError):
         return []
 
+def _jobs_path():
+    return os.path.join(C._cairn_state_dir(), "detached-jobs.json")
+
+def _jobs_load():
+    try:
+        with open(_jobs_path()) as f:
+            return json.load(f) or {}
+    except (OSError, ValueError):
+        return {}
+
+def _jobs_save(d):
+    try:
+        p = _jobs_path()
+        with open(p + ".tmp", "w") as f:
+            json.dump(d, f)
+        os.replace(p + ".tmp", p)
+    except OSError:
+        pass
+
+def _jobs_add(iid, rec):
+    d = _jobs_load(); d[str(iid)] = rec; _jobs_save(d)
+
+def _jobs_del(iid):
+    d = _jobs_load()
+    if d.pop(str(iid), None) is not None:
+        _jobs_save(d)
+
+def _reap_detached():
+    # Report any detached backup whose done-marker has appeared. Survives an agent restart because
+    # the registry lives on disk; a job whose done-marker never shows (e.g. box rebooted mid-backup)
+    # keeps its files but is retried at 12h so the registry can't wedge forever.
+    d = _jobs_load()
+    if not d:
+        return
+    now = int(time.time())
+    for iid, rec in list(d.items()):
+        done, out = rec.get("done"), rec.get("out")
+        if not (done and os.path.exists(done)):
+            if now - int(rec.get("started", now)) > 43200:   # 12h with no marker -> give up, stop tracking
+                _cleanup_job(rec); _jobs_del(iid)
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                         {"ok": False, "output": "detached backup produced no completion marker within 12h (agent or box likely restarted mid-run)"})
+                print(f"  reap: job {iid} abandoned (no marker in 12h)")
+            continue
+        try:
+            rc = int(open(done).read().strip() or "1")
+        except (OSError, ValueError):
+            rc = 1
+        ok = rc == 0
+        try:
+            tail = open(out).read().strip()[-1600:] if out and os.path.exists(out) else ""
+        except OSError:
+            tail = ""
+        if ok:   # credit each dataset's freshness from the on-drive stamp the script wrote
+            for ds in rec.get("datasets", []):
+                try:
+                    ts = int(open(ds["stamp"]).read().strip())
+                except (OSError, ValueError):
+                    ts = now
+                api_call("POST", "/api/v1/backup/agent/removable-links",
+                         {"agent": NAME, "removable": rec.get("removable"), "op": "stamp", "dataset": ds["name"], "ts": ts})
+        api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                 {"ok": ok, "output": (tail or ("rc=" + str(rc)))[-1800:], "dryrun": False})
+        _cleanup_job(rec); _jobs_del(iid)
+        print(f"  reap: job {iid} {rec.get('removable')} backup-now -> {'ok' if ok else 'FAIL'} (rc={rc})")
+
+def _cleanup_job(rec):
+    for k in ("out", "done"):
+        p = rec.get(k)
+        for f in ((p, p + ".sh") if k == "out" else (p,)):
+            try:
+                if f: os.remove(f)
+            except OSError:
+                pass
+
 def do_execute(cfg):
     tmap = {t["name"]: t for t in cfg.get("targets", [])}
     res = api_call("GET", f"/api/v1/backup/intents?agent={NAME}") or {}
@@ -335,36 +410,47 @@ def do_execute(cfg):
                                                     exclude=_exlist(L)), srcp is not None))
             else:
                 jobs = [(None, t, bool(t.get("source")))]
-            head = ("[DRY-RUN] " if dry else "") + (f"log: {C._removable_log_path(t)}\n" if not dry else "")
-            oks, lines = [], []
+            if dry:   # dry-runs are quick and want immediate feedback -> stay synchronous
+                oks, lines = [], []
+                for ds, jt, have_src in jobs:
+                    label = ds or "source"
+                    if not have_src:
+                        oks.append(False); lines.append(f"{label}: FAIL (source not on this agent)"); continue
+                    cmd, err = C.build_command("backup-now", jt, opts)
+                    if err:
+                        oks.append(False); lines.append(f"{label}: FAIL ({err})"); continue
+                    rc, so, se = C.run(cmd, timeout=min(TIMEOUT, 1800))
+                    oks.append(rc == 0); lines.append(f"{label}: {'ok' if rc == 0 else 'FAIL'}\n{(so + se).strip()[-500:]}")
+                ok = all(oks) and bool(oks)
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                         {"ok": ok, "output": ("[DRY-RUN] " + "\n".join(lines))[-1800:], "dryrun": True})
+                print(f"  intent {iid} {target} backup-now [dry] -> {'ok' if ok else 'FAIL'}"); continue
+            # REAL backup: run ALL links in ONE detached shell script (setsid) so a long backup/mirror
+            # does NOT block the agent's report+intent loop. Result + per-dataset stamps are posted later
+            # by _reap_detached (survives an agent restart - the registry is on disk).
+            sd = C._cairn_state_dir(); jout = os.path.join(sd, f"job-{iid}.out"); jdone = os.path.join(sd, f"job-{iid}.done")
+            sl = ['ok=1']; ds_stamps = []
             for ds, jt, have_src in jobs:
                 label = ds or "source"
                 if not have_src:
-                    oks.append(False); lines.append(f"{label}: FAIL (dataset source not on this agent)"); continue
+                    sl.append(f'echo "{label}: FAIL (source not on this agent)"; ok=0'); continue
                 cmd, err = C.build_command("backup-now", jt, opts)
                 if err:
-                    oks.append(False); lines.append(f"{label}: FAIL ({err})"); continue
-                rc, so, se = C.run(cmd, timeout=TIMEOUT)
-                oks.append(rc == 0)
-                if rc == 0 and not dry:
-                    ts = int(time.time()); dest = C._removable_dest(jt)
-                    try:
-                        if dest:
-                            with open(os.path.join(dest, ".cairn-lastbackup"), "w") as f:
-                                f.write(str(ts))
-                    except OSError:
-                        pass
-                    C.removable_write_state(t, last_backup_ts=ts)
-                    if ds:   # record per-dataset freshness so the scorecard can credit this copy
-                        api_call("POST", "/api/v1/backup/agent/removable-links",
-                                 {"agent": NAME, "removable": target, "op": "stamp", "dataset": ds, "ts": ts})
-                tail = (so + se).strip()[-500:]
-                lines.append(f"{label}: {'ok' if rc == 0 else 'FAIL'}\n{tail}")
-            ok = all(oks) and bool(oks)
-            api_call("POST", f"/api/v1/backup/intents/{iid}/result",
-                     {"ok": ok, "output": (head + "\n".join(lines))[-1800:], "dryrun": dry})
-            print(f"  intent {iid} {target} backup-now{' [dry]' if dry else ''} -> "
-                  f"{'ok' if ok else 'FAIL'} ({sum(oks)}/{len(oks)} datasets)"); continue
+                    sl.append(f'echo "{label}: FAIL ({err})"; ok=0'); continue
+                dest = C._removable_dest(jt); stamp = os.path.join(dest, ".cairn-lastbackup") if dest else None
+                sl.append(f'echo "=== {label} ==="')
+                if stamp:
+                    sl.append(f'if {C.shlex.join(cmd)}; then date +%s > {C.shlex.quote(stamp)}; else ok=0; fi')
+                    if ds:
+                        ds_stamps.append({"name": ds, "stamp": stamp})
+                else:
+                    sl.append(f'{C.shlex.join(cmd)} || ok=0')
+            sl.append('[ "$ok" = 1 ]')   # the script's exit code = overall success
+            pid = C.spawn_detached("\n".join(sl), jout, jdone)
+            _jobs_add(iid, {"removable": target, "out": jout, "done": jdone, "datasets": ds_stamps,
+                            "started": int(time.time()), "log": C._removable_log_path(t)})
+            print(f"  intent {iid} {target} backup-now -> DETACHED pid={pid} ({len(jobs)} dataset(s))")
+            continue   # result + stamps posted later by _reap_detached
         cmd, err = C.build_command(action, t, opts)
         if err:
             api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": False, "output": err})
@@ -486,6 +572,10 @@ def main():
         except Exception as e:
             print(f"report failed: {e}")
         if CAN_EXEC:
+            try:
+                _reap_detached()   # post results for any detached backup that finished (before claiming new intents)
+            except Exception as e:
+                print(f"reap failed: {e}")
             try:
                 do_execute(cfg)
             except urllib.error.HTTPError as e:

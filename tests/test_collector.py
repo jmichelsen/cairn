@@ -553,3 +553,28 @@ def test_human_bytes():
     assert collector.human_bytes(1500000000000) == "1.5 TB"
     assert collector.human_bytes(4200000) == "4 MB"
     assert collector.human_bytes(0) == "0 B"
+
+
+def test_spawn_detached_runs_and_writes_markers(tmp_path):
+    import time as _t
+    out = str(tmp_path / "j.out"); done = str(tmp_path / "j.done")
+    pid = collector.spawn_detached('echo hello; exit 0', out, done)
+    assert pid
+    for _ in range(50):                       # setsid child finishes async; poll briefly
+        if os.path.exists(done):
+            break
+        _t.sleep(0.1)
+    assert open(done).read().strip() == "0"   # exit code captured
+    assert "hello" in open(out).read()        # stdout captured
+    assert os.path.exists(out + ".sh")        # script written 0700
+
+
+def test_spawn_detached_propagates_failure_rc(tmp_path):
+    import time as _t
+    out = str(tmp_path / "f.out"); done = str(tmp_path / "f.done")
+    collector.spawn_detached('exit 7', out, done)
+    for _ in range(50):
+        if os.path.exists(done):
+            break
+        _t.sleep(0.1)
+    assert open(done).read().strip() == "7"
