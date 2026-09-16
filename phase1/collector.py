@@ -295,8 +295,10 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
             st["severity"] = worst(st["severity"], "CRIT")
             reasons.append(f"last scrub found {scrub_info['scrub_errors']} error(s)")
     # dataset props + snapshot freshness
-    pr = zfs_props(ds, ["usedbysnapshots", "compressratio", "keystatus"])
+    pr = zfs_props(ds, ["usedbysnapshots", "compressratio", "keystatus", "logicalreferenced", "used"])
     st["usedbysnapshots"] = int(pr["usedbysnapshots"]) if pr.get("usedbysnapshots", "").isdigit() else None
+    st["logical_size"] = int(pr["logicalreferenced"]) if pr.get("logicalreferenced", "").lstrip("-").isdigit() else None
+    st["physical_size"] = int(pr["used"]) if pr.get("used", "").lstrip("-").isdigit() else None
     try:
         st["compressratio"] = float(pr.get("compressratio", "").rstrip("x"))
     except ValueError:
@@ -332,6 +334,8 @@ def adapter_zfs_repl(t, defaults, now, pools):
     ssnaps = zfs_snapshots(src); dsnaps = zfs_snapshots(dst)
     st["snap_age_src_s"] = newest_age(ssnaps, now)
     st["snap_age_dst_s"] = newest_age(dsnaps, now)
+    si = dataset_size_info(src)   # source dataset size for the pair card (plan what fits an external)
+    st["logical_size"] = si.get("src_bytes"); st["physical_size"] = si.get("src_used")
     reasons = []
     if not ssnaps or not dsnaps:
         dpool = (dst or "").split("/")[0]
