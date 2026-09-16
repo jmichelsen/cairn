@@ -91,6 +91,10 @@ The API never touches ZFS. A ZFS *action* tool can't avoid *some* write privileg
 run, but it lives only in an agent you opt into (`CAIRN_CAN_EXECUTE`); monitoring-only agents and the
 API are unprivileged.
 
+For a fuller picture - the intent/action queue, detached long jobs, zero-trust auth, adapters,
+replication pairing, and the off-site pull - see [docs/architecture.md](docs/architecture.md)
+(with topology, intent-lifecycle, and pairing diagrams).
+
 ## Status
 
 | Phase | What | State |

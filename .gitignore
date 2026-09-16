@@ -9,5 +9,8 @@ cairn.env
 # a deployer's real config (copies of the examples) - never commit
 config/targets.yaml
 config/*.env
+# generated vault enrollment bundle (holds the enroll secret) - never commit
+vault-install.conf
+.cairn-pull.log
 __pycache__/
 *.pyc
