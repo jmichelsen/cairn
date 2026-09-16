@@ -70,37 +70,48 @@ shopt -s nullglob
 for stray in /etc/backup.d/*.bm-bak; do
   mv -f "$stray" "$HBAK/$(basename "$stray")"; echo "  moved stray backup out of /etc/backup.d: $(basename "$stray")"
 done
-for h in /etc/backup.d/*.borg; do
-  # REPAIR: an earlier version added an inline '# ...' comment to create_options. backupninja
-  # interpolates the value into a shell command, so the '#' comments out the archive name + paths
-  # and `borg create` fails ("the following arguments are required: ARCHIVE, PATH"). Strip any
-  # trailing comment from a create_options line so the handler runs again. Must run BEFORE the
-  # "already sets --umask" skip, since a broken line still contains --umask.
-  if grep -Eq '^[[:space:]]*create_options[[:space:]]*=[^#]*#' "$h"; then
+# Set --umask 0027 on ONE option key of a handler (create_options / prune_options / compact_options).
+# WHY all three, not just create: borg runs create, prune and compact as SEPARATE processes, and each
+# reads only its OWN *_options; create_options does NOT carry to prune/compact. So `borg create` writes
+# 0640 group-readable segments while the prune/compact step (default --umask 0077) writes 0600 ones -
+# and since the repo index points at the NEWEST (prune/compact) segment, the agent hits EACCES on it and
+# the whole repo reads UNKNOWN. A retroactive chmod fixes it only until the next nightly prune. Setting
+# --umask on every borg subcommand is the durable fix. Adding an unused key is harmless: backupninja
+# ignores an unknown config key, and prune_options/compact_options on a handler that doesn't prune/compact
+# is simply never used.
+ensure_umask_opt() {   # $1=handler file, $2=option key
+  local h="$1" key="$2" b
+  # REPAIR: an earlier version could leave an inline '# ...' comment on the line. backupninja interpolates
+  # the value into a shell command, so a '#' comments out everything after it and borg fails. Strip it
+  # FIRST, before the "already has --umask" skip (a broken line still contains --umask).
+  if grep -Eq "^[[:space:]]*${key}[[:space:]]*=[^#]*#" "$h"; then
     b="$(bakof "$h")"; [ -e "$b" ] || cp -a "$h" "$b"
-    sed -i -E 's/^([[:space:]]*create_options[[:space:]]*=[^#]*[^#[:space:]])[[:space:]]*#.*$/\1/' "$h"
-    echo "  repaired create_options (removed an inline comment that broke borg create): $h"
+    sed -i -E "s/^([[:space:]]*${key}[[:space:]]*=[^#]*[^#[:space:]])[[:space:]]*#.*$/\1/" "$h"
+    echo "  repaired ${key} (removed an inline comment that broke borg): $h"
   fi
-  if grep -Eq '^[[:space:]]*create_options[[:space:]]*=.*--umask' "$h"; then
-    echo "  already sets --umask: $h"; continue
+  if grep -Eq "^[[:space:]]*${key}[[:space:]]*=.*--umask" "$h"; then
+    echo "  already sets --umask on ${key}: $h"; return 0
   fi
-  b="$(bakof "$h")"; cp -a "$h" "$b"
-  # NB: the backupninja borg handler reads create_options from the [source] section
-  # (setsection source -> getconf create_options), so it MUST live under [source], not EOF.
-  # NEVER put an inline '# comment' on this line - it is interpolated into a shell command.
-  if grep -Eq '^[[:space:]]*create_options[[:space:]]*=' "$h"; then
-    sed -i -E 's#^([[:space:]]*create_options[[:space:]]*=[[:space:]]*)#\1--umask 0027 #' "$h"
+  b="$(bakof "$h")"; [ -e "$b" ] || cp -a "$h" "$b"
+  # NB: the borg handler reads *_options from the [source] section (setsection source), so it MUST live
+  # under [source], not EOF. NEVER put an inline '# comment' on the line - it is shell-interpolated.
+  if grep -Eq "^[[:space:]]*${key}[[:space:]]*=" "$h"; then
+    sed -i -E "s#^([[:space:]]*${key}[[:space:]]*=[[:space:]]*)#\1--umask 0027 #" "$h"
   elif grep -Eq '^[[:space:]]*\[source\]' "$h"; then
-    sed -i -E '/^[[:space:]]*\[source\]/a create_options = --umask 0027' "$h"
+    sed -i -E "/^[[:space:]]*\[source\]/a ${key} = --umask 0027" "$h"
   else
-    echo "  WARN: no [source] section in $h - add 'create_options = --umask 0027' under [source] by hand"
-    rm -f "$b"; continue
+    echo "  WARN: no [source] section in $h - add '${key} = --umask 0027' under [source] by hand"; return 0
   fi
-  if grep -Eq '^[[:space:]]*create_options[[:space:]]*=.*--umask 0027' "$h"; then
-    echo "  patched: $h (backup: $b)"
+  if grep -Eq "^[[:space:]]*${key}[[:space:]]*=.*--umask 0027" "$h"; then
+    echo "  patched ${key}: $h"
   else
-    echo "  WARN: could not patch $h - add 'create_options = --umask 0027' by hand"; cp -a "$b" "$h"
+    echo "  WARN: could not patch ${key} in $h - add '${key} = --umask 0027' by hand"
   fi
+}
+for h in /etc/backup.d/*.borg; do
+  ensure_umask_opt "$h" create_options
+  ensure_umask_opt "$h" prune_options
+  ensure_umask_opt "$h" compact_options
 done
 shopt -u nullglob
 # undo the old, INEFFECTIVE cron-umask patch a prior version of this script may have added.
@@ -193,11 +204,15 @@ echo ""
 echo "DONE. Notes:"
 echo "  * Log out/in (or run 'exec su - \"\$USER\"') for the new group membership to take effect in your shell."
 if [ "$OPENED_BORG" -gt 0 ]; then
-  echo "  * borg repos: opened $OPENED_BORG repo(s) for group-read AND set 'create_options = --umask 0027' in"
-  echo "    each /etc/backup.d/*.borg, so FUTURE nightly segments are written group-readable. One-time change -"
-  echo "    the agent then reads borg with NO runtime sudo and won't regress nightly. Verify after the next run"
-  echo "    (restore-points non-zero on the dashboard):  sudo -u \"\$USER\" borg info --bypass-lock '$FIRST_BORG' | head"
-  echo "  * If a borg repo ever shows UNKNOWN again, it's leftover 0600 files from before the fix - re-run this once."
+  echo "  * borg repos: opened $OPENED_BORG repo(s) for group-read AND set '--umask 0027' on create_options,"
+  echo "    prune_options AND compact_options in each /etc/backup.d/*.borg, so EVERY borg subcommand (not just"
+  echo "    create) writes group-readable segments. WHY all three: create/prune/compact are separate borg"
+  echo "    processes; create_options alone left the newest (prune/compact) segment 0600 and the repo index"
+  echo "    points AT that segment -> the agent got EACCES on it and the repo read UNKNOWN, regressing every"
+  echo "    night no matter how often this script ran. Verify after the next nightly run (restore-points"
+  echo "    non-zero on the dashboard):  sudo -u \"\$USER\" borg info --bypass-lock '$FIRST_BORG' | head"
+  echo "  * If a borg repo still shows UNKNOWN after the NEXT run, check for a 0600 segment:"
+  echo "      find '$FIRST_BORG'/data -type f ! -perm -040 -printf '%M %p\\n'"
 fi
 if [ "$SMART_DETAIL" = 1 ]; then
   echo "  * SMART detail: wrapper + sudoers installed. Set CAIRN_SMART_DETAIL=1 on the agent unit and restart it"
