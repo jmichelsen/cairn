@@ -2546,8 +2546,17 @@ window.addEventListener('load', refreshHeader);
 setInterval(refreshHeader, 20000);
 // ---- click a header count to filter the fleet to that severity (toggle) ----
 var _filter=null;
+function restoreAgentTab(){   // re-apply the active agent tab (used when a severity filter clears)
+  var s; try{ s=localStorage.getItem('bm_agtab'); }catch(e){}
+  var t=(s && document.querySelector('[data-agpane="'+s+'"]'))?s:null;
+  if(!t){ var a=document.querySelector('[data-agtab].active'); t=a&&a.getAttribute('data-agtab'); }
+  if(t) showAgent(t);
+}
 function applyFilter(){
   var f=_filter;
+  // the hero counts are GLOBAL (all agents), so a severity filter must span every agent tab, not just
+  // the active one - reveal all agent panes while filtering, restore the active tab when it clears.
+  if(f) document.querySelectorAll('[data-agpane]').forEach(function(p){ p.hidden=false; });
   document.querySelectorAll('.card').forEach(function(c){
     c.style.display = (!f || c.classList.contains(f)) ? '' : 'none';
   });
@@ -2557,6 +2566,12 @@ function applyFilter(){
     for(var i=0;i<cs.length;i++){ if(cs[i].style.display!=='none'){ vis=true; break; } }
     sec.style.display = vis ? '' : 'none';
   });
+  if(f){ document.querySelectorAll('[data-agpane]').forEach(function(p){   // hide an agent pane with no matches
+      var vis=false, cs=p.querySelectorAll('.card');
+      for(var i=0;i<cs.length;i++){ if(cs[i].style.display!=='none'){ vis=true; break; } }
+      p.hidden=!vis;
+    });
+  } else { restoreAgentTab(); }
   document.querySelectorAll('.sumchip[data-sev]').forEach(function(ch){
     ch.classList.toggle('active', f===ch.getAttribute('data-sev'));
   });
