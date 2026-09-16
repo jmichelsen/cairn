@@ -321,8 +321,8 @@ def adapter_zfs_repl(t, defaults, now, pools):
     reasons = []
     if not ssnaps or not dsnaps:
         dpool = (dst or "").split("/")[0]
-        if dpool and dpool not in pools:           # the whole dest pool is gone/exported
-            reason = f"dest pool '{dpool}' not imported"
+        if dpool and dpool not in pools:           # dest pool absent locally: on another host (paired
+            reason = f"dest '{dst}' not on this host"   # across the net) or genuinely gone - pairing decides
         elif not dsnaps:
             reason = "dest has no snapshots (replication never ran?)"
         else:
