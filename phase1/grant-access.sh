@@ -130,6 +130,13 @@ if [ -f "$CRON" ] && grep -q 'umask 0027; ' "$CRON"; then
   echo "  removed the old no-op cron umask patch from $CRON (backup: $(bakof "$CRON"))"
 fi
 
+# `!requiretty` is meaningful ONLY to classic sudo, and only where a global `requiretty` is set.
+# sudo-rs (Ubuntu 26.04+) has no such setting: it warns "unknown setting: requiretty" on EVERY sudo
+# invocation if the line appears in any sudoers file, and it never requires a tty. So decide by the
+# RUNTIME sudo (not whichever visudo is in PATH) - emit the line only for classic sudo. The visudo -cf
+# checks below stay as a second safety net.
+if sudo --version 2>/dev/null | grep -qi 'sudo-rs'; then USE_REQTTY=0; else USE_REQTTY=1; fi
+
 if [ "$SCRUB_EXEC" = 1 ]; then
   echo "== zpool scrub: scoped sudoers for the scrub wrapper (OPT-IN --scrub, execute-capable hosts) =="
   SCRUB_SRC="$(dirname "$0")/zpool-scrub.sh"
@@ -143,7 +150,7 @@ if [ "$SCRUB_EXEC" = 1 ]; then
       [ "${1:-1}" = 1 ] && echo "Defaults:$U !requiretty"
       echo "$U ALL=(root) NOPASSWD: $OPT/zpool-scrub.sh"; } > "$SUDO_TMP"
   }
-  write_scrub_sudoers 1
+  write_scrub_sudoers "$USE_REQTTY"
   visudo -cf "$SUDO_TMP" >/dev/null 2>&1 || { echo "  (this sudo rejects !requiretty - omitting it; it isn't needed here)"; write_scrub_sudoers 0; }
   if visudo -cf "$SUDO_TMP" >/dev/null; then
     install -o root -g root -m 0440 "$SUDO_TMP" /etc/sudoers.d/cairn-scrub
@@ -181,7 +188,7 @@ if [ "$SMART_DETAIL" = 1 ]; then
       [ "${1:-1}" = 1 ] && echo "Defaults:$U !requiretty"
       echo "$U ALL=(root) NOPASSWD: $OPT/smart-probe.sh"; } > "$SUDO_TMP"
   }
-  write_sudoers 1
+  write_sudoers "$USE_REQTTY"
   visudo -cf "$SUDO_TMP" >/dev/null 2>&1 || { echo "  (this sudo rejects !requiretty - omitting it; it isn't needed here)"; write_sudoers 0; }
   if visudo -cf "$SUDO_TMP" >/dev/null; then
     install -o root -g root -m 0440 "$SUDO_TMP" /etc/sudoers.d/cairn-smart
