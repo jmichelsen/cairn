@@ -148,6 +148,39 @@ def zpool_status_detail(pool):
                     d["err_vdevs"].append((name, r, w, ck))
     return d
 
+def _live_vdev_index():
+    """(pool_health, vdev_bases): the CURRENT pool healths {pool: HEALTH} and the set of
+    (pool, base-name) leaf vdevs in the live zpool config, with any trailing -partN stripped (zed
+    events name the data PARTITION, e.g. wwn-...-part1, while `zpool status` names the whole disk).
+    Used to suppress phantom zed alerts for a vdev NAME that is no longer a pool member: after a
+    by-id rename (e.g. the 26.04 scsi-SATA_* -> wwn-* migration) zed logged the OLD name UNAVAIL and
+    it never returned ONLINE under that name, so its net-current state reads UNAVAIL forever even
+    though the disk is back ONLINE under the new name and the pool is healthy."""
+    health, vdevs = {}, set()
+    rc, out, _ = run(["zpool", "list", "-H", "-o", "name,health"])
+    if rc == 0:
+        for ln in out.splitlines():
+            f = ln.split("\t")
+            if len(f) >= 2:
+                health[f[0]] = f[1].strip().upper()
+    STATES = ("ONLINE", "DEGRADED", "FAULTED", "OFFLINE", "UNAVAIL", "REMOVED", "SPARE", "REPLACING")
+    for pool in health:
+        rc, out, _ = run(["zpool", "status", pool])
+        if rc != 0:
+            continue
+        in_table = False
+        for ln in out.splitlines():
+            s = ln.strip()
+            if s.startswith("NAME") and "STATE" in s:
+                in_table = True; continue
+            if in_table:
+                if not s or s.startswith("errors:"):
+                    in_table = False; continue
+                p = s.split()
+                if len(p) >= 5 and p[1] in STATES and p[0] != pool:
+                    vdevs.add((pool, re.sub(r"-part\d+$", "", p[0])))
+    return health, vdevs
+
 def zfs_snapshots(ds):
     """[(name, guid, creation_epoch)] oldest->newest for a dataset (non-recursive)."""
     rc, out, _ = run(["zfs", "list", "-Hp", "-t", "snapshot", "-o", "name,guid,creation",
@@ -1136,6 +1169,7 @@ def adapter_zfs_events(t, defaults, now):
     # Severity reflects CURRENT concern, not historical churn: a vdev that flapped but ended ONLINE
     # is resolved (and the pool's resilver-WARN already flagged it) - don't re-alert on the history.
     sev, reasons, recent = "OK", [], now - alert_h * 3600
+    pool_health, live_vdevs = _live_vdev_index()
     latest_vstate = {}
     for e in sorted(events, key=lambda x: x["ts"]):
         if "statechange" in e["cls"] and e.get("vstate"):
@@ -1143,6 +1177,12 @@ def adapter_zfs_events(t, defaults, now):
     for (pool, vdev), (vs, ts) in latest_vstate.items():
         if ts < recent:
             continue                                   # the net-current state settled outside the window
+        # Phantom-vdev guard: a bad state for a vdev NAME that is no longer a member of a currently-
+        # ONLINE pool is a renamed/removed device (e.g. 26.04 scsi-SATA_* -> wwn-*), not a live fault.
+        # Never suppresses a real fault: that leaves the pool non-ONLINE, or keeps the name a member.
+        base = re.sub(r"-part\d+$", "", vdev) if vdev else vdev
+        if vdev and (pool, base) not in live_vdevs and pool_health.get(pool, "ONLINE") == "ONLINE":
+            continue
         if vs in ("FAULTED", "UNAVAIL", "REMOVED"):
             sev = worst(sev, "CRIT"); reasons.append(f"{vdev or '?'} {vs} on {pool or '?'}")
         elif vs == "DEGRADED":
