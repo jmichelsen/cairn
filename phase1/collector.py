@@ -1070,6 +1070,39 @@ def adapter_kernel_errors(t, defaults, now):
         st["severity"] = "WARN"; st["last_error"] = f"HBA rescan storm: {rescans} target rescans in {win}h"
     return [st]
 
+def adapter_reachability(t, defaults, now):
+    """Probe that a remote host answers over SSH - used on the VAULT to prove it can still reach HOME
+    over the VPN. The vault reports this to cairn over the netbird-INDEPENDENT public HTTPS control
+    plane, so a VPN/netbird outage BETWEEN vault and home is still deliverable as an alert (a WARN/CRIT
+    status triggers dispatch_alert). Retries absorb a lazy-VPN cold-start blip (netbird drops the first
+    packet on an idle tunnel); only a genuine outage fails every try -> CRIT. Config:
+      { name: home-link, type: reachability, host: user@home, key: /path/key, tries: 3, retry_wait_s: 5 }
+    `host` (or `ssh`) = user@host or host; `probe` defaults to `true` (permitted by pull-command.sh, so
+    reusing the pull key + host tests the EXACT pull path: route -> sshd -> auth -> forced command)."""
+    host = t.get("host") or t.get("ssh")
+    if not host:
+        return [dict(severity="UNKNOWN", last_error="reachability target needs 'host' (user@host)")]
+    tries = int(t.get("tries", 3)); wait = int(t.get("retry_wait_s", 5))
+    ctimeout = int(t.get("connect_timeout_s", 10)); probe = str(t.get("probe", "true"))
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={ctimeout}",
+           "-p", str(t.get("port", 22))]
+    if t.get("key"):
+        cmd += ["-i", str(t["key"])]
+    cmd += [host, probe]
+    last = ""
+    for i in range(1, tries + 1):
+        rc, out, err = run(cmd, timeout=ctimeout + 5)
+        if rc == 0:
+            return [dict(severity="OK",
+                         detail_json=json.dumps(dict(host=host, attempt=i, tries=tries, probe=probe)))]
+        msg = (err or out or f"exit {rc}").strip()
+        last = msg.splitlines()[-1] if msg else f"exit {rc}"
+        if i < tries:
+            time.sleep(wait)
+    return [dict(severity="CRIT",
+                 last_error=f"cannot reach {host} after {tries} tries: {last}",
+                 detail_json=json.dumps(dict(host=host, tries=tries, probe=probe, last_error=last)))]
+
 def adapter_zfs_events(t, defaults, now):
     """A ZFS event timeline from zed's journal (the all-syslog.sh zedlet). Portable: needs only a
     default OpenZFS + systemd box, no custom script. Lists recent pool events (scrub/resilver,
@@ -1768,6 +1801,8 @@ def collect_all(cfg, now=None):
                 sts = adapter_schedules(t, defaults, now)
             elif typ == "zfs-events":
                 sts = adapter_zfs_events(t, defaults, now)
+            elif typ == "reachability":
+                sts = adapter_reachability(t, defaults, now)
             else:
                 sts = [dict(severity="UNKNOWN", last_error=f"unknown type {typ}")]
         except Exception as e:

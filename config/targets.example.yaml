@@ -77,6 +77,14 @@ targets:
   #     bad vdev or recent checksum/io/data errors (a resolved flap stays in the log as history). ---
   - { name: zfs-events, type: zfs-events, window_h: 168, alert_h: 48 }
 
+  # --- reachability: SSH-probe a remote host and alert if it can't be reached. Intended for an
+  #     OFF-SITE agent to prove it can still reach HOME over the VPN - it reports to cairn over the
+  #     public HTTPS control plane (independent of the VPN it is probing), so a VPN outage between
+  #     the two is still deliverable as an alert. Retries absorb a lazy-VPN cold-start; CRIT only
+  #     when every try fails. `probe: true` works through a restricted forced-command send key. ---
+  # - { name: home-link, type: reachability, host: user@home, key: /home/user/.ssh/pull-key,
+  #     tries: 3, retry_wait_s: 5, connect_timeout_s: 10 }
+
   # --- scheduled ZFS jobs from systemd timers (syncoid replication, sanoid snapshots): surfaces
   #     what each backs up, its schedule, and next/last run. Read via systemctl, no root. ---
   - { name: schedules, type: schedules }
