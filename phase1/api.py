@@ -2467,91 +2467,59 @@ async function toggleHist(btn, target){
   loadHist(target, box);
 }
 // ---- live refresh: cards + open History poll status in the background ----
-function metricRowHtml(r){
-  var p='';
-  if(r.pool_cap_pct!=null) p+='<div><div class="mv">'+r.pool_cap_pct+'%</div><div class="ml">capacity</div></div>';
-  if(r.repl_lag_s!=null) p+='<div><div class="mv">'+Math.floor(r.repl_lag_s/3600)+'h</div><div class="ml">repl lag</div></div>';
-  if(r.archive_count!=null) p+='<div><div class="mv">'+r.archive_count+'</div><div class="ml">archives</div></div>';
-  if(r.dedup_ratio!=null) p+='<div><div class="mv">'+r.dedup_ratio+'\\u00d7</div><div class="ml">dedup</div></div>';
-  return p;
-}
+// ONE generic refresh: fetch the server-rendered cards (same renderers as the page, via /cards) and
+// swap each whole card in place by its stable id. There is deliberately NO per-field or per-card-type
+// patching here anymore - a new card type or a new field is live the moment the server renders it. The
+// only thing the swap must carry across is CLIENT-only state the server can't know: which collapsible
+// panels the viewer has expanded, and the in-flight 'busy' marker (kept in the _busy ledger).
 var _SEVC={CRIT:'crit',WARN:'warn',UNKNOWN:'unk',OK:'ok'};
-var _cardSev={};
-function fmtAge(s){ s=Math.max(0,Math.round(+s||0));   // mirrors server _ago_s: Ns / Nm / Nh / Nd
-  if(s<90) return s+'s'; if(s<5400) return Math.round(s/60)+'m';
-  if(s<172800) return Math.round(s/3600)+'h'; return Math.round(s/86400)+'d'; }
-function updatePairHalf(c, r){   // keep one half's dot + severity word + snapshot age live inside a pair card
-  var h=c.querySelector('.phalf[data-half="'+String(r.agent||'').replace(/"/g,'')+'"]'); if(!h) return;
-  var sev=(r.severity||'').toUpperCase(), age=r.snap_age_src_s;
-  if(h.getAttribute('data-role')==='source' && sev==='UNKNOWN' && age!=null)   // show source's real freshness
-    sev = age>=50*3600?'CRIT' : age>=28*3600?'WARN' : 'OK';                     // (matches server half())
-  var dot=h.querySelector('.pd'); if(dot) dot.style.background='var(--'+(_SEVC[sev]||'unk')+')';
-  var sv=h.querySelector('.psev'); if(sv) sv.textContent=sev;
-  var ag=h.querySelector('.page'); if(ag) ag.textContent=(age!=null?(fmtAge(age)+' old'):'no snapshot');
+var _sevRank={ok:0,ack:0,unk:1,warn:2,crit:3};
+function _cardSevClass(c){ var m=(c.className||'').match(/\\b(crit|warn|unk|ack|ok)\\b/); return m?m[1]:'unk'; }
+function _snapCard(c){   // capture expanded panels before a swap: History (reloads) + toggles (Job log/SMART)
+  var togs=c.querySelectorAll('.histbtn:not([data-t])'), open=[];
+  togs.forEach(function(b,i){ if(b.classList.contains('open')) open.push(i); });
+  return { hist: !!c.querySelector('.histbtn.open[data-t]'), tog: open };
 }
-function capBytes(b){ b=+b||0; if(!b) return '-';   // mirrors server _cap (1000-based)
-  if(b>=1e12) return (b/1e12).toFixed(1)+' TB'; if(b>=1e9) return Math.round(b/1e9)+' GB'; return Math.round(b/1e6)+' MB'; }
+function _restoreCard(c, snap, target){   // re-open the same panels on the freshly-swapped card
+  if(snap.hist){ var hb=c.querySelector('.histbtn[data-t]');
+    if(hb){ hb.classList.add('open'); var box=hb.nextElementSibling; if(box) box.hidden=false; } }
+  var togs=c.querySelectorAll('.histbtn:not([data-t])');
+  snap.tog.forEach(function(i){ var b=togs[i]; if(!b) return; b.classList.add('open');
+    var sd=b.parentNode.querySelector('.smdet'); if(sd) sd.hidden=false; });
+  if(_busy[target]>0) c.classList.add('busy');   // busy state lives in the _busy ledger, not the swapped DOM
+}
+function _paneEscalate(c, oldCls){   // a card worsening while its pane is collapsed flags the pane's dot
+  var cls=_cardSevClass(c);
+  if((_sevRank[cls]||0)>(_sevRank[oldCls]||0) && (cls==='warn'||cls==='crit')){
+    var sec=c.closest('.pane.grp'); if(sec && sec.classList.contains('collapsed')) sec.classList.add('alerted');
+  }
+}
 async function refreshCards(){
-  var j; try{ j=await (await fetch('/api/v1/backup/status')).json(); }catch(e){ return; }
-  (j.targets||[]).forEach(function(r){
-   // querySelectorAll, not querySelector: a PAIR card is duplicated into BOTH agent tabs, so update every
-   // copy (the old single-match left the other tab's copy stale until a full reload).
-   document.querySelectorAll('.card[data-t="'+String(r.name).replace(/"/g,'')+'"]').forEach(function(c){
-    // A replication PAIR card shows BOTH halves (home + off-site). Keep every half's dot/severity/age
-    // live, but let only the OFF-SITE half drive the card-level chip - the home half is structurally
-    // UNKNOWN and the server already defers the pair severity to the off-site copy, so the home row must
-    // not clobber the chip (it still updates its own half above).
-    if(c.classList.contains('pair')){
-      updatePairHalf(c, r);
-      if(c.getAttribute('data-off') && (r.agent||'')!==c.getAttribute('data-off')) return;
-    }
-    var cls=r.acked?'ack':(_SEVC[(r.severity||'').toUpperCase()]||'unk');
-    var key=(r.agent||'')+'/'+r.name;            // per-(agent,name): a repl PAIR has TWO status rows
-    var prev=_cardSev[key]; _cardSev[key]=cls;   // (home + vault) sharing a name - don't flap between them
-    var rk={ok:0,ack:0,unk:1,warn:2,crit:3};
-    if(prev!==undefined && (rk[cls]||0)>(rk[prev]||0) && (cls==='warn'||cls==='crit')){
-      var sec=c.closest('.pane.grp');            // only an ESCALATION to a problem pings a collapsed pane
-      if(sec && sec.classList.contains('collapsed')) sec.classList.add('alerted');
-    }
-    // preserve card VARIANTS when rebuilding className - dropping 'pair' both broke the pair layout AND
-    // disabled the data-off guard below (it's gated on .pair), letting a home half's UNKNOWN clobber the
-    // deferred pair severity on the next row/refresh.
-    var keep=(c.classList.contains('busy')?' busy':'')+(c.classList.contains('smartcard')?' smartcard':'')
-            +(c.classList.contains('pair')?' pair':'');
-    c.className='card '+cls+keep;   // updates the severity stripe, preserving card variants
-    var cs=c.querySelector('.cs'); if(cs) cs.textContent=r.acked?'ACK\u2019D':(r.severity||'').toUpperCase();
-    var mr=metricRowHtml(r), rowEl=c.querySelector('.row');
-    if(mr && rowEl) rowEl.innerHTML=mr; else if(!mr && rowEl) rowEl.remove();
-    var d=r.detail||{}, why=(d.reasons&&d.reasons.length)?d.reasons.join(', '):(r.last_error||'');
-    var whyEl=c.querySelector('.why'); if(whyEl) whyEl.textContent=why;
-    // removable card: keep the "drive: X free of Y" line live (it used to only refresh on a full reload)
-    var rf=c.querySelector('.rl-free');
-    if(rf && d.free_bytes!=null && d.total_bytes!=null)
-      rf.textContent='drive: '+capBytes(d.free_bytes)+' free of '+capBytes(d.total_bytes);
-    // live scrub state: disable/relabel the Scrub button + show/update the progress bar
-    var sc=d.scrub||{}, running=(sc.state==='in_progress');
-    var sb=c.querySelector('[data-scrub]');
-    if(sb){
-      if(running){ sb.disabled=true; sb.removeAttribute('onclick');
-        sb.textContent=(sc.pct!=null)?('Scrubbing… '+Math.round(sc.pct)+'%'):'Scrubbing…'; }
-      else{ sb.disabled=false; sb.textContent='Scrub';
-        sb.setAttribute('onclick',"act('"+String(r.name).replace(/'/g,"\\'")+"','scrub',true)"); }
-    }
-    var sp=c.querySelector('[data-scrubprog]');
-    if(sp){
-      if(running){ sp.hidden=false;
-        var fill=sp.querySelector('[data-scrubfill]'); if(fill&&sc.pct!=null) fill.style.width=sc.pct+'%';
-        var lbl=sp.querySelector('[data-scrublbl]');
-        if(lbl){ var tx='scrubbing'+(sc.pct!=null?(' '+Number(sc.pct).toFixed(1)+'%'):'')+(sc.eta?(' · '+sc.eta+' to go'):''); lbl.textContent=tx; }
-      } else { sp.hidden=true; }
-    }
-   });
-  });
-  document.querySelectorAll('.histbtn.open[data-t]').forEach(function(btn){   // keep open History current
-    var box=btn.nextElementSibling, target=btn.getAttribute('data-t');       // ([data-t] excludes SMART-detail toggles)
+  var j; try{ j=await (await fetch('/api/v1/backup/cards')).json(); }catch(e){ return; }
+  var seen={};
+  (j.tabs||[]).forEach(function(tab){ (tab.panes||[]).forEach(function(p){
+    var cont=document.getElementById(p.container);
+    (p.cards||[]).forEach(function(cd){
+      seen[cd.cid]=1;
+      var el=document.getElementById(cd.cid);
+      if(el){
+        var oldCls=_cardSevClass(el), snap=_snapCard(el), target=el.getAttribute('data-t');
+        el.outerHTML=cd.html;                            // full swap: the whole card from the server renderer
+        var neu=document.getElementById(cd.cid);
+        if(neu){ _restoreCard(neu, snap, target); _paneEscalate(neu, oldCls); }
+      } else if(cont){
+        cont.insertAdjacentHTML('beforeend', cd.html);   // a card that just appeared (new target/agent)
+      }
+    });
+  }); });
+  // a card that vanished from the model (target retired/hidden/removed) is dropped from the DOM
+  document.querySelectorAll('.card[id^="cc-"]').forEach(function(c){ if(!seen[c.id]) c.remove(); });
+  // open History panels hold action rows loaded separately (not part of the swapped card) - keep current
+  document.querySelectorAll('.histbtn.open[data-t]').forEach(function(btn){
+    var box=btn.nextElementSibling, target=btn.getAttribute('data-t');
     if(box && !box.hidden && target) loadHist(target, box);
   });
-  if(typeof applyFilter==='function') applyFilter();   // re-honor an active severity filter after re-render
+  if(typeof applyFilter==='function') applyFilter();   // re-honor an active severity filter after the swap
 }
 window.addEventListener('load', refreshCards);
 setInterval(refreshCards, 20000);
@@ -3123,7 +3091,7 @@ def _agent_card(a, viewer=False, tab=None, active=False):
             f'<div class=jrow><span class=jk>reports</span><span class=jv>every {ivl}</span></div>'
             f'{ver_html}</div></div>')
 
-def _smart_card(r):
+def _smart_card(r, cid=""):
     """A per-drive pill: identity + the stats that matter at a glance, expandable to the full
     SMART attribute table (Scrutiny-style). Data is served from the collector's TTL cache."""
     d = json.loads(r.get("detail_json") or "{}")
@@ -3183,7 +3151,8 @@ def _smart_card(r):
     else:
         ack_html = ""
     probed = f'<span class=smprobe data-tip="SMART is cached and refreshed periodically, not on every poll">read {_ago(d.get("probed_ts"))}</span>' if d.get("probed_ts") else ""
-    return (f'<div class="card smartcard {card_cls}" data-t="{n}"><div class="ch">'
+    idattr = f' id="{cid}"' if cid else ""
+    return (f'<div class="card smartcard {card_cls}"{idattr} data-t="{n}"><div class="ch">'
             f'<span class="cn">{devname}</span><span class="chr">'
             f'<span class="cbusy" data-tip="action running"></span><span class="cs">{cs_text}</span></span></div>'
             f'<div class="src">{ident}</div><div class="skpirow">{kpi}</div>{why_html}{ack_html}'
@@ -3196,7 +3165,7 @@ PAIR_ICON = (  # two linked nodes with an arrow: source -> off-site copy (data r
     '<circle cx="5" cy="12" r="2.6"/><circle cx="19" cy="12" r="2.6"/>'
     '<path d="M7.6 12h8.8"/><path d="M14 9.2l2.6 2.8-2.6 2.8"/></svg>')
 
-def _pair_card(v, capable=frozenset(), viewer=False):
+def _pair_card(v, capable=frozenset(), viewer=False, cid=""):
     """One merged card for a guaranteed replication pair: the source->dest relationship up top, then
     each half (the sending agent + the off-site copy) with its own severity and snapshot freshness.
     If the off-site agent is execute-capable, an admin gets a 'Replicate now' button that queues an
@@ -3239,7 +3208,8 @@ def _pair_card(v, capable=frozenset(), viewer=False):
                     f"'{_esc(L['name'])}','{_esc(L['agent'])}')\">Replicate now</button>"
                     '<button onclick="replicateNow('
                     f"'{_esc(L['name'])}','{_esc(L['agent'])}',true)\">dry-run</button></div>")
-    return (f'<div class="card pair {sev}" data-t="{name}" data-off="{_esc(L.get("agent") or "")}"><div class=ch>'
+    idattr = f' id="{cid}"' if cid else ""
+    return (f'<div class="card pair {sev}"{idattr} data-t="{name}" data-off="{_esc(L.get("agent") or "")}"><div class=ch>'
             f'<span class=cn>{PAIR_ICON}{name}{_tier_badge(R.get("tier"))}</span><span class=chr>'
             f'<span class="cbusy" data-tip="pull running"></span>'
             f'<span class=pbadge>replication pair</span><span class=cs>{_esc(v["severity"])}</span></span></div>'
@@ -3412,7 +3382,7 @@ def _removable_links_html(r, viewer=False):
     return (f'<div class=rlinks><div class=rl-hd>Datasets on this drive{fit_note}</div>'
             f'{body}{controls}</div>')
 
-def _card(r, can_act, viewer=False):
+def _card(r, can_act, viewer=False, cid=""):
     nm = r["name"]; n = _esc(nm); sev = SEVCLS.get(r["severity"], "unk")
     src = r.get("source") or ""
     src_line = f"{src} → {r['dest']}" if r.get("dest") else src
@@ -3503,7 +3473,8 @@ def _card(r, can_act, viewer=False):
     hide_html = "" if (viewer or not r.get("target_id")) else (
         f'<button class=hidebtn onclick="hideTarget({int(r["target_id"])})" '
         f'data-tip="stop monitoring this target (restore it from the Hidden section)">Hide</button>')
-    return (f'<div class="card {card_cls}" data-t="{n}"><div class="ch"><span class="cn">{title}{_tier_badge(r.get("tier"))}</span>'
+    idattr = f' id="{cid}"' if cid else ""
+    return (f'<div class="card {card_cls}"{idattr} data-t="{n}"><div class="ch"><span class="cn">{title}{_tier_badge(r.get("tier"))}</span>'
             f'<span class="chr"><span class="cbusy" data-tip="action running"></span>'
             f'<span class="cs">{cs_text}</span></span></div>{src_html}{sched_html}{c321_html}{mr_html}{scrub_html}{why_html}'
             f'{ack_html}{_acts(r, can_act, viewer)}{_removable_links_html(r, viewer)}'
@@ -3594,18 +3565,93 @@ def _shell(inner):
             f'<a href="https://github.com/jmichelsen/cairn" target=_blank rel=noopener>source on GitHub</a>'
             f"</footer></div>{PAGE_SCRIPT}</body></html>")
 
+def _slug(s):
+    return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
+
+def _live_model(conn, viewer):
+    """The ordered dashboard model, shared by the full page (index) AND the /cards live-refresh
+    endpoint so the two can never drift. Returns (rows, pair_views, capable, agent_order) with pair
+    halves already removed from rows and rows sorted into card order."""
+    rows = latest_status(conn)
+    capable = {x["name"] for x in conn.execute(
+        "SELECT name FROM agents WHERE can_execute=1").fetchall()}
+    pair_views, paired_keys = pairing(conn, rows)
+    rows = [r for r in rows if (r["agent"], r["name"]) not in paired_keys]  # halves render as one pair card
+    multi_agent = len({r.get("agent") for r in rows}) > 1
+    rows.sort(key=lambda r: ((r.get("agent") or "~") if multi_agent else "", _group(r)[0], r["name"]))
+    agents = agent_states(conn)
+    tcount = {}
+    for r in rows:
+        k = r.get("agent") or "?"; tcount[k] = tcount.get(k, 0) + 1
+    agent_order = sorted(agents, key=lambda a: (-tcount.get(a["name"], 0), a["name"]))
+    return rows, pair_views, capable, agent_order
+
+def _pane_container_id(pid):
+    return "cards-" + _slug(pid)
+
+def _tab_panes(subset, my_pairs, agslug, capable, viewer):
+    """The ORDERED panes for one agent tab: a Replication pane (if any pairs) then type-grouped panes.
+    Each pane = {pid, label, cards:[{cid, html}]}; every card carries a stable per-tab id so the live
+    refresh can swap the whole server-rendered card (single source of truth) instead of hand-patching
+    individual fields. A new card TYPE wired into _card / a new renderer is live automatically."""
+    def _cid(name): return f"cc-{agslug}-{_slug(name)}"
+    panes = []
+    if my_pairs:
+        pv = sorted(my_pairs, key=lambda v: (SEV_ORDER.get(v["severity"], 9), v["r"]["name"]))
+        cards = [{"cid": _cid(v["r"]["name"]),
+                  "html": _pair_card(v, capable, viewer, cid=_cid(v["r"]["name"]))} for v in pv]
+        panes.append({"pid": f"grp:{agslug}:replication", "label": "Replication", "cards": cards})
+    cur, pane = None, None
+    for r in sorted(subset, key=lambda r: (_group(r)[0], r["name"])):
+        g = _group(r)[1]
+        if g != cur:
+            pane = {"pid": f"grp:{agslug}:{_slug(g)}", "label": g, "cards": []}
+            panes.append(pane); cur = g
+        cid = _cid(r["name"])
+        html = _smart_card(r, cid=cid) if r["type"] == "smart" \
+            else _card(r, (r.get("agent") in capable) and not viewer, viewer, cid=cid)
+        pane["cards"].append({"cid": cid, "html": html})
+    return panes
+
+def _wrap_pane(p):
+    """Render one pane dict (from _tab_panes) as the collapsible section HTML for the full page. The
+    .cards container gets a stable id so the live refresh can insert a newly-appeared card into it."""
+    inner = "".join(c["html"] for c in p["cards"])
+    return (f'<section class="pane grp" data-pane="{_esc(p["pid"])}">'
+            f'<button class="paneh" onclick="togglePane(\'{_esc(p["pid"])}\')">'
+            f'<span class=pt>{_esc(p["label"])}</span><span class=pdot></span>'
+            f'<span class=pchev>&#9662;</span></button>'
+            f'<div class=pbody><div class="cards" id="{_pane_container_id(p["pid"])}">{inner}</div></div></section>')
+
+@app.get("/api/v1/backup/cards")
+def cards_fragment(request: Request):
+    """Live-refresh source of truth: the SAME cards the page renders, as fully-populated HTML keyed by
+    a stable per-tab id, grouped by tab -> pane. The client swaps each card's outerHTML in place (and
+    inserts/removes on appearance/disappearance), so every field on every card type stays current with
+    zero per-card JS. Shape: {tabs:[{tab, panes:[{pid, container, cards:[{cid, html}]}]}]}."""
+    viewer = getattr(request.state, "role", "admin") == "viewer"
+    with db() as conn:
+        rows, pair_views, capable, agent_order = _live_model(conn, viewer)
+    out = []
+    for a in agent_order:
+        ag = a["name"]; agslug = _slug(ag) or "agent"
+        subset = [r for r in rows if (r.get("agent") or "?") == ag]
+        my_pairs = [v for v in pair_views
+                    if v["r"].get("agent") == ag or v["l"].get("agent") == ag]
+        panes = _tab_panes(subset, my_pairs, agslug, capable, viewer)
+        out.append({"tab": agslug, "panes": [
+            {"pid": p["pid"], "container": _pane_container_id(p["pid"]), "cards": p["cards"]}
+            for p in panes]})
+    return {"tabs": out}
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     viewer = getattr(request.state, "role", "admin") == "viewer"
     with db() as conn:
-        rows = latest_status(conn)
-        capable = {x["name"] for x in conn.execute(
-            "SELECT name FROM agents WHERE can_execute=1").fetchall()}
-        agents = agent_states(conn)
+        rows, pair_views, capable, agent_order = _live_model(conn, viewer)
+        agents = agent_order
         overlaps = find_overlaps(conn)
-        pair_views, paired_keys = pairing(conn, rows)
         retired = [] if viewer else _retired_rows(conn)   # for the Hidden pane (admins can restore)
-    rows = [r for r in rows if (r["agent"], r["name"]) not in paired_keys]  # halves render as one pair card
     h = health()
     if not rows:
         return _shell(
@@ -3615,9 +3661,7 @@ def index(request: Request):
             'agent enrolls (see AGENT.md) it reads this host\'s ZFS / borg / backupninja and fills in '
             'the dashboard within one poll interval - nothing is wrong, it is just starting up.</p></div>')
 
-    multi_agent = len({r.get("agent") for r in rows}) > 1
-    rows.sort(key=lambda r: ((r.get("agent") or "~") if multi_agent else "", _group(r)[0], r["name"]))
-    order_names = [r["name"] for r in rows]
+    order_names = [r["name"] for r in rows]   # rows already sorted into card order by _live_model
 
     pools = [r for r in rows if r["type"] == "zfs-local" and r.get("pool_cap_pct") is not None]
     if pools:
@@ -3641,51 +3685,16 @@ def index(request: Request):
     # targets (grouped by type into collapsible sections) PLUS the replication pairs it participates in.
     # A two-sided pair (home source -> vault copy) shows in BOTH halves' tabs, so the vault tab is a
     # complete off-site view. The busiest agent (home) is the default tab.
-    def _slug(s): return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
-
-    def _grouped(subset, agslug):
-        subset = sorted(subset, key=lambda r: (_group(r)[0], r["name"]))
-        out, cur = "", None
-        for r in subset:
-            g = _group(r)[1]
-            if g != cur:
-                if cur is not None:
-                    out += "</div></div></section>"
-                pid = f"grp:{agslug}:{_slug(g)}"
-                out += (f'<section class="pane grp" data-pane="{_esc(pid)}">'
-                        f'<button class="paneh" onclick="togglePane(\'{_esc(pid)}\')">'
-                        f'<span class=pt>{_esc(g)}</span><span class=pdot></span>'
-                        f'<span class=pchev>&#9662;</span></button><div class=pbody><div class=cards>')
-                cur = g
-            out += _smart_card(r) if r["type"] == "smart" else \
-                _card(r, (r.get("agent") in capable) and not viewer, viewer)
-        if cur is not None:
-            out += "</div></div></section>"
-        return out
-
-    def _pairs_pane(pvlist, agslug):
-        if not pvlist:
-            return ""
-        pv = sorted(pvlist, key=lambda v: (SEV_ORDER.get(v["severity"], 9), v["r"]["name"]))
-        inner = "".join(_pair_card(v, capable, viewer) for v in pv)
-        pid = f"grp:{agslug}:replication"
-        return (f'<section class="pane grp" data-pane="{_esc(pid)}">'
-                f'<button class=paneh onclick="togglePane(\'{_esc(pid)}\')">'
-                f'<span class=pt>Replication</span><span class=pdot></span>'
-                f'<span class=pchev>&#9662;</span></button>'
-                f'<div class=pbody><div class=cards>{inner}</div></div></section>')
-
-    tcount = {}
-    for r in rows:
-        k = r.get("agent") or "?"; tcount[k] = tcount.get(k, 0) + 1
-    agent_order = sorted(agents, key=lambda a: (-tcount.get(a["name"], 0), a["name"]))
     tabs_html, panes_html = "", ""
     for i, a in enumerate(agent_order):
         ag = a["name"]; agslug = _slug(ag) or "agent"; is_active = (i == 0)
         subset = [r for r in rows if (r.get("agent") or "?") == ag]
         my_pairs = [v for v in pair_views
                     if v["r"].get("agent") == ag or v["l"].get("agent") == ag]
-        content = _pairs_pane(my_pairs, agslug) + _grouped(subset, agslug) \
+        # SAME enumeration the /cards refresh endpoint uses (_tab_panes) - the single source of truth
+        # for card HTML, so a live-swapped card is byte-identical to a freshly-loaded page's card.
+        panes = _tab_panes(subset, my_pairs, agslug, capable, viewer)
+        content = "".join(_wrap_pane(p) for p in panes) \
             or '<div class=why style="padding:12px 2px">No targets reported by this agent yet.</div>'
         tabs_html += _agent_card(a, viewer, tab=agslug, active=is_active)
         panes_html += f'<div class=agentpane data-agpane="{agslug}"{"" if is_active else " hidden"}>{content}</div>'
