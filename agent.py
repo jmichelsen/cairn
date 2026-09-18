@@ -428,16 +428,32 @@ def do_execute(cfg):
             lr = api_call("GET", f"/api/v1/backup/agent/removable-links?agent={NAME}&removable={target}") or {}
             links = lr.get("links") or []
             # per-dataset link jobs, or a single fallback job from the target's own source/dest_subpath
-            dsmap = {d["name"]: d["path"] for d in _dataset_paths(cfg)}
+            _dp = _dataset_paths(cfg)
+            dsmap = {d["name"]: d["path"] for d in _dp}
+            dsrc = {d["name"]: d["source"] for d in _dp}
+            jobs, skipped_enc = [], []
             if links:
-                jobs = []
                 for L in links:
+                    # SAFETY: never file-copy an ENCRYPTED dataset to a plain-filesystem removable - rsync
+                    # reads the decrypted plaintext, which would write the zero-knowledge data to the drive
+                    # in the clear. Belt-and-suspenders (link-add already refuses encrypted datasets); a
+                    # link may set allow_plaintext for a deliberately non-secret encrypted dataset.
+                    _sds = dsrc.get(L["dataset"])
+                    _enc = (C.zfs_props(_sds, ["encryption"]).get("encryption") or "off") if _sds else "off"
+                    if _enc not in ("off", "", None) and not L.get("allow_plaintext"):
+                        skipped_enc.append(L["dataset"]); continue
                     srcp = dsmap.get(L["dataset"])
                     # per-link mirror flag: a plain "Back up now" (opts.mirror unset) honors EACH link's
                     # own mirror setting; the card's "Mirror" button (opts.mirror=True) still forces all.
                     jobs.append((L["dataset"], dict(t, source=srcp, dest_subpath=L["dest_subpath"],
                                                     exclude=_exlist(L), mirror=bool(L.get("mirror"))),
                                  srcp is not None))
+                if not jobs and skipped_enc:
+                    api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                             {"ok": False, "output": "refused: all linked dataset(s) are encrypted "
+                              "(zero-knowledge); a plain-filesystem removable copy would be plaintext: "
+                              + ", ".join(skipped_enc)})
+                    print(f"  intent {iid} {target} backup-now -> SKIP (all encrypted)"); continue
             else:
                 jobs = [(None, t, bool(t.get("source")))]
             if dry:   # dry-runs are quick and want immediate feedback -> stay synchronous
@@ -451,6 +467,8 @@ def do_execute(cfg):
                         oks.append(False); lines.append(f"{label}: FAIL ({err})"); continue
                     rc, so, se = C.run(cmd, timeout=min(TIMEOUT, 1800))
                     oks.append(rc == 0); lines.append(f"{label}: {'ok' if rc == 0 else 'FAIL'}\n{(so + se).strip()[-500:]}")
+                for _ds in skipped_enc:
+                    lines.append(f"{_ds}: SKIPPED (encrypted - would be plaintext on the removable)")
                 ok = all(oks) and bool(oks)
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                          {"ok": ok, "output": ("[DRY-RUN] " + "\n".join(lines))[-1800:], "dryrun": True})
@@ -461,6 +479,8 @@ def do_execute(cfg):
             sd = C._cairn_state_dir(); jout = os.path.join(sd, f"job-{iid}.out"); jdone = os.path.join(sd, f"job-{iid}.done")
             jcur = os.path.join(sd, f"job-{iid}.cur")   # current-dataset marker (reaper reads it for the label)
             sl = ['ok=1']; ds_stamps = []
+            for _ds in skipped_enc:
+                sl.append(f'echo {C.shlex.quote(_ds + ": SKIPPED (encrypted dataset - refusing plaintext copy to removable)")}')
             for ds, jt, have_src in jobs:
                 label = ds or "source"
                 if not have_src:

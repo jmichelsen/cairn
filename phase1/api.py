@@ -1203,6 +1203,19 @@ def _ds_source(conn, dataset):
                      (dataset,)).fetchone()
     return r["source"] if r else dataset
 
+ENC_REMOVABLE_MSG = (
+    "'{ds}' is a ZFS-encrypted (zero-knowledge) dataset; a file-level copy to a plain-filesystem "
+    "removable drive would write it as PLAINTEXT, defeating its encryption. Refusing. Encrypted "
+    "datasets should reach off-site only via a raw ZFS send (the vault). Pass allow_plaintext=true to "
+    "override deliberately.")
+
+def _dataset_encrypted(conn, dataset):
+    """True if this dataset NAME is reported ZFS-encrypted by any agent (e.g. michxps). Errs safe: a
+    name encrypted anywhere is treated as encrypted, so it can't be file-copied to a plain-filesystem
+    removable as plaintext (which would defeat zero-knowledge). The removable itself is a plain fs."""
+    return bool(conn.execute("SELECT 1 FROM targets WHERE name=? AND encrypted=1 LIMIT 1",
+                             (dataset,)).fetchone())
+
 def _log_link_event(conn, removable, action, message):
     """Record a non-agent link action (confirm/add/unlink) as a COMPLETED intent, so it shows in the
     card's History with a timestamp alongside the agent-run actions (verify, relocate, backup)."""
@@ -1278,9 +1291,12 @@ async def removable_links_confirm(request: Request):
     confirmed; {removable,dataset,dest_subpath} is a manual dataset pick. (auth: admin - mutating)"""
     body = await _json(request); now = int(time.time())
     with db() as conn:
+        allow_plaintext = bool(body.get("allow_plaintext"))
         if body.get("id"):
             row = conn.execute("SELECT removable,dataset,dest_subpath FROM removable_links WHERE id=?",
                                (int(body["id"]),)).fetchone()
+            if row and _dataset_encrypted(conn, row["dataset"]) and not allow_plaintext:
+                raise HTTPException(409, ENC_REMOVABLE_MSG.format(ds=row["dataset"]))
             conn.execute("UPDATE removable_links SET confirmed=1, updated_ts=? WHERE id=?", (now, int(body["id"])))
             if row:
                 _log_link_event(conn, row["removable"], "link-confirmed",
@@ -1291,6 +1307,8 @@ async def removable_links_confirm(request: Request):
         dest = (body.get("dest_subpath") or "").strip()
         if not removable or not dataset:
             raise HTTPException(400, "removable and dataset (or id) required")
+        if _dataset_encrypted(conn, dataset) and not allow_plaintext:
+            raise HTTPException(409, ENC_REMOVABLE_MSG.format(ds=dataset))
         agent = (body.get("agent") or "").strip() or _removable_agent(conn, removable)
         if not agent:
             raise HTTPException(404, f"no agent owns removable '{removable}'")
