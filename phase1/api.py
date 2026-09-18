@@ -2346,12 +2346,16 @@ async function ackTarget(t){
   if(!(await uiConfirm('Acknowledge','Acknowledge <b>'+esc(t)+'</b>? Silences this warning until the condition changes or 14 days pass.',{okText:'Acknowledge'}))) return;
   try{ await fetch('/api/v1/backup/acks',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({target:t})}); }catch(e){ toast('Ack failed: '+e,'err'); return; }
-  location.reload();
+  ackRefresh();   // in-place: re-render the card (now ACK'D) + the header rollup, no full reload
 }
 async function unackTarget(t){
   try{ await fetch('/api/v1/backup/acks/'+encodeURIComponent(t),{method:'DELETE'}); }
   catch(e){ toast('Clear failed: '+e,'err'); return; }
-  location.reload();
+  ackRefresh();
+}
+function ackRefresh(){   // ack/unack changes both a card's state and the health rollup; update both live
+  if(typeof refreshCards==='function') refreshCards();
+  if(typeof refreshHeader==='function') refreshHeader();
 }
 async function hideTarget(tid){
   if(!(await uiConfirm('Hide target','Hide this target? It stops being monitored until you restore it from the Hidden section.',{okText:'Hide'}))) return;
