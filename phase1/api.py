@@ -2242,19 +2242,19 @@ async function scanRemovable(name){   // read-only discovery scan; results appea
 async function confirmLink(id){
   var r=await fetch('/api/v1/backup/removable-links',{method:'POST',
     headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:id})});
-  if(r.ok) location.reload(); else toast('Confirm failed','err');
+  if(r.ok) liveRefresh(); else toast('Confirm failed','err');
 }
 async function unlink(id){
   if(!(await uiConfirm('Unlink dataset','Remove this dataset link? It stops being backed up to this drive; nothing on the drive is deleted.',{danger:true, okText:'Unlink'}))) return;
   var r=await fetch('/api/v1/backup/removable-links/'+id,{method:'DELETE'});
-  if(r.ok) location.reload(); else toast('Unlink failed','err');
+  if(r.ok) liveRefresh(); else toast('Unlink failed','err');
 }
 async function addLink(btn, removable){   // subpath is auto-computed server-side: cairn/<host>/<dataset>
   var ds=btn.parentNode.querySelector('.rl-sel').value;
   if(!ds){ toast('Pick a dataset','err'); return; }
   var r=await fetch('/api/v1/backup/removable-links',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({removable:removable, dataset:ds})});
-  if(r.ok) location.reload(); else { var j={}; try{j=await r.json()}catch(e){} toast('Add failed: '+(j.detail||r.status),'err'); }
+  if(r.ok) liveRefresh(); else { var j={}; try{j=await r.json()}catch(e){} toast('Add failed: '+(j.detail||r.status),'err'); }
 }
 function verifyLink(removable, dataset, tier){   // tier: 'census' (size+mtime) | 'content' (auto) | 'xattr' | 'hash'
   post({target:removable, action:'removable-verify', dataset:dataset, tier:(tier||'census'), requested_by:'ui'});
@@ -2309,14 +2309,14 @@ async function applyExcludes(btn, lid){   // save excluded folders, recompute ce
   // new fit shows and the button resets - the agent runs it on its poll loop, so this can take a bit.
   try{ j=await (await fetch('/api/v1/backup/actions',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({target:rem, action:'removable-verify', dataset:ds, tier:'census', requested_by:'ui'})})).json(); }
-  catch(e){ location.reload(); return; }
-  if(!j||!j.id){ location.reload(); return; }
+  catch(e){ liveRefresh(); return; }
+  if(!j||!j.id){ liveRefresh(); return; }
   for(var i=0;i<150;i++){
     await new Promise(function(s){ setTimeout(s,2000); });
     var st; try{ st=(await (await fetch('/api/v1/backup/actions/'+j.id)).json()).state; }catch(e){ break; }
     if(st==='done'||st==='failed'||st==='stalled') break;
   }
-  location.reload();
+  liveRefresh();
 }
 function toggleDiff(btn, removable, dataset){   // show/hide the folder diff; if none computed yet, run a check
   var box=btn.closest('.rl').querySelector('.rl-diff');
@@ -2353,20 +2353,34 @@ async function unackTarget(t){
   catch(e){ toast('Clear failed: '+e,'err'); return; }
   ackRefresh();
 }
-function ackRefresh(){   // ack/unack changes both a card's state and the health rollup; update both live
+async function refreshHidden(){   // swap the Hidden pane in place after a hide/unhide (no reload)
+  var j; try{ j=await (await fetch('/api/v1/backup/hidden')).json(); }catch(e){ return; }
+  var pane=document.querySelector('.hidpane'); if(!pane || !j || j.html==null) return;
+  pane.outerHTML=j.html;
+  var slug=null; try{ slug=localStorage.getItem('bm_agtab'); }catch(e){}
+  var at=document.querySelector('[data-agtab].active'); if(at) slug=at.getAttribute('data-agtab');
+  if(slug && typeof filterHidden==='function') filterHidden(slug);   // re-apply the active-tab filter
+}
+// The in-place replacement for location.reload() after a mutating click: re-render cards (add/remove/
+// update all handled by the server), the header rollup, the coverage-gap rail, and - when asked - the
+// Hidden pane. Everything a full reload used to refresh, without the flash or losing scroll/panels.
+function liveRefresh(o){
   if(typeof refreshCards==='function') refreshCards();
   if(typeof refreshHeader==='function') refreshHeader();
+  if(typeof refreshGaps==='function') refreshGaps();
+  if(o && o.hidden) refreshHidden();
 }
+function ackRefresh(){ liveRefresh(); }   // ack/unack: card state + rollup change
 async function hideTarget(tid){
   if(!(await uiConfirm('Hide target','Hide this target? It stops being monitored until you restore it from the Hidden section.',{okText:'Hide'}))) return;
   try{ await fetch('/api/v1/backup/targets/'+tid+'/retire',{method:'POST'}); }
   catch(e){ toast('Hide failed: '+e,'err'); return; }
-  location.reload();
+  liveRefresh({hidden:true});
 }
 async function unhideTarget(tid){
   try{ await fetch('/api/v1/backup/targets/'+tid+'/unretire',{method:'POST'}); }
   catch(e){ toast('Unhide failed: '+e,'err'); return; }
-  location.reload();
+  liveRefresh({hidden:true});
 }
 // Terminal action states: nothing more will happen, so never spin/poll/mark-busy for these. canceled
 // and skipped are terminal too - omitting them left a canceled intent seeded as "running" forever.
@@ -2739,7 +2753,7 @@ async function reconAct(btn, action, tid, pair){
   try{
     await fetch('/api/v1/backup/reconcile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     var j=await (await fetch('/api/v1/backup/reconcile')).json(); var left=j.overlaps||[]; renderReconcile(left);
-    if(!left.length){ closeReconcile(); location.reload(); }
+    if(!left.length){ closeReconcile(); var rb=document.querySelector('.reconbanner'); if(rb) rb.remove(); liveRefresh(); }
   }catch(e){ btns.forEach(function(x){x.disabled=false;}); }
 }
 // ---- recovery browser: Points / Versions / Deleted, and copy-only Restore ----
@@ -3666,6 +3680,29 @@ def cards_fragment(request: Request):
             for p in panes]})
     return {"tabs": out}
 
+def _hidden_pane_html(retired):
+    """The Hidden pane (retired targets, each restorable). ALWAYS returns the wrapper (starts `hidden`,
+    filterHidden() reveals it per active tab), so the live refresh can swap it in place after a
+    hide/unhide with no page reload."""
+    items = "".join(
+        f'<div class=hidrow data-hagent="{_esc(_slug(x["agent"]))}">'
+        f'<span class=hidn>{_esc(x["name"])}'
+        f'<span class=hida>{_esc(x["agent"])} &middot; {_esc(x["type"])}</span></span>'
+        f'<button class=unhidebtn onclick="unhideTarget({int(x["id"])})">Unhide</button></div>'
+        for x in retired)
+    return ('<div class="pane hidpane" data-pane=hidden hidden>'
+            '<button class=paneh onclick="togglePane(\'hidden\')"><span class=pt>Hidden</span>'
+            '<span class=pchev>&#9662;</span></button>'
+            f'<div class=pbody>{items}</div></div>')
+
+@app.get("/api/v1/backup/hidden")
+def hidden_pane(request: Request):
+    """The Hidden pane HTML, for the live refresh to swap after a hide/unhide (no reload)."""
+    viewer = getattr(request.state, "role", "admin") == "viewer"
+    with db() as conn:
+        retired = [] if viewer else _retired_rows(conn)
+    return {"html": _hidden_pane_html(retired)}
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     viewer = getattr(request.state, "role", "admin") == "viewer"
@@ -3729,19 +3766,7 @@ def index(request: Request):
     # so filterHidden() shows only the active tab's hidden targets - the pane follows the selected tab
     # and stays hidden entirely when that agent has nothing hidden. Flat rows, no count badge: it
     # should recede, not advertise itself. Starts with `hidden` so JS filters before it ever paints.
-    hidden_html = ""
-    if retired:
-        items = "".join(
-            f'<div class=hidrow data-hagent="{_esc(_slug(x["agent"]))}">'
-            f'<span class=hidn>{_esc(x["name"])}'
-            f'<span class=hida>{_esc(x["agent"])} &middot; {_esc(x["type"])}</span></span>'
-            f'<button class=unhidebtn onclick="unhideTarget({int(x["id"])})">Unhide</button></div>'
-            for x in retired)
-        hidden_html = (
-            '<div class="pane hidpane" data-pane=hidden hidden>'
-            '<button class=paneh onclick="togglePane(\'hidden\')"><span class=pt>Hidden</span>'
-            '<span class=pchev>&#9662;</span></button>'
-            f'<div class=pbody>{items}</div></div>')
+    hidden_html = _hidden_pane_html(retired)
 
     leg = ""
     for term, desc in LEGEND:
