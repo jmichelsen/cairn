@@ -15,6 +15,13 @@ computes real **replication lag** (newest snapshot common to source and destinat
 **3-2-1 compliance scorecard**, a **coverage-gap** view ("what is backed up by nothing"), and
 respects zero-knowledge encrypted replicas (flags a destination whose key unexpectedly loads).
 
+It also **watches its own alerting.** The alerter can be the thing that's broken - a
+placeholder SMTP host or a stale push token delivers *nothing* while the dashboard still looks fine.
+So cairn periodically **self-tests the delivery path** (recipient + SMTP host reachable and
+non-placeholder, Gotify reachable if configured) and pushes the verdict to an independent
+[uptime-kuma](https://github.com/louislam/uptime-kuma) Push monitor. If cairn can't reach you, Kuma
+can. See [Notify self-test heartbeat](#notify-self-test-heartbeat).
+
 ## Screenshots
 
 [![Cairn dashboard](docs/img/dashboard.png)](docs/img/dashboard-full.png)
@@ -153,3 +160,39 @@ phase1/  schema.sql             SQLite schema (targets, status, intents)
   behind the intent queue. Your source pool stays read-only. Every unreadable signal degrades to
   `UNKNOWN`, never crashes.
 - Phase 1 reuses phase0's `notify.sh` + env file - nothing in Phase 0 is throwaway.
+
+## Notify self-test heartbeat
+
+A dead-man's switch on cairn's *own* alerting. cairn is the thing that tells you when a backup
+breaks - but the alerter itself can fail silently: a placeholder SMTP host, a recipient the relay
+drops, or a stale Gotify token means every alert is fired and *delivered nowhere*, while the
+dashboard still looks green. A plain "the API is up" ping would not catch this - the API is up; only
+delivery is broken.
+
+So the API periodically runs a **self-test of the real delivery path** and pushes the verdict to an
+independent watchdog:
+
+- **What it checks:** `NOTIFY_EMAIL` is a real, non-placeholder address; the SMTP host (or `msmtpd`
+  relay) is reachable; and, when Gotify is configured, its endpoint is reachable and the token isn't a
+  placeholder. These are exactly the misconfigurations that silently kill delivery.
+- **Where it reports:** an [uptime-kuma](https://github.com/louislam/uptime-kuma) **Push** monitor -
+  a separate service with its *own* notification channels. It pushes `status=up` while alerts are
+  deliverable and `status=down` the moment they aren't. If cairn's own email/Gotify is the broken
+  thing, Kuma still reaches you.
+
+**Setup:** in Kuma, add a **Push** monitor (heartbeat interval a bit above `CAIRN_KUMA_INTERVAL`,
+e.g. 180s with 2 retries), attach a notification, and copy its push URL into the env:
+
+```ini
+CAIRN_KUMA_PUSH_URL=http://uptime-kuma:3001/api/push/<token>   # blank = disabled
+CAIRN_KUMA_INTERVAL=60                                          # seconds between self-tests (>=30)
+```
+
+Verify on demand (admin token) without waiting for a real alert:
+
+```bash
+curl -H "x-backup-token: $ADMIN" -X POST https://your-cairn/api/v1/backup/heartbeat/selftest
+curl -H "x-backup-token: $ADMIN"        https://your-cairn/api/v1/backup/heartbeat   # last result
+```
+
+Leave `CAIRN_KUMA_PUSH_URL` blank and the feature is simply off.

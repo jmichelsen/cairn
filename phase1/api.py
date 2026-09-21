@@ -27,8 +27,17 @@ CAIRN_VERSION = _read_version()
 import sys as _sys
 _sys.path.insert(0, str(HERE))
 import collector as _cmd   # PURE build_command, for action PREVIEWS only; the API never executes it
+import notify_selftest      # dead-man's-switch: verify the alert DELIVERY path + push to uptime-kuma
 DAY = 86400
-app = FastAPI(title="Cairn", version="1.0")
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def _lifespan(app):
+    _start_heartbeat_task()   # defined below; the notify self-test loop (no-op unless configured)
+    yield
+
+app = FastAPI(title="Cairn", version="1.0", lifespan=_lifespan)
 
 SEV_ORDER = {"CRIT": 0, "WARN": 1, "UNKNOWN": 2, "OK": 3}
 SEVCLS = {"CRIT": "crit", "WARN": "warn", "UNKNOWN": "unk", "OK": "ok"}  # severity -> css class
@@ -503,6 +512,18 @@ def agents_view():
     with db() as conn:
         return {"agents": agent_states(conn)}
 
+@app.get("/api/v1/backup/heartbeat")
+def heartbeat_view():
+    """Last notify self-test result (the dead-man's-switch on cairn's OWN alerting). `enabled` is
+    False until CAIRN_KUMA_PUSH_URL is configured."""
+    return {"enabled": bool(KUMA_PUSH_URL), "interval_s": KUMA_INTERVAL, "last": _LAST_HEARTBEAT}
+
+@app.post("/api/v1/backup/heartbeat/selftest")
+def heartbeat_run():
+    """Run the notify self-test now + push to Kuma (admin only, enforced by the auth middleware).
+    Returns the verdict - use it to prove the alert path end-to-end without waiting for a CRIT."""
+    return _heartbeat_once()
+
 @app.post("/api/v1/backup/agents/{name}/update")
 def request_agent_update(name: str):
     """Queue a self-update for one agent (the dashboard's per-agent Update button). Delivered once on
@@ -812,6 +833,46 @@ def dispatch_alert(sev, title, body, key, info_email=False):
         subprocess.run(["bash", NOTIFY_SH, sev, title, body or sev, key], env=env, timeout=30)
     except Exception:
         pass
+
+# ---- notify self-test heartbeat (dead-man's-switch on the ALERTER ITSELF) ----
+# cairn's alerting once died silently on placeholder notify config. A liveness ping wouldn't have
+# caught it (the API was up, only DELIVERY was broken), so this periodically verifies the real
+# delivery path (notify_selftest) and pushes the verdict to an uptime-kuma Push monitor. Kuma is an
+# independent watchdog with its own channels: if cairn can't reach you, Kuma can. Disabled unless
+# CAIRN_KUMA_PUSH_URL is set (e.g. http://uptime-kuma:3001/api/push/<token>).
+KUMA_PUSH_URL = os.environ.get("CAIRN_KUMA_PUSH_URL", "").strip()
+KUMA_INTERVAL = max(30, int(os.environ.get("CAIRN_KUMA_INTERVAL", "60")))  # seconds between beats
+_LAST_HEARTBEAT = None   # last run_once() result, for GET /heartbeat + dashboard visibility
+
+def _heartbeat_once():
+    """One heartbeat cycle (blocking I/O); stores + logs the result. Safe to call off the loop or
+    on demand from the endpoint."""
+    global _LAST_HEARTBEAT
+    res = notify_selftest.run_once(os.environ, KUMA_PUSH_URL or None)
+    _LAST_HEARTBEAT = res
+    tag = "ok" if res["ok"] else "FAIL"
+    kuma = (f"kuma={res['kuma_code']}" if res.get("kuma_code") else
+            (f"kuma-err={res['kuma_err']}" if res.get("kuma_err") and KUMA_PUSH_URL else "kuma=off"))
+    print(f"[heartbeat:{tag}] {res['msg']} ({res['ping_ms']}ms, {kuma})", flush=True)
+    return res
+
+def _start_heartbeat_task():
+    """Launch the periodic notify self-test loop (called from the lifespan startup). No-op unless
+    CAIRN_KUMA_PUSH_URL is configured."""
+    if not KUMA_PUSH_URL:
+        print("[heartbeat] CAIRN_KUMA_PUSH_URL unset - notify self-test heartbeat disabled", flush=True)
+        return
+    import asyncio
+    async def _loop():
+        loop = asyncio.get_event_loop()
+        while True:
+            try:
+                await loop.run_in_executor(None, _heartbeat_once)   # blocking I/O off the event loop
+            except Exception as e:
+                print(f"[heartbeat] loop error: {e}", flush=True)
+            await asyncio.sleep(KUMA_INTERVAL)
+    asyncio.get_event_loop().create_task(_loop())
+    print(f"[heartbeat] notify self-test heartbeat every {KUMA_INTERVAL}s -> uptime-kuma", flush=True)
 
 # ---- agent liveness (dead-man's-switch for remote agents e.g. the off-site vault) ----
 AGENT_STALE_FACTOR = int(os.environ.get("CAIRN_AGENT_STALE_FACTOR", "3"))     # missed N cycles -> WARN
