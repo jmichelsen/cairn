@@ -78,14 +78,21 @@ send_email() {
 
 push_gotify() {
   [ -n "${GOTIFY_URL:-}" ] && [ -n "${GOTIFY_TOKEN:-}" ] && [ "${GOTIFY_TOKEN:-}" != "CHANGEME_app_token" ] || { log "gotify not configured, skip push"; return 0; }
-  local prio="${GOTIFY_PRIORITY:-8}"
-  curl -s -m 8 -o /dev/null -w '%{http_code}' \
+  local prio="${GOTIFY_PRIORITY:-8}" code
+  # curl exits 0 for ANY completed request incl 4xx/5xx (no --fail), so we MUST inspect the HTTP
+  # status - otherwise a bad/expired token (401) or wrong app (404) gets logged as "pushed" and the
+  # push silently never arrives. Capture the code and only treat 2xx as success.
+  code=$(curl -s -m 8 -o /dev/null -w '%{http_code}' \
     -H "X-Gotify-Key: ${GOTIFY_TOKEN}" \
     -F "title=[$SEV] $TITLE" \
     -F "message=$BODY" \
     -F "priority=$prio" \
-    "${GOTIFY_URL%/}/message" >>"$LOG" 2>&1 && log "gotify pushed: $TITLE" \
-    || log "GOTIFY PUSH FAILED: $TITLE"
+    "${GOTIFY_URL%/}/message" 2>>"$LOG")
+  case "$code" in
+    2??) log "gotify pushed: $TITLE" ;;
+    401|403) log "GOTIFY PUSH FAILED (HTTP $code - bad/expired app token): $TITLE" ;;
+    *)   log "GOTIFY PUSH FAILED (HTTP ${code:-000}): $TITLE" ;;
+  esac
 }
 
 case "$SEV" in
