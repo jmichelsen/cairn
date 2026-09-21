@@ -225,6 +225,13 @@ def worst(*sevs):
     order = {"OK": 0, "UNKNOWN": 1, "WARN": 2, "CRIT": 3}
     return max((s for s in sevs if s), key=lambda s: order.get(s, 0), default="OK")
 
+def atmost(sev, cap):
+    """Clamp a severity so it is never worse than `cap` (cap=None -> unchanged). Only lowers."""
+    if not cap:
+        return sev
+    order = {"OK": 0, "UNKNOWN": 1, "WARN": 2, "CRIT": 3}
+    return cap if order.get(sev, 0) > order.get(cap, 0) else sev
+
 # Built-in thresholds so a minimal targets.yaml (no `defaults:` block, e.g. a fresh vault) still
 # works. A user's `defaults:` overrides these key-by-key.
 DEFAULT_THRESHOLDS = {
@@ -496,19 +503,20 @@ def _epoch(s):
     rc, ep, _ = run(["date", "-d", s, "+%s"])
     return int(ep.strip()) if rc == 0 and ep.strip().isdigit() else None
 
-def _fresh(st, t, defaults, now, last_ts, noun):
-    """Shared freshness verdict: OK/WARN/CRIT off the fresh_warn_h/fresh_crit_h thresholds."""
+def _fresh(st, t, defaults, now, last_ts, noun, cap=None):
+    """Shared freshness verdict: OK/WARN/CRIT off the fresh_warn_h/fresh_crit_h thresholds.
+    `cap` (e.g. "WARN") clamps the worst severity this can contribute - a stale removable 2nd-leg is
+    advisory, never critical."""
     reasons = []
     if last_ts:
         st["last_run_ts"] = last_ts
         age = now - last_ts
         fw, fc = th(t, defaults, "fresh_warn_h") * 3600, th(t, defaults, "fresh_crit_h") * 3600
-        if age >= fc:
-            st["severity"] = worst(st["severity"], "CRIT"); reasons.append(f"{noun} {age//3600}h old")
-        elif age >= fw:
-            st["severity"] = worst(st["severity"], "WARN"); reasons.append(f"{noun} {age//3600}h old")
+        sev = "CRIT" if age >= fc else ("WARN" if age >= fw else None)
+        if sev:
+            st["severity"] = worst(st["severity"], atmost(sev, cap)); reasons.append(f"{noun} {age//3600}h old")
     else:
-        st["severity"] = worst(st["severity"], "WARN"); reasons.append(f"no {noun} found")
+        st["severity"] = worst(st["severity"], atmost("WARN", cap)); reasons.append(f"no {noun} found")
     return reasons
 
 def _errline(err, out, rc):
@@ -979,8 +987,9 @@ def discover_removable_links(mount, datasets, max_depth=3, min_score=0.6, min_ch
 
 def adapter_removable(t, defaults, now):
     """A removable external drive as a 2nd-media leg. Reports PRESENCE + freshness; the actual backup
-    runs on demand (see the 'backup-now' action). Absence never escalates past WARN (and only after a
-    long grace), so an unplugged drive is a calm 'detached', not a CRIT."""
+    runs on demand (see the 'backup-now' action). Neither absence NOR staleness ever escalates past
+    WARN (absence only after a long grace; freshness capped via _fresh cap="WARN"), so an unplugged or
+    stale 2nd-leg drive is a calm 'detached'/advisory, not a CRIT."""
     tool = t.get("tool", "rsync")
     pr = removable_probe(t)
     last = _removable_last_backup(t, pr)
@@ -1026,7 +1035,7 @@ def adapter_removable(t, defaults, now):
         st["severity"] = worst(st["severity"], "WARN"); reasons.append("mounted READ-ONLY - remount rw to back up")
     else:
         caps["backupable"] = True
-    reasons += _fresh(st, t, defaults, now, last, "last backup")
+    reasons += _fresh(st, t, defaults, now, last, "last backup", cap="WARN")
     st["detail_json"] = json.dumps(dict(detail, reasons=reasons, caps=caps))
     return [st]
 
