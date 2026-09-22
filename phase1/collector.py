@@ -14,6 +14,9 @@ Env (or /etc/cairn/cairn.env): CAIRN_DB, CAIRN_TARGETS, BORG_PASSPHRASE_*
 import argparse, json, os, re, shlex, shutil, sqlite3, subprocess, sys, time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sanoid_parser   # derive per-dataset freshness thresholds + suppression from sanoid.conf
+
 try:
     import yaml
 except ImportError:
@@ -347,7 +350,11 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
     snaps = zfs_snapshots(ds)
     age = newest_age(snaps, now)
     st["snap_age_src_s"] = age
-    if age is not None:
+    if t.get("fresh_suppress"):
+        # sanoid doesn't monitor this dataset's freshness (use_template=ignore / process_children_only),
+        # so a stale/absent snapshot here is expected, not an alarm - note the policy, skip the verdict.
+        reasons.append(t.get("fresh_reason", "snapshot freshness not monitored by sanoid policy"))
+    elif age is not None:
         fw, fc = th(t, defaults, "fresh_warn_h") * 3600, th(t, defaults, "fresh_crit_h") * 3600
         if age >= fc:
             st["severity"] = worst(st["severity"], "CRIT"); reasons.append(f"newest snap {age//3600}h old")
@@ -364,8 +371,10 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
     caps = {"snapshot": zfs_delegated(ds, "snapshot", user, groups),
             "scrub": (ds == pool) and can_sudo(wrapper),
             "recoverable": _mperr is None}   # e.g. an unmounted pool (mountpoint=none) can't be browsed
-    st["detail_json"] = json.dumps(dict(reasons=reasons, snap_count=len(snaps),
-                                        scrub=scrub_info, caps=caps))
+    _det = dict(reasons=reasons, snap_count=len(snaps), scrub=scrub_info, caps=caps)
+    if t.get("fresh_src"):          # transparency: where the freshness thresholds came from (sanoid:<type>)
+        _det["fresh_src"] = t["fresh_src"]
+    st["detail_json"] = json.dumps(_det)
     return [st]
 
 def adapter_zfs_repl(t, defaults, now, pools):
@@ -388,7 +397,9 @@ def adapter_zfs_repl(t, defaults, now, pools):
             if da:
                 age = st["snap_age_src_s"]          # newest_age(ssnaps) set above
                 rs = [f"paired → {da}: sends to {dst}, verified on '{da}'"]
-                if age is None:
+                if t.get("fresh_suppress"):         # sanoid doesn't monitor source freshness -> paired OK
+                    st["severity"] = "OK"; rs.append(t.get("fresh_reason", "source freshness not monitored by sanoid policy"))
+                elif age is None:
                     st["severity"] = "WARN"; rs.append("source has NO snapshots")
                 else:
                     fw = th(t, defaults, "fresh_warn_h") * 3600
@@ -399,8 +410,10 @@ def adapter_zfs_repl(t, defaults, now, pools):
                         st["severity"] = "WARN"; rs.append(f"source snapshot {age//3600}h old")
                     else:
                         st["severity"] = "OK"
-                st["detail_json"] = json.dumps(dict(reasons=rs, paired=da, dst_on_agent=da,
-                                                    src_n=len(ssnaps)))
+                _pd = dict(reasons=rs, paired=da, dst_on_agent=da, src_n=len(ssnaps))
+                if t.get("fresh_src"):
+                    _pd["fresh_src"] = t["fresh_src"]
+                st["detail_json"] = json.dumps(_pd)
                 return [st]
             reason = f"dest '{dst}' not on this host"
         elif not dsnaps:
@@ -1837,6 +1850,22 @@ def alert(st, tname):
     run(["bash", str(NOTIFY), st["severity"], f"{tname}: {st['severity']}", body, f"bm1-{tname}"], timeout=30)
 
 # ---------- shared collection + action-command building (used by main() and the agent) ----------
+def _apply_sanoid(targets):
+    """Derive per-dataset freshness thresholds + suppression from the local sanoid.conf (a ZFS target's
+    'is my newest snapshot too old?' should follow sanoid's actual schedule, not a fixed default).
+    Disabled with CAIRN_SANOID_DERIVE=0; paths overridable via CAIRN_SANOID_CONF/CAIRN_SANOID_DEFAULTS.
+    Never fatal - any error leaves targets on cairn's built-in thresholds."""
+    if os.environ.get("CAIRN_SANOID_DERIVE", "1") == "0":
+        return
+    try:
+        sanoid_parser.load_and_annotate(
+            targets,
+            os.environ.get("CAIRN_SANOID_CONF", "/etc/sanoid/sanoid.conf"),
+            os.environ.get("CAIRN_SANOID_DEFAULTS", "/etc/sanoid/sanoid.defaults.conf"))
+    except Exception:
+        pass
+
+
 def collect_all(cfg, now=None):
     """Run every target's adapter. Returns [(target_dict_with_name, status_dict), ...].
     Sub-status targets (borg/backupninja/smart yield several) get 'name:suffix' names."""
@@ -1844,6 +1873,7 @@ def collect_all(cfg, now=None):
         now = int(time.time())
     defaults = {**DEFAULT_THRESHOLDS, **cfg.get("defaults", {})}; scrub_cad = cfg.get("scrub_cadence", {})
     pools = zpool_list()
+    _apply_sanoid(cfg.get("targets", []))
     out = []
     for t in cfg["targets"]:
         typ = t["type"]
