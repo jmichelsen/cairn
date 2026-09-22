@@ -160,6 +160,12 @@ phase1/  schema.sql             SQLite schema (targets, status, intents)
   behind the intent queue. Your source pool stays read-only. Every unreadable signal degrades to
   `UNKNOWN`, never crashes.
 - Phase 1 reuses phase0's `notify.sh` + env file - nothing in Phase 0 is throwaway.
+- **Snapshot freshness follows sanoid.** When `sanoid.conf` is present, each ZFS dataset's
+  freshness thresholds are derived from its effective sanoid policy (the finest active snapshot
+  granularity -> that type's `*_warn`/`*_crit`), and the verdict is suppressed for datasets sanoid
+  doesn't monitor (`use_template = ignore`, `process_children_only`). No hand-tuning, and it tracks
+  edits to `sanoid.conf`. Pin a target manually by setting both `fresh_warn_h` and `fresh_crit_h`
+  (see `CAIRN_SANOID_DERIVE`).
 
 ## Notify self-test heartbeat
 

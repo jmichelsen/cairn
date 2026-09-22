@@ -35,8 +35,11 @@ targets:
       dest_agent: vault }
 
   # --- Local pools: health, capacity, scrub age, snapshot freshness ---
+  # Snapshot-freshness thresholds auto-derive from sanoid.conf when present (see CAIRN_SANOID_DERIVE);
+  # datasets sanoid doesn't monitor are suppressed. To pin thresholds manually for a target, set BOTH
+  # fresh_warn_h and fresh_crit_h (that fully overrides the sanoid derivation for that target):
   - { name: tank,   type: zfs-local, source: tank }
-  - { name: backup, type: zfs-local, source: backup }
+  - { name: backup, type: zfs-local, source: backup, fresh_warn_h: 26, fresh_crit_h: 50 }
 
   # --- borg repos (mount them read-only into the container). Encrypted repos need the
   #     passphrase: set an env var and reference it with passphrase_env. ---
