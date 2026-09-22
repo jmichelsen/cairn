@@ -25,6 +25,14 @@ targets:
   # Encrypted, zero-knowledge off-site copy: flags CRIT if the dest key ever loads.
   - { name: private, type: zfs-repl, source: tank/private, dest: offsite/private, tier: A,
       encrypted: true, vault_keystatus_expected: unavailable, location: offsite }
+  # DECLARED PAIR: when the dest lives on ANOTHER agent (a remote vault that pulls this dataset and
+  # reports it as its own zfs-local), add `dest_agent: <that agent's name>`. This half then can't see
+  # the dest locally, so instead of UNKNOWN it reports its own SOURCE-snapshot freshness and the
+  # dashboard shows "paired -> <agent>". The two halves auto-merge into one pair card; the pair's
+  # severity comes from the receiver (which sees the real off-site freshness). On the RECEIVER, tag the
+  # matching zfs-local with `source_agent: <this agent>` to document the reverse side.
+  - { name: offsite_photos, type: zfs-repl, source: tank/photos, dest: vault/photos, tier: A,
+      dest_agent: vault }
 
   # --- Local pools: health, capacity, scrub age, snapshot freshness ---
   - { name: tank,   type: zfs-local, source: tank }
