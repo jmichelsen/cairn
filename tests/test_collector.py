@@ -647,3 +647,49 @@ def test_spawn_detached_propagates_failure_rc(tmp_path):
             break
         _t.sleep(0.1)
     assert open(done).read().strip() == "7"
+
+
+# ---- declared home->vault pair (dest_agent): paired state, not UNKNOWN ------------------------
+def _repl(**over):
+    t = {"name": "Pics", "type": "zfs-repl", "source": "mcz/mclife/Pics", "dest": "iwolf/Pics"}
+    t.update(over)
+    return t
+
+
+def _patch_repl(monkeypatch, src_snaps, age):
+    monkeypatch.setattr(collector, "zfs_snapshots",
+                        lambda ds: [("s", "g", 1)] if ("mcz" in ds and src_snaps) else [])
+    monkeypatch.setattr(collector, "dataset_size_info", lambda ds: {})
+    monkeypatch.setattr(collector, "newest_age", lambda snaps, now: age if snaps else None)
+
+
+def test_declared_pair_reports_paired_not_unknown(monkeypatch):
+    import json
+    _patch_repl(monkeypatch, src_snaps=True, age=3600)          # 1h old source snap
+    st = collector.adapter_zfs_repl(_repl(dest_agent="vault"),
+                                    collector.DEFAULT_THRESHOLDS, 100000, {"mcz"})[0]
+    assert st["severity"] == "OK"
+    assert not st.get("last_error")
+    assert json.loads(st["detail_json"])["paired"] == "vault"
+
+
+def test_declared_pair_source_stale_crits(monkeypatch):
+    _patch_repl(monkeypatch, src_snaps=True, age=60 * 3600)     # 60h > crit 50h
+    st = collector.adapter_zfs_repl(_repl(dest_agent="vault"),
+                                    collector.DEFAULT_THRESHOLDS, 100000, {"mcz"})[0]
+    assert st["severity"] == "CRIT"
+
+
+def test_declared_pair_no_source_snaps_warns(monkeypatch):
+    import json
+    _patch_repl(monkeypatch, src_snaps=False, age=None)
+    st = collector.adapter_zfs_repl(_repl(dest_agent="vault"),
+                                    collector.DEFAULT_THRESHOLDS, 100000, {"mcz"})[0]
+    assert st["severity"] == "WARN"
+    assert json.loads(st["detail_json"])["paired"] == "vault"
+
+
+def test_undeclared_remote_dest_stays_unknown(monkeypatch):
+    _patch_repl(monkeypatch, src_snaps=True, age=3600)
+    st = collector.adapter_zfs_repl(_repl(), collector.DEFAULT_THRESHOLDS, 100000, {"mcz"})[0]
+    assert st["severity"] == "UNKNOWN"          # no dest_agent -> legacy behavior preserved

@@ -379,8 +379,30 @@ def adapter_zfs_repl(t, defaults, now, pools):
     reasons = []
     if not ssnaps or not dsnaps:
         dpool = (dst or "").split("/")[0]
-        if dpool and dpool not in pools:           # dest pool absent locally: on another host (paired
-            reason = f"dest '{dst}' not on this host"   # across the net) or genuinely gone - pairing decides
+        if dpool and dpool not in pools:           # dest pool absent locally: on another host or gone
+            # DECLARED pair (dest_agent set): this is the healthy SENDING half of a home->vault pair.
+            # The receiver verifies delivery, so instead of a contradictory UNKNOWN we report home's own
+            # SOURCE-snapshot freshness (a real local signal) and flag the pair. The dashboard renders it
+            # as "paired -> <agent>", and pairing() still takes the pair's severity from the vault half.
+            da = t.get("dest_agent")
+            if da:
+                age = st["snap_age_src_s"]          # newest_age(ssnaps) set above
+                rs = [f"paired → {da}: sends to {dst}, verified on '{da}'"]
+                if age is None:
+                    st["severity"] = "WARN"; rs.append("source has NO snapshots")
+                else:
+                    fw = th(t, defaults, "fresh_warn_h") * 3600
+                    fc = th(t, defaults, "fresh_crit_h") * 3600
+                    if age >= fc:
+                        st["severity"] = "CRIT"; rs.append(f"source snapshot {age//3600}h old")
+                    elif age >= fw:
+                        st["severity"] = "WARN"; rs.append(f"source snapshot {age//3600}h old")
+                    else:
+                        st["severity"] = "OK"
+                st["detail_json"] = json.dumps(dict(reasons=rs, paired=da, dst_on_agent=da,
+                                                    src_n=len(ssnaps)))
+                return [st]
+            reason = f"dest '{dst}' not on this host"
         elif not dsnaps:
             reason = "dest has no snapshots (replication never ran?)"
         else:
@@ -1859,7 +1881,7 @@ def collect_all(cfg, now=None):
         for i, st in enumerate(sts):
             # uniform passthrough: any target may advertise WHAT it backs up + its schedule; merge
             # into detail without overriding a value the adapter already derived (e.g. per-handler).
-            extra = {k: t[k] for k in ("backs_up", "schedule") if t.get(k)}
+            extra = {k: t[k] for k in ("backs_up", "schedule", "source_agent") if t.get(k)}
             if extra:
                 try:
                     d = json.loads(st.get("detail_json") or "{}")

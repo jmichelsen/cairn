@@ -3278,13 +3278,20 @@ def _pair_card(v, capable=frozenset(), viewer=False, cid=""):
     if meta: subtitle += " &middot; " + " &middot; ".join(_esc(m) for m in meta)
     def half(row, role):
         sevw = row["severity"]; age_s = row.get("snap_age_src_s")
-        # The SOURCE half can't compute replication lag once its dest lives on another agent, so the
-        # collector marks it UNKNOWN. But home DOES know its own source-snapshot freshness - the real
-        # local signal, and the '3' end of 3-2-1 for the off-site half - so show THAT rather than a
-        # contradictory "UNKNOWN" sitting next to a fresh snapshot. (28h/50h = the default repl ladder.)
+        # A DECLARED pair (dest_agent) makes the sending half report a real severity from its own
+        # source-snapshot freshness + a `paired` flag; show its role as "paired -> <agent>".
+        paired = None
+        try:
+            paired = json.loads(row.get("detail_json") or "{}").get("paired")
+        except (ValueError, TypeError):
+            paired = None
+        # Legacy fallback: an OLD agent (pre-declared-pair) still marks the source half UNKNOWN "dest not
+        # on host". Recompute from source-snapshot freshness so it doesn't sit contradictorily next to a
+        # fresh snapshot. (28h/50h = the default repl ladder.) Declared pairs no longer need this.
         if role == "source" and sevw == "UNKNOWN" and age_s is not None:
             sevw = "CRIT" if age_s >= 50 * 3600 else "WARN" if age_s >= 28 * 3600 else "OK"
         hs = SEVCLS.get(sevw, "unk")
+        role_label = f"paired &rarr; {_esc(paired)}" if (role == "source" and paired) else _esc(role)
         age = (_ago_s(age_s) + " old") if age_s is not None else "no snapshot"
         # Only show the key status for ENCRYPTED datasets; zfs reports '-' for an unencrypted one,
         # which rendered as a meaningless "key -".
@@ -3296,7 +3303,7 @@ def _pair_card(v, capable=frozenset(), viewer=False, cid=""):
         return (f'<div class=phalf data-half="{_esc(row.get("agent") or "")}" data-role="{_esc(role)}">'
                 f'<span class=pd style="background:var(--{hs})"></span>'
                 f'<div class=phinfo><b>{_esc(row.get("agent") or "?")}</b> '
-                f'<span class=psev>{_esc(sevw)}</span> <span class=prole>{role}</span>'
+                f'<span class=psev>{_esc(sevw)}</span> <span class=prole>{role_label}</span>'
                 f'<small>{_esc(row.get("source") or "")}<br>newest snapshot <span class=page>{age}</span>{ks}</small></div></div>')
     # On-demand pull: only when the off-site (L) agent can execute, and never for a read-only viewer.
     act_html = ""
