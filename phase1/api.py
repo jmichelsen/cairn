@@ -591,8 +591,21 @@ def pairing(conn, rows):
             # the meaningful end-to-end 3-2-1 signal (it goes stale if the source stops snapshotting OR
             # the pull stalls). Only when the home half has a REAL severity do we take the worse of the two.
             sev = L["severity"] if R["severity"] == "UNKNOWN" else _worst(R["severity"], L["severity"])
-            views.append({"r": R, "l": L, "dataset": p["ds"], "severity": sev})
+            views.append({"r": R, "l": L, "dataset": p["ds"], "severity": sev, "legs": []})
             keys.add((p["r_agent"], p["r_name"])); keys.add((p["l_agent"], p["l_name"]))
+    # LOCAL 2nd-copy legs: a dataset can have >1 replication dest (an off-site vault AND a local 2nd
+    # copy). Any other zfs-repl of the SAME source on the SAME agent that isn't itself an off-site pair
+    # folds into this one card as an extra leg - instead of spawning a duplicate card + "Replication
+    # (ZFS)" section for the same dataset. Its key joins paired_keys so it never renders standalone.
+    for v in views:
+        R = v["r"]; src = R.get("source")
+        for r in rows:
+            k = (r["agent"], r["name"])
+            if (r["type"] == "zfs-repl" and r.get("source") == src and r.get("dest")
+                    and k not in keys and (r.get("agent") or "") == (R.get("agent") or "")):
+                v["legs"].append(r); keys.add(k)
+        for lg in v["legs"]:
+            v["severity"] = _worst(v["severity"], lg["severity"])
     return views, keys
 
 def find_overlaps(conn):
@@ -730,21 +743,32 @@ def scorecard():
             if cur is None or lb > cur[1]:
                 removable_fresh[L["dataset"]] = (fresh, lb)
     tiera = [r for r in rows if r["type"] == "zfs-repl" and (r["tier"] == "A")]
-    cards = []
+    # Group by SOURCE dataset: one dataset may have several repl targets (off-site vault + a local 2nd
+    # copy), and 3-2-1 is a property of the DATASET, not of one replication relationship. Union the
+    # pools/off-site/removable across the group so michxps (mcz + iwolf off-site + mediaz local) counts
+    # once as 3 copies, not twice as two failing 2-copy cards.
+    bysrc = {}
     for r in tiera:
-        src_pool = (r["source"] or "").split("/")[0]
-        dst_pool = (r["dest"] or "").split("/")[0]
-        pools = {p for p in (src_pool, dst_pool) if p}
-        # off-site if the dest is monitored by another agent (the vault) OR flagged location=offsite.
-        offsite = 1 if (r.get("location") == "offsite"
-                        or ((r.get("agent") or "", r["name"]) in offsite_keys)) else 0
-        onsite = len(pools) - offsite
-        copies = len(pools)
-        media = len(pools)
-        rem = removable_fresh.get(r["name"])
-        if rem and rem[0]:                 # confirmed + fresh removable copy: on-site copy on new medium
-            copies += 1; media += 1; onsite += 1
-        card = dict(name=r["name"], copies=copies, media=media, onsite=onsite,
+        bysrc.setdefault(r["source"], []).append(r)
+    cards = []
+    for src, group in bysrc.items():
+        rep = next((r for r in group if (r.get("agent") or "", r["name"]) in offsite_keys), group[0])
+        pools = set(); offsite = 0
+        for r in group:
+            for p in ((r["source"] or "").split("/")[0], (r["dest"] or "").split("/")[0]):
+                if p:
+                    pools.add(p)
+            if r.get("location") == "offsite" or ((r.get("agent") or "", r["name"]) in offsite_keys):
+                offsite = 1
+        copies = media = len(pools)
+        rem = None                          # freshest confirmed removable across any name in the group
+        for r in group:
+            cand = removable_fresh.get(r["name"])
+            if cand and (rem is None or cand[1] > rem[1]):
+                rem = cand
+        if rem and rem[0]:                  # confirmed + fresh removable copy: on-site copy on new medium
+            copies += 1; media += 1
+        card = dict(name=rep["name"], copies=copies, media=media, onsite=copies - offsite,
                     offsite=offsite, removable=bool(rem and rem[0]),
                     pass_321=(copies >= 3 and media >= 2 and offsite >= 1),
                     note="")
@@ -768,6 +792,10 @@ def coverage_gap():
     with db() as conn:
         rows = latest_status(conn)
         offsite_keys = {(p["r_agent"], p["r_name"]) for p in _pair_rows(conn)}  # dest held by a vault
+    # SOURCE datasets that have an off-site copy via ANY of their repl targets - so a local 2nd-copy leg
+    # of an already-off-site dataset (e.g. michxps -> mediaz) isn't falsely flagged "no off-site copy".
+    offsite_srcs = {r["source"] for r in rows
+                    if r["type"] == "zfs-repl" and ((r.get("agent") or "", r["name"]) in offsite_keys)}
     gaps = []
     for r in rows:
         d = json.loads(r.get("detail_json") or "{}")
@@ -778,7 +806,8 @@ def coverage_gap():
         if "no snapshots" in reasons and r.get("snap_age_src_s") is None:
             gaps.append(dict(name=r["name"], gap="not snapshotted", severity=r["severity"]))
         has_offsite = (r.get("location") == "offsite"
-                       or ((r.get("agent") or "", r["name"]) in offsite_keys))
+                       or ((r.get("agent") or "", r["name"]) in offsite_keys)
+                       or (r["type"] == "zfs-repl" and r.get("source") in offsite_srcs))
         if r["type"] == "zfs-repl" and not has_offsite:
             gaps.append(dict(name=r["name"], gap="no off-site copy", severity=r["severity"]))
         if r["severity"] == "CRIT" and r["type"] == "zfs-repl":
@@ -3276,8 +3305,10 @@ def _pair_card(v, capable=frozenset(), viewer=False, cid=""):
     meta = []   # tier now lives as a header badge (see below), not in the subtitle
     if R.get("encrypted") or L.get("encrypted"): meta.append("enc")
     if meta: subtitle += " &middot; " + " &middot; ".join(_esc(m) for m in meta)
-    def half(row, role):
-        sevw = row["severity"]; age_s = row.get("snap_age_src_s")
+    def half(row, role, age_s=None, src_text=None):
+        sevw = row["severity"]
+        if age_s is None:
+            age_s = row.get("snap_age_src_s")
         # A DECLARED pair (dest_agent) makes the sending half report a real severity from its own
         # source-snapshot freshness + a `paired` flag; show its role as "paired -> <agent>".
         paired = None
@@ -3300,11 +3331,26 @@ def _pair_card(v, capable=frozenset(), viewer=False, cid=""):
         # data-half/data-role + the .page span let the live refresh keep this half's dot, severity word,
         # and snapshot age current (refreshCards only patched the card-level chip, so a half's stale
         # dot/age used to linger - e.g. a WARN off-site dot next to an OK header - until a full reload).
+        _src = src_text if src_text is not None else (row.get("source") or "")
         return (f'<div class=phalf data-half="{_esc(row.get("agent") or "")}" data-role="{_esc(role)}">'
                 f'<span class=pd style="background:var(--{hs})"></span>'
                 f'<div class=phinfo><b>{_esc(row.get("agent") or "?")}</b> '
                 f'<span class=psev>{_esc(sevw)}</span> <span class=prole>{role_label}</span>'
-                f'<small>{_esc(row.get("source") or "")}<br>newest snapshot <span class=page>{age}</span>{ks}</small></div></div>')
+                f'<small>{_esc(_src)}<br>newest snapshot <span class=page>{age}</span>{ks}</small></div></div>')
+    # LOCAL 2nd-copy legs (same-dataset, on-host repls folded in by pairing()): each shows the copy's
+    # own freshness (dest snapshot age). They make the merged card the ONE place a dataset's copies live.
+    legs = v.get("legs", [])
+    legs_html = "".join(half(lg, "local 2nd copy", age_s=lg.get("snap_age_dst_s"),
+                             src_text=lg.get("dest")) for lg in legs)
+    # Aggregate 3-2-1 across ALL of this dataset's copies: source pool + off-site pool + each leg's dest
+    # pool; a pair always has the off-site '1'. Shown only when a local leg makes the count meaningful
+    # here (2-copy pairs still report 3-2-1 via the fleet scorecard, which also counts removable media).
+    c321_html = ""
+    if legs:
+        pools = {(R.get("source") or "").split("/")[0], (L.get("source") or "").split("/")[0]}
+        pools.update((lg.get("dest") or "").split("/")[0] for lg in legs)
+        pools.discard("")
+        c321_html = _c321_badge(len(pools), len(pools), 1)
     # On-demand pull: only when the off-site (L) agent can execute, and never for a read-only viewer.
     act_html = ""
     if not viewer and L.get("agent") in capable:
@@ -3316,9 +3362,10 @@ def _pair_card(v, capable=frozenset(), viewer=False, cid=""):
     return (f'<div class="card pair {sev}"{idattr} data-t="{name}" data-off="{_esc(L.get("agent") or "")}"><div class=ch>'
             f'<span class=cn>{PAIR_ICON}{name}{_tier_badge(R.get("tier"))}</span><span class=chr>'
             f'<span class="cbusy" data-tip="pull running"></span>'
-            f'<span class=pbadge>replication pair</span><span class=cs>{_esc(v["severity"])}</span></span></div>'
-            f'<div class=src>{subtitle}</div>'
-            f'<div class=phalves>{half(R, "source")}{half(L, "off-site copy")}</div>{act_html}</div>')
+            f'<span class=pbadge>{"replication set" if legs else "replication pair"}</span>'
+            f'<span class=cs>{_esc(v["severity"])}</span></span></div>'
+            f'<div class=src>{subtitle}</div>{c321_html}'
+            f'<div class=phalves>{half(R, "source")}{half(L, "off-site copy")}{legs_html}</div>{act_html}</div>')
 
 def _removable_links_html(r, viewer=False):
     """Dataset<->drive links on a removable card: confirmed links (dataset -> subpath + last backup)
@@ -3486,6 +3533,15 @@ def _removable_links_html(r, viewer=False):
     return (f'<div class=rlinks><div class=rl-hd>Datasets on this drive{fit_note}</div>'
             f'{body}{controls}</div>')
 
+def _c321_badge(copies, media, offsite):
+    """The 3-2-1 chip row (>=3 copies / >=2 media / >=1 off-site), each digit green when met."""
+    legs = [("3", copies >= 3, f"≥3 copies - {copies} of 3"),
+            ("2", media >= 2, f"≥2 media - {media}"),
+            ("1", offsite >= 1, "off-site copy" if offsite else "off-site - none (on-site only)")]
+    chips = "".join(f'<span class="c321p {"met" if ok else "unmet"}" data-tip="{ti}">{d}</span>'
+                    for d, ok, ti in legs)
+    return f'<div class=c321><span class=c321l>3-2-1</span>{chips}</div>'
+
 def _card(r, can_act, viewer=False, cid=""):
     nm = r["name"]; n = _esc(nm); sev = SEVCLS.get(r["severity"], "unk")
     src = r.get("source") or ""
@@ -3535,19 +3591,13 @@ def _card(r, can_act, viewer=False, cid=""):
         if nt: runbits.append(f"next {_when(nt)}")
         if runbits: js += f'<div class=jrun>{" · ".join(runbits)}</div>'
         sched_html = f'<div class=jsched>{js}</div>'
-    # per-dataset 3-2-1 badge (replication sets only): each digit green if that leg is met.
+    # per-dataset 3-2-1 badge (standalone replication cards): each digit green if that leg is met.
     c321_html = ""
     if r["type"] == "zfs-repl" and r.get("source") and r.get("dest"):
         pools = {(r["source"] or "").split("/")[0], (r["dest"] or "").split("/")[0]}
         pools.discard("")
-        copies = media = len(pools)
         offsite = 1 if r.get("location") == "offsite" else 0
-        legs = [("3", copies >= 3, f"≥3 copies - {copies} of 3"),
-                ("2", media >= 2, f"≥2 media - {media}"),
-                ("1", offsite >= 1, "off-site copy" if offsite else "off-site - none (on-site only)")]
-        chips = "".join(f'<span class="c321p {"met" if ok else "unmet"}" data-tip="{ti}">{d}</span>'
-                        for d, ok, ti in legs)
-        c321_html = f'<div class=c321><span class=c321l>3-2-1</span>{chips}</div>'
+        c321_html = _c321_badge(len(pools), len(pools), offsite)
     hist_html = ""
     if r["type"] in ("zfs-repl", "zfs-local", "removable"):   # target types that receive action intents
         hist_html = (f'<div class=chistrow><button class=histbtn data-t="{n}" onclick="toggleHist(this,\'{nm}\')">'
