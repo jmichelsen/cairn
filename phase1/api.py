@@ -1915,17 +1915,17 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .card .cs{font-size:10.5px;font-weight:700;letter-spacing:.05em;flex:none}
 .card.ok .cs{color:var(--ok)} .card.warn .cs{color:var(--warn)} .card.crit .cs{color:var(--crit)} .card.unk .cs{color:var(--unk)}
 .card.ack .cs{color:var(--ack)}
-.card .src{font-family:"Roboto Mono";font-size:11.5px;color:var(--mut);margin-top:3px;overflow-wrap:anywhere;word-break:normal}
-.card .src .psz{color:var(--ink);font-weight:700}
+/* Subtitle = a breakable source->dest path + nowrap meta chips (size, enc, ...), each chip carrying
+   its own separator so a value like "2.2 TB" never splits and a wrap never orphans a leading "·".
+   Shared by every card type via _subtitle() for consistent wrap/overflow. */
+.card .src{font-family:"Roboto Mono";font-size:11.5px;color:var(--mut);margin-top:3px;line-height:1.5;overflow-wrap:break-word}
+.card .src .spath{overflow-wrap:break-word;word-break:break-word}
+.card .src .smeta{white-space:nowrap}
+.card .src .psz{color:var(--ink);font-weight:700;white-space:nowrap}
 .card .row{display:flex;gap:16px;margin-top:12px;flex-wrap:wrap}
 .card .mv{font-family:"Roboto Mono";font-weight:500;font-size:16px}
 .card .ml{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}
 .card .why{color:var(--mut);font-size:12px;margin-top:11px;line-height:1.4}
-.card .c321{display:inline-flex;align-items:center;gap:4px;margin-top:10px}
-.card .c321l{font-size:9px;letter-spacing:.09em;text-transform:uppercase;color:var(--mut);font-weight:700;margin-right:4px}
-.card .c321p{width:17px;height:17px;border-radius:5px;display:grid;place-items:center;
-  font:800 11px/1 "Roboto Mono",monospace;color:#fff;cursor:default}
-.card .c321p.met{background:var(--ok)} .card .c321p.unmet{background:var(--crit)}
 .cact{display:flex;gap:6px;margin-top:13px;flex-wrap:wrap}
 .cact button{appearance:none;font:600 11.5px/1 "Red Hat Text";border:1px solid var(--line);
   background:var(--surf);color:var(--acc2);border-radius:7px;padding:7px 10px;cursor:pointer}
@@ -3298,13 +3298,12 @@ def _pair_card(v, capable=frozenset(), viewer=False, cid=""):
     on-demand pull on that agent."""
     R = v["r"]; L = v["l"]; sev = SEVCLS.get(v["severity"], "unk")
     name = _esc(R["name"])
-    subtitle = f'{_esc(R.get("source") or "")} &rarr; {_esc(v["dataset"])}'
+    metas = []
     dsz = R.get("logical_size") or L.get("logical_size")   # source dataset size (plan what fits an external)
     if dsz:
-        subtitle += f' &middot; <b class=psz data-tip="dataset size (uncompressed)">{_cap(dsz)}</b>'
-    meta = []   # tier now lives as a header badge (see below), not in the subtitle
-    if R.get("encrypted") or L.get("encrypted"): meta.append("enc")
-    if meta: subtitle += " &middot; " + " &middot; ".join(_esc(m) for m in meta)
+        metas.append(f'<b class=psz data-tip="dataset size (uncompressed)">{_cap(dsz)}</b>')
+    if R.get("encrypted") or L.get("encrypted"): metas.append("enc")   # tier is a header badge, not here
+    subtitle_html = _subtitle(f'{_esc(R.get("source") or "")} &rarr; {_esc(v["dataset"])}', metas)
     def half(row, role, age_s=None, src_text=None):
         sevw = row["severity"]
         if age_s is None:
@@ -3342,15 +3341,8 @@ def _pair_card(v, capable=frozenset(), viewer=False, cid=""):
     legs = v.get("legs", [])
     legs_html = "".join(half(lg, "local 2nd copy", age_s=lg.get("snap_age_dst_s"),
                              src_text=lg.get("dest")) for lg in legs)
-    # Aggregate 3-2-1 across ALL of this dataset's copies: source pool + off-site pool + each leg's dest
-    # pool; a pair always has the off-site '1'. Shown only when a local leg makes the count meaningful
-    # here (2-copy pairs still report 3-2-1 via the fleet scorecard, which also counts removable media).
-    c321_html = ""
-    if legs:
-        pools = {(R.get("source") or "").split("/")[0], (L.get("source") or "").split("/")[0]}
-        pools.update((lg.get("dest") or "").split("/")[0] for lg in legs)
-        pools.discard("")
-        c321_html = _c321_badge(len(pools), len(pools), 1)
+    # 3-2-1 is shown once, authoritatively, in the fleet scorecard at the top of the page - not repeated
+    # per card.
     # On-demand pull: only when the off-site (L) agent can execute, and never for a read-only viewer.
     act_html = ""
     if not viewer and L.get("agent") in capable:
@@ -3364,7 +3356,7 @@ def _pair_card(v, capable=frozenset(), viewer=False, cid=""):
             f'<span class="cbusy" data-tip="pull running"></span>'
             f'<span class=pbadge>{"replication set" if legs else "replication pair"}</span>'
             f'<span class=cs>{_esc(v["severity"])}</span></span></div>'
-            f'<div class=src>{subtitle}</div>{c321_html}'
+            f'{subtitle_html}'
             f'<div class=phalves>{half(R, "source")}{half(L, "off-site copy")}{legs_html}</div>{act_html}</div>')
 
 def _removable_links_html(r, viewer=False):
@@ -3533,23 +3525,21 @@ def _removable_links_html(r, viewer=False):
     return (f'<div class=rlinks><div class=rl-hd>Datasets on this drive{fit_note}</div>'
             f'{body}{controls}</div>')
 
-def _c321_badge(copies, media, offsite):
-    """The 3-2-1 chip row (>=3 copies / >=2 media / >=1 off-site), each digit green when met."""
-    legs = [("3", copies >= 3, f"≥3 copies - {copies} of 3"),
-            ("2", media >= 2, f"≥2 media - {media}"),
-            ("1", offsite >= 1, "off-site copy" if offsite else "off-site - none (on-site only)")]
-    chips = "".join(f'<span class="c321p {"met" if ok else "unmet"}" data-tip="{ti}">{d}</span>'
-                    for d, ok, ti in legs)
-    return f'<div class=c321><span class=c321l>3-2-1</span>{chips}</div>'
+def _subtitle(path_html, metas=()):
+    """The card subtitle, uniform across every card type: a breakable source->dest path plus optional
+    nowrap meta chips (size, enc, ...). Each chip carries its own leading separator inside a nowrap
+    span, so a value never splits mid-token and a wrapped line never starts with an orphan '·'.
+    `path_html` and each meta are already HTML-escaped by the caller."""
+    chips = "".join(f' <span class=smeta>&middot; {m}</span>' for m in metas if m)
+    return f'<div class=src><span class=spath>{path_html}</span>{chips}</div>' if (path_html or chips) else ""
 
 def _card(r, can_act, viewer=False, cid=""):
     nm = r["name"]; n = _esc(nm); sev = SEVCLS.get(r["severity"], "unk")
     src = r.get("source") or ""
-    src_line = f"{src} → {r['dest']}" if r.get("dest") else src
-    meta = []   # tier now lives as a header badge (see the return), not in the subtitle
-    if r.get("encrypted"): meta.append("enc")
-    if r.get("location") == "offsite": meta.append("off-site")
-    if meta: src_line = (src_line + " · " if src_line else "") + " · ".join(meta)
+    path = f'{_esc(src)} &rarr; {_esc(r["dest"])}' if r.get("dest") else _esc(src)
+    metas = []   # tier now lives as a header badge (see the return), not in the subtitle
+    if r.get("encrypted"): metas.append("enc")
+    if r.get("location") == "offsite": metas.append("off-site")
     mr = ""
     if r.get("pool_cap_pct") is not None:
         mr += f'<div><div class="mv">{r["pool_cap_pct"]}%</div><div class="ml">capacity</div></div>'
@@ -3561,8 +3551,8 @@ def _card(r, can_act, viewer=False, cid=""):
         mr += f'<div><div class="mv">{r["dedup_ratio"]}×</div><div class="ml">dedup</div></div>'
     d = json.loads(r.get("detail_json") or "{}")
     why = _esc(", ".join(d.get("reasons", [])) or (r.get("last_error") or ""))
-    subtitle = src_line or d.get("summary") or ""     # event/health cards use a summary as their subtitle
-    src_html = f'<div class="src">{_esc(subtitle)}</div>' if subtitle else ""
+    # event/health cards have no source path - fall back to their summary as the subtitle text.
+    src_html = _subtitle(path, metas) if (src or r.get("dest")) else _subtitle(_esc(d.get("summary") or ""))
     mr_html = f'<div class="row">{mr}</div>' if mr else ""
     why_html = f'<div class="why">{why}</div>' if why else ""
     # live scrub progress bar (pool roots only): visible while a scrub runs, hidden otherwise so the
@@ -3591,13 +3581,6 @@ def _card(r, can_act, viewer=False, cid=""):
         if nt: runbits.append(f"next {_when(nt)}")
         if runbits: js += f'<div class=jrun>{" · ".join(runbits)}</div>'
         sched_html = f'<div class=jsched>{js}</div>'
-    # per-dataset 3-2-1 badge (standalone replication cards): each digit green if that leg is met.
-    c321_html = ""
-    if r["type"] == "zfs-repl" and r.get("source") and r.get("dest"):
-        pools = {(r["source"] or "").split("/")[0], (r["dest"] or "").split("/")[0]}
-        pools.discard("")
-        offsite = 1 if r.get("location") == "offsite" else 0
-        c321_html = _c321_badge(len(pools), len(pools), offsite)
     hist_html = ""
     if r["type"] in ("zfs-repl", "zfs-local", "removable"):   # target types that receive action intents
         hist_html = (f'<div class=chistrow><button class=histbtn data-t="{n}" onclick="toggleHist(this,\'{nm}\')">'
@@ -3630,7 +3613,7 @@ def _card(r, can_act, viewer=False, cid=""):
     idattr = f' id="{cid}"' if cid else ""
     return (f'<div class="card {card_cls}"{idattr} data-t="{n}"><div class="ch"><span class="cn">{title}{_tier_badge(r.get("tier"))}</span>'
             f'<span class="chr"><span class="cbusy" data-tip="action running"></span>'
-            f'<span class="cs">{cs_text}</span></span></div>{src_html}{sched_html}{c321_html}{mr_html}{scrub_html}{why_html}'
+            f'<span class="cs">{cs_text}</span></span></div>{src_html}{sched_html}{mr_html}{scrub_html}{why_html}'
             f'{ack_html}{_acts(r, can_act, viewer)}{_removable_links_html(r, viewer)}'
             f'{hist_html}{log_html}{hide_html}</div>')
 
