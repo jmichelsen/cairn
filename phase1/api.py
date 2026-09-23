@@ -1918,8 +1918,9 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 /* Subtitle = a breakable source->dest path + nowrap meta chips (size, enc, ...), each chip carrying
    its own separator so a value like "2.2 TB" never splits and a wrap never orphans a leading "·".
    Shared by every card type via _subtitle() for consistent wrap/overflow. */
-.card .src{font-family:"Roboto Mono";font-size:11.5px;color:var(--mut);margin-top:3px;line-height:1.5;overflow-wrap:break-word}
+.card .src{font-family:"Roboto Mono";font-size:11.5px;color:var(--mut);margin-top:3px;line-height:1.5}
 .card .src .spath{overflow-wrap:break-word;word-break:break-word}
+.card .src .smetarow{margin-top:1px}
 .card .src .smeta{white-space:nowrap}
 .card .src .psz{color:var(--ink);font-weight:700;white-space:nowrap}
 .card .row{display:flex;gap:16px;margin-top:12px;flex-wrap:wrap}
@@ -3526,12 +3527,14 @@ def _removable_links_html(r, viewer=False):
             f'{body}{controls}</div>')
 
 def _subtitle(path_html, metas=()):
-    """The card subtitle, uniform across every card type: a breakable source->dest path plus optional
-    nowrap meta chips (size, enc, ...). Each chip carries its own leading separator inside a nowrap
-    span, so a value never splits mid-token and a wrapped line never starts with an orphan '·'.
-    `path_html` and each meta are already HTML-escaped by the caller."""
-    chips = "".join(f' <span class=smeta>&middot; {m}</span>' for m in metas if m)
-    return f'<div class=src><span class=spath>{path_html}</span>{chips}</div>' if (path_html or chips) else ""
+    """The card subtitle, uniform across every card type: the source->dest path on its OWN line, then an
+    optional meta line (size, enc, ...) below it. Separators sit BETWEEN meta items only (never leading),
+    and each value is nowrap so it can't split mid-token. `path_html` + metas are pre-escaped by caller."""
+    items = [m for m in metas if m]
+    path_row = f'<div class=spath>{path_html}</div>' if path_html else ""
+    meta_row = ('<div class=smetarow>' + " &middot; ".join(f'<span class=smeta>{m}</span>' for m in items)
+                + '</div>') if items else ""
+    return f'<div class=src>{path_row}{meta_row}</div>' if (path_row or meta_row) else ""
 
 def _card(r, can_act, viewer=False, cid=""):
     nm = r["name"]; n = _esc(nm); sev = SEVCLS.get(r["severity"], "unk")
