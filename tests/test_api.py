@@ -271,3 +271,37 @@ def test_scorecard_credits_verify_freshness_without_a_sync():
         conn.commit()
     card = {c["name"]: c for c in api.scorecard()["cards"]}["PicsV"]
     assert card["removable"] is True and card["copies"] == 3
+
+
+# ---- multi-destination datasets: local 2nd copy folds into the pair, not a duplicate ----------
+def _seed_local(name, source, agent, sev="OK"):
+    with api.db() as conn:
+        tid = conn.execute(
+            "INSERT INTO targets(name,type,source,agent,enabled) VALUES(?, 'zfs-local', ?, ?, 1) RETURNING id",
+            (name, source, agent)).fetchone()[0]
+        conn.execute("INSERT INTO status(ts,target_id,severity) VALUES(1,?,?)", (tid, sev))
+        conn.commit()
+    return tid
+
+
+def test_scorecard_aggregates_local_2nd_copy_by_dataset():
+    # michxpsX has an off-site copy (mcz->vault) AND a local 2nd copy (mcz->mediaz): ONE dataset, 3 copies.
+    _seed_repl("michxpsX", "mcz/mclife/michxpsX", "vault/michxpsX", location="offsite")
+    _seed_repl("michxpsX-local", "mcz/mclife/michxpsX", "mediaz/michxpsX", location=None)
+    cards = {c["name"]: c for c in api.scorecard()["cards"]}
+    assert "michxpsX-local" not in cards          # not a separate (failing) card
+    c = cards["michxpsX"]
+    assert c["copies"] == 3 and c["media"] == 3 and c["offsite"] == 1 and c["pass_321"] is True
+
+
+def test_pairing_folds_local_2nd_copy_leg():
+    # a guaranteed off-site pair (home mcz->iwolf + vault zfs-local iwolf) PLUS a local 2nd copy.
+    _seed_repl("michZ", "mcz/mclife/michZ", "iwolf/michZ", location=None, agent="local")
+    _seed_local("michZ", "iwolf/michZ", agent="vault")            # the off-site half (pairs with the above)
+    _seed_repl("michZ-local", "mcz/mclife/michZ", "mediaz/michZ", location=None, agent="local")
+    with api.db() as conn:
+        rows = api.latest_status(conn)
+        views, keys = api.pairing(conn, rows)
+    v = next(v for v in views if v["r"]["name"] == "michZ")
+    assert [lg["name"] for lg in v["legs"]] == ["michZ-local"]    # folded in as a leg
+    assert ("local", "michZ-local") in keys                       # excluded from standalone rendering
