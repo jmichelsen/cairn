@@ -605,11 +605,51 @@ def do_recovery_walk(cfg):
             walked += 1
     return walked
 
+def _start_mdns():
+    """Advertise the LOCAL API on the LAN via mDNS so clients (the Android app) discover it instantly,
+    instead of subnet-scanning. Opt-in with CAIRN_MDNS=1 (set ONLY on the agent co-located with the API
+    - never the off-site vault, which is on a different network). No-op + a note if python-zeroconf isn't
+    installed (`sudo apt install python3-zeroconf`); the subnet-scan fallback works regardless. Returns
+    the Zeroconf handle (kept alive for the process) or None."""
+    if os.environ.get("CAIRN_MDNS", "0") != "1":
+        return None
+    try:
+        from zeroconf import Zeroconf, ServiceInfo
+    except Exception as e:
+        print(f"[mdns] zeroconf unavailable ({e}); skipping advert - subnet scan still discovers cairn")
+        return None
+    port = int(os.environ.get("CAIRN_MDNS_PORT", "8929"))
+    addr = os.environ.get("CAIRN_MDNS_ADDR")
+    if not addr:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)      # pick the primary LAN source IP
+        try:
+            s.connect(("8.8.8.8", 80)); addr = s.getsockname()[0]
+        except OSError:
+            addr = "127.0.0.1"
+        finally:
+            s.close()
+    label = os.environ.get("CAIRN_NAME") or socket.gethostname()
+    try:
+        info = ServiceInfo("_cairn._tcp.local.", f"cairn on {label}._cairn._tcp.local.",
+                           addresses=[socket.inet_aton(addr)], port=port,
+                           properties={"product": "cairn", "api": "v1", "path": "/", "name": label})
+        zc = Zeroconf()
+        zc.register_service(info)
+        import atexit
+        atexit.register(lambda: (zc.unregister_service(info), zc.close()))
+        print(f"[mdns] advertising _cairn._tcp at {addr}:{port} as '{label}'")
+        return zc
+    except Exception as e:
+        print(f"[mdns] advert failed ({e}); subnet scan still discovers cairn")
+        return None
+
+
 def main():
     once = "--once" in sys.argv
     cfg = yaml.safe_load(Path(TARGETS).read_text())
     auth = "enroll" if ENROLL_SECRET else "static-token"
     print(f"agent '{NAME}' v{VERSION} -> {API}  (auth={auth}, execute={CAN_EXEC}, dryrun={DRYRUN}, interval={INTERVAL}s)")
+    _mdns = _start_mdns()   # noqa: F841 - kept alive for the process lifetime
     if ENROLL_SECRET:
         try:
             enroll()
