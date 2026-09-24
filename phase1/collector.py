@@ -184,17 +184,34 @@ def _live_vdev_index():
                     vdevs.add((pool, re.sub(r"-part\d+$", "", p[0])))
     return health, vdevs
 
+_SNAP_CACHE = {}   # ds -> (ts, snaps): last SUCCESSFUL listing, served on a transient failure
+_SNAP_CACHE_TTL = int(os.environ.get("CAIRN_SNAP_CACHE_TTL", "1800"))   # how long to serve last-good (s)
+
 def zfs_snapshots(ds):
-    """[(name, guid, creation_epoch)] oldest->newest for a dataset (non-recursive)."""
+    """[(name, guid, creation_epoch)] oldest->newest for a dataset (non-recursive).
+
+    A dataset with tens of thousands of snapshots (archive, autoprune=no) makes this list slow, so a
+    transient failure under load would otherwise read as an EMPTY list - indistinguishable from 'zero
+    snapshots' - and flap a false 'source has NO snapshots' alarm. So on a FAILED read we serve the last
+    successful result for up to CAIRN_SNAP_CACHE_TTL (default 30m): long enough to ride out a blip, short
+    enough that a REAL sustained failure still surfaces. And the served list's own newest-snapshot age
+    still drives the freshness verdict, so a genuine 'snapshots stopped' is NOT hidden - only the false
+    empty-on-blip is. A longer timeout also makes the read itself fail less often."""
     rc, out, _ = run(["zfs", "list", "-Hp", "-t", "snapshot", "-o", "name,guid,creation",
-                      "-s", "creation", "-d", "1", ds])
-    snaps = []
+                      "-s", "creation", "-d", "1", ds], timeout=180)
+    now = time.time()
     if rc == 0:
+        snaps = []
         for ln in out.splitlines():
             f = ln.split("\t")
             if len(f) == 3:
                 snaps.append((f[0], f[1], int(f[2])))
-    return snaps
+        _SNAP_CACHE[ds] = (now, snaps)
+        return snaps
+    cached = _SNAP_CACHE.get(ds)                       # read failed: last-good within TTL, else surface it
+    if cached and (now - cached[0]) < _SNAP_CACHE_TTL:
+        return cached[1]
+    return []
 
 def zfs_props(ds, props):
     rc, out, _ = run(["zfs", "get", "-Hp", "-o", "property,value", ",".join(props), ds])
