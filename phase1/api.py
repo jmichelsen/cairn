@@ -155,7 +155,8 @@ async def auth_gate(request: Request, call_next):
     admin only. The resolved role is stashed on request.state.role for the dashboard to render
     read-only. 401 = not signed in (HTML GET redirects to /login); 403 = signed in but read-only."""
     p = request.url.path
-    if p in ("/login", "/logout", "/favicon.ico", "/api/v1/backup/enroll", "/api/v1/ci/status") \
+    if p in ("/login", "/logout", "/favicon.ico", "/api/v1/identify",
+             "/api/v1/backup/enroll", "/api/v1/ci/status") \
             or p.startswith("/badge/"):
         # /enroll and /ci/status self-authenticate on their own shared secret (enrollment secret /
         # CAIRN_CI_TOKEN). /badge/*.svg is intentionally PUBLIC and unauthenticated - it is the one
@@ -464,6 +465,15 @@ async def ci_status_push(request: Request):
             "url=excluded.url, updated_ts=excluded.updated_ts", (name, status, ref, url, now))
         conn.commit()
     return {"ok": True, "name": name, "status": status}
+
+@app.get("/api/v1/identify")
+def identify():
+    """PUBLIC, unauthenticated instance identity - for LAN discovery (mDNS / subnet scan) to confirm
+    'this is Cairn' and show the instance name + version BEFORE any token. Exposes only non-sensitive
+    identity: no counts, no dataset names. Name = CAIRN_NAME, else the hostname."""
+    import socket
+    return {"product": "cairn", "name": os.environ.get("CAIRN_NAME") or socket.gethostname(),
+            "version": CAIRN_VERSION, "api": "v1", "auth": ["token", "password"]}
 
 @app.get("/api/v1/ci/status")
 def ci_status_list():

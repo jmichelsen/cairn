@@ -305,3 +305,10 @@ def test_pairing_folds_local_2nd_copy_leg():
     v = next(v for v in views if v["r"]["name"] == "michZ")
     assert [lg["name"] for lg in v["legs"]] == ["michZ-local"]    # folded in as a leg
     assert ("local", "michZ-local") in keys                       # excluded from standalone rendering
+
+
+def test_identify_is_public_shape(monkeypatch):
+    monkeypatch.setenv("CAIRN_NAME", "testhost")
+    d = api.identify()
+    assert d["product"] == "cairn" and d["name"] == "testhost"
+    assert d["api"] == "v1" and "version" in d and isinstance(d["auth"], list)
