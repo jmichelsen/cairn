@@ -1365,17 +1365,26 @@ def adapter_schedules(t, defaults, now):
                   "next_ts": _sd_epoch(tp.get("NextElapseUSecRealtime")),
                   "last_ts": _sd_epoch(tp.get("LastTriggerUSec"))}
         st["last_run_ts"] = detail["last_ts"]
+        detail["backs_up"] = (", ".join(f"{s} → {d}" for s, d in _syncoid_pairs()) or "(no syncoid jobs configured)") \
+            if sp["kind"] == "syncoid" else "ZFS snapshots per sanoid.conf"
+        # A DISABLED/masked timer is intentionally off - not a failure. Report OK with a note and do NOT
+        # surface its last (possibly-failed) run or old journal errors: disabling a job you retired must
+        # not keep nagging as a WARN.
+        ufs = tp.get("UnitFileState")
+        if ufs in ("disabled", "masked", "masked-runtime"):
+            detail["disabled"] = True
+            detail["note"] = f"timer {ufs} (intentionally off)"
+            st["detail_json"] = json.dumps(detail)
+            out.append(st)
+            continue
+        # --- enabled timer: surface real problems ---
         if sp["kind"] == "syncoid":
-            pairs = _syncoid_pairs()
-            detail["backs_up"] = ", ".join(f"{s} → {d}" for s, d in pairs) or "(no syncoid jobs configured)"
             sv = _sd_show(sp["service"], ["Result", "ExecMainStatus"])
             # ExecStart uses a '-' prefix so the timer stays 'success' even when syncoid itself errors -
             # surface a non-zero last exit as a warning, since it means a replication run had problems.
             if sv.get("ExecMainStatus") not in (None, "", "0"):
                 st["severity"] = worst(st["severity"], "WARN")
                 st["last_error"] = f"last run exited status {sv['ExecMainStatus']}"
-        else:
-            detail["backs_up"] = "ZFS snapshots per sanoid.conf"
         # pull the actual failure text from THIS run's journal (portable: journalctl, no custom log)
         if sp.get("service"):
             errs = _error_lines(_last_run_journal(sp["service"]))
@@ -1388,10 +1397,6 @@ def adapter_schedules(t, defaults, now):
                 if st["severity"] != "OK":                      # replace the vague exit code with the real reason
                     pick = (spec or errs)[:2]
                     st["last_error"] = "; ".join(x[:160] for x in pick)[:340]
-        ufs = tp.get("UnitFileState")
-        if ufs and ufs not in ("enabled", "enabled-runtime", "static"):
-            st["severity"] = worst(st["severity"], "WARN")
-            st["last_error"] = f"timer {ufs}"
         if tp.get("Result") not in (None, "", "success"):
             st["severity"] = worst(st["severity"], "WARN")
             st["last_error"] = f"timer result {tp.get('Result')}"
