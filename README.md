@@ -202,3 +202,16 @@ curl -H "x-backup-token: $ADMIN"        https://your-cairn/api/v1/backup/heartbe
 ```
 
 Leave `CAIRN_KUMA_PUSH_URL` blank and the feature is simply off.
+
+## Pairing a phone
+
+An Android client (`cairn-android`) can pair by QR code instead of a pasted token. Signed in as
+admin, open **pair phone** in the dashboard's top bar (`/pair`), choose read-only or admin, and scan
+the code from the app. Each code mints a fresh token labelled `phone-<timestamp>` (shown once; revoke
+it like any other with `DELETE /api/v1/backup/tokens/<label>`). The code lists every address the phone
+should try, most-local first:
+
+```
+CAIRN_LAN_URL=http://192.168.1.5:8929      # optional: added first, so the phone prefers the LAN
+CAIRN_PUBLIC_URL=https://cairn.example.com # optional: added last; the page's own address is always included
+```
