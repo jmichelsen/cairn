@@ -9,7 +9,7 @@
 # ---- shared base: python + the app's pip deps (single source of truth for versions) ----
 FROM python:3.12-slim AS deps
 ENV DEBIAN_FRONTEND=noninteractive PIP_DISABLE_PIP_VERSION_CHECK=1
-RUN pip install --no-cache-dir pyyaml "fastapi>=0.110" "uvicorn[standard]>=0.29"
+RUN pip install --no-cache-dir pyyaml "fastapi>=0.110" "uvicorn[standard]>=0.29" "segno>=1.6"
 
 # ---- ci: adds nodejs (for check_js's `node --check`) + pytest, then RUNS the checks as the final layer.
 # A failed `docker build --target ci` IS a failed test stage. Only the source COPY + this RUN re-run when

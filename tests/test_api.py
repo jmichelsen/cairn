@@ -312,3 +312,55 @@ def test_identify_is_public_shape(monkeypatch):
     d = api.identify()
     assert d["product"] == "cairn" and d["name"] == "testhost"
     assert d["api"] == "v1" and "version" in d and isinstance(d["auth"], list)
+
+
+# ---- phone pairing (Android client: cairn://pair QR) -------------------------------------------
+def test_pair_uri_carries_name_role_token_and_every_url():
+    from urllib.parse import urlparse, parse_qs
+    u = api.pair_uri("mclife", "abc", ["http://192.168.1.5:8929", "https://cairn.mclife.cc"], "viewer")
+    p = urlparse(u)
+    assert p.scheme == "cairn" and p.netloc == "pair"
+    q = parse_qs(p.query)
+    assert q["name"] == ["mclife"] and q["token"] == ["abc"] and q["role"] == ["viewer"]
+    assert q["url"] == ["http://192.168.1.5:8929", "https://cairn.mclife.cc"]
+
+def _req(path, method="GET", headers=None, body=b""):
+    from starlette.requests import Request
+    hdrs = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+    return Request({"type": "http", "method": method, "path": path, "headers": hdrs, "query_string": b"",
+                    "scheme": "https", "server": ("cairn.test", 443), "root_path": ""}, receive)
+
+
+def _gate(path, token, method="GET"):
+    """Run the auth middleware for a request; returns the status it would answer with (200 = passed)."""
+    import asyncio
+    from starlette.responses import Response
+    async def call_next(_):
+        return Response(status_code=200)
+    return asyncio.run(api.auth_gate(_req(path, method, {"X-Backup-Token": token}), call_next)).status_code
+
+
+def test_pairing_is_admin_only_and_mints_a_working_viewer_token():
+    import asyncio
+    from urllib.parse import urlparse, parse_qs
+    j = asyncio.run(api.create_pairing(_req("/api/v1/backup/pair", "POST", {"host": "cairn.test"}, b"{}")))
+    assert j["role"] == "viewer" and j["label"].startswith("phone-")
+    q = parse_qs(urlparse(j["uri"]).query)
+    assert "https://cairn.test" in q["url"]
+    tok = q["token"][0]
+    assert api._lookup_role(tok) == "viewer"                       # a working read-only token
+    assert _gate("/api/v1/backup/health", tok) == 200
+    assert _gate("/api/v1/backup/pair", tok, "POST") == 403        # can't mint more phones
+    assert _gate("/pair", tok) == 403                              # nor see the pairing page
+    assert _gate("/pair", "test-admin-token") == 200
+
+
+def test_pairing_rejects_unknown_role():
+    import asyncio
+    import pytest
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(api.create_pairing(_req("/api/v1/backup/pair", "POST", {}, b'{"role":"agent"}')))
+    assert e.value.status_code == 400

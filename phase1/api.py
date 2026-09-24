@@ -50,7 +50,7 @@ SEVCLS = {"CRIT": "crit", "WARN": "warn", "UNKNOWN": "unk", "OK": "ok"}  # sever
 import hashlib as _hashlib, secrets as _secrets
 AGENT_PATHS = ("/api/v1/backup/report", "/api/v1/backup/intents",
                "/api/v1/backup/agent/")  # agent-only: report, intents/{id}/result, recovery walk push/due
-ADMIN_ONLY_PATHS = ("/api/v1/backup/tokens",)  # sensitive even on GET - never for a viewer
+ADMIN_ONLY_PATHS = ("/api/v1/backup/tokens", "/api/v1/backup/pair", "/pair")  # sensitive even on GET - never for a viewer
 # A dedicated, single-purpose secret CI uses to push pipeline status to /api/v1/ci/status. Scoped to
 # ONLY that route (compared in-handler), so it can set a badge but do nothing else - safe to hand to
 # GitLab CI variables. Unset => the push route is closed (badges still render "unknown").
@@ -471,9 +471,12 @@ def identify():
     """PUBLIC, unauthenticated instance identity - for LAN discovery (mDNS / subnet scan) to confirm
     'this is Cairn' and show the instance name + version BEFORE any token. Exposes only non-sensitive
     identity: no counts, no dataset names. Name = CAIRN_NAME, else the hostname."""
-    import socket
-    return {"product": "cairn", "name": os.environ.get("CAIRN_NAME") or socket.gethostname(),
+    return {"product": "cairn", "name": _instance_name(),
             "version": CAIRN_VERSION, "api": "v1", "auth": ["token", "password"]}
+
+def _instance_name():
+    import socket
+    return os.environ.get("CAIRN_NAME") or socket.gethostname()
 
 @app.get("/api/v1/ci/status")
 def ci_status_list():
@@ -1696,6 +1699,90 @@ def revoke_token(label: str):
         c.execute("UPDATE auth_tokens SET active=0 WHERE label=? OR parent=?", (label, label))
         c.commit()
     return {"ok": True, "revoked": label}
+
+# ---------------- phone pairing: mint a per-phone token and hand it over as a QR code ----------------
+# The Android client scans cairn://pair?... (or opens it as a link) to save this instance with every
+# address it can reach, instead of the user typing a 64-char token. Admin-only (ADMIN_ONLY_PATHS): the
+# QR carries a live token, shown once, labelled per phone and revocable like any other.
+
+def _pair_urls(request: Request):
+    """Addresses the phone should try, most-local first: CAIRN_LAN_URL, the address this page was
+    opened on (honouring X-Forwarded-Proto/Host from the reverse proxy), then CAIRN_PUBLIC_URL."""
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    seen = []
+    for u in (os.environ.get("CAIRN_LAN_URL"), f"{proto}://{host}", os.environ.get("CAIRN_PUBLIC_URL")):
+        u = (u or "").strip().rstrip("/")
+        if u and u not in seen:
+            seen.append(u)
+    return seen
+
+def pair_uri(name, token, urls, role):
+    from urllib.parse import urlencode
+    q = [("v", "1"), ("name", name), ("role", role), ("token", token)] + [("url", u) for u in urls]
+    return "cairn://pair?" + urlencode(q)
+
+@app.post("/api/v1/backup/pair")
+async def create_pairing(request: Request):
+    body = await _json(request)
+    role = body.get("role") or "viewer"
+    if role not in ("viewer", "admin"):
+        raise HTTPException(400, "role must be 'viewer' or 'admin'")
+    label = "phone-" + time.strftime("%Y%m%d-%H%M%S")
+    token = _secrets.token_hex(32)
+    with db() as c:
+        c.execute("INSERT INTO auth_tokens(hash,role,kind,label,created_ts,active) VALUES(?,?,?,?,?,1)",
+                  (_hash(token), role, "admin" if role == "admin" else "ui", label, int(time.time())))
+        c.commit()
+    uri = pair_uri(_instance_name(), token, _pair_urls(request), role)
+    svg = None
+    try:
+        import segno
+        svg = segno.make(uri, error="m").svg_inline(scale=6, dark="#0d1320", light="#ffffff", border=3)
+    except ImportError:   # QR rendering is optional; the link still pairs when opened on the phone
+        pass
+    return {"uri": uri, "label": label, "role": role, "svg": svg}
+
+PAIR_PAGE = """
+  <div class=topbar2><h2 class=applogo>Cairn</h2><a class=signout href=/>&larr; dashboard</a></div>
+  <div class=pairwrap>
+    <h3>Pair a phone</h3>
+    <p class=pairnote>Creates a new access token just for one phone and shows it as a QR code. Scan it with
+    the Cairn Android app (<b>Scan pairing code</b>). It is shown once; revoke it any time by its label.</p>
+    <div class=pairctl>
+      <label><input type=radio name=prole value=viewer checked> Read-only (recommended)</label>
+      <label><input type=radio name=prole value=admin> Admin (can run actions)</label>
+      <button id=pairbtn onclick="makePair()">Create pairing code</button>
+    </div>
+    <div id=pairout></div>
+  </div>
+<style>
+.pairwrap{max-width:520px;padding:10px 26px 30px}
+.pairnote{color:var(--mut);font-size:14px;line-height:1.5}
+.pairctl{display:flex;flex-direction:column;gap:10px;margin:16px 0}
+.pairctl button{align-self:flex-start;background:var(--acc);color:#fff;border:0;border-radius:10px;padding:10px 16px;font:600 14px "Red Hat Text",sans-serif;cursor:pointer}
+#pairout svg{border-radius:12px;display:block;margin:10px 0}
+.pairlbl{font:12.5px "Roboto Mono",monospace;color:var(--mut)}
+.pairlink{word-break:break-all;font:11px "Roboto Mono",monospace;color:var(--mut)}
+</style>
+<script>
+async function makePair(){
+  var role=document.querySelector('input[name=prole]:checked').value;
+  var out=document.getElementById('pairout'); out.textContent='creating\u2026';
+  var r=await fetch('/api/v1/backup/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({role:role})});
+  var j=await r.json();
+  if(!r.ok){ out.textContent='failed: '+(j.detail||r.status); return; }
+  out.innerHTML=(j.svg||'<p>(QR rendering unavailable - open the link below on the phone)</p>')
+    +'<div class=pairlbl>'+j.role+' token \u00b7 label '+j.label+'</div>'
+    +'<details><summary>link</summary><div class=pairlink></div></details>';
+  out.querySelector('.pairlink').textContent=j.uri;
+  document.getElementById('pairbtn').textContent='Create another';
+}
+</script>"""
+
+@app.get("/pair", response_class=HTMLResponse)
+def pair_page():
+    return _shell(PAIR_PAGE)
 
 # ---------------- HTML dashboard + on-demand action buttons ----------------
 # The dashboard is the "Panel" design direction: a 14-day fleet heatmap, a capacity gauge +
@@ -3928,6 +4015,7 @@ def index(request: Request):
       <button data-h=steel onclick="setHero('steel')">Summary</button>
       <button data-h=heat onclick="setHero('heat')">14-day fleet</button></div>
     {ro_badge}{dry_html}
+    {'' if viewer else '<a class=signout href=/pair>pair phone</a>'}
     <a class=signout href=# onclick="lo.submit();return false">sign out</a></div>
   {warm_banner}{recon_banner}
   <div id=hero-steel class=herox>{steel_hero}</div>
