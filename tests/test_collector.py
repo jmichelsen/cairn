@@ -693,3 +693,27 @@ def test_undeclared_remote_dest_stays_unknown(monkeypatch):
     _patch_repl(monkeypatch, src_snaps=True, age=3600)
     st = collector.adapter_zfs_repl(_repl(), collector.DEFAULT_THRESHOLDS, 100000, {"mcz"})[0]
     assert st["severity"] == "UNKNOWN"          # no dest_agent -> legacy behavior preserved
+
+
+# ---- zfs_snapshots: transient-failure cache (stops the "source has NO snapshots" flap) ---------
+def test_zfs_snapshots_serves_last_good_on_transient_failure_but_surfaces_sustained(monkeypatch):
+    seq = {"n": 0}
+    def fake_run(cmd, timeout=60, env=None):
+        seq["n"] += 1
+        if seq["n"] == 1:
+            return (0, "tank@a\t111\t1000\ntank@b\t222\t2000\n", "")   # first call succeeds
+        return (1, "", "zfs: dataset busy")                            # later calls fail
+    monkeypatch.setattr(collector, "run", fake_run)
+    collector._SNAP_CACHE.clear()
+    monkeypatch.setattr(collector, "_SNAP_CACHE_TTL", 1800)
+    good = collector.zfs_snapshots("tank")
+    assert [x[0] for x in good] == ["tank@a", "tank@b"]               # parsed + cached
+    assert collector.zfs_snapshots("tank") == good                    # transient failure -> last good
+    collector._SNAP_CACHE["tank"] = (0, good)                         # age the cache far past the TTL
+    assert collector.zfs_snapshots("tank") == []                     # sustained failure -> surfaces empty
+
+
+def test_zfs_snapshots_empty_success_is_genuine_not_cached_stale(monkeypatch):
+    monkeypatch.setattr(collector, "run", lambda *a, **k: (0, "", ""))  # succeeds with zero snapshots
+    collector._SNAP_CACHE.clear()
+    assert collector.zfs_snapshots("emptytank") == []                # a real empty result, no false cache
