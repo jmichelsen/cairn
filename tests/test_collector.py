@@ -717,3 +717,23 @@ def test_zfs_snapshots_empty_success_is_genuine_not_cached_stale(monkeypatch):
     monkeypatch.setattr(collector, "run", lambda *a, **k: (0, "", ""))  # succeeds with zero snapshots
     collector._SNAP_CACHE.clear()
     assert collector.zfs_snapshots("emptytank") == []                # a real empty result, no false cache
+
+
+# ---- schedules: a DISABLED timer is intentionally off -> OK, not a stale WARN ------------------
+def test_schedules_disabled_timer_reports_ok_not_warn(monkeypatch):
+    def fake_show(unit, props):
+        if unit.endswith(".timer"):
+            return {"UnitFileState": "disabled", "ActiveState": "inactive", "Result": "success"}
+        return {"Result": "success", "ExecMainStatus": "2"}   # a FAILED last run - must be ignored when off
+    monkeypatch.setattr(collector, "_sd_show", fake_show)
+    monkeypatch.setattr(collector, "_syncoid_pairs", lambda: [("mcz/x", "iwolf/x")])
+    monkeypatch.setattr(collector, "_timer_oncalendar", lambda u: "*-*-* 00:00:00")
+    monkeypatch.setattr(collector, "_pretty_cal", lambda s: s)
+    monkeypatch.setattr(collector, "_last_run_journal", lambda s: ["CRITICAL ERROR: boom"])
+    monkeypatch.setattr(collector, "_sd_epoch", lambda v: None)
+    import json
+    out = collector.adapter_schedules({}, collector.DEFAULT_THRESHOLDS, 1000)
+    syncoid = next(s for s in out if s.get("name_suffix") == "syncoid")
+    assert syncoid["severity"] == "OK" and syncoid["last_error"] is None
+    d = json.loads(syncoid["detail_json"])
+    assert d.get("disabled") is True and "journal" not in d   # old failure NOT surfaced for a disabled timer
