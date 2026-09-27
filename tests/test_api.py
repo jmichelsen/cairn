@@ -364,3 +364,38 @@ def test_pairing_rejects_unknown_role():
     with pytest.raises(HTTPException) as e:
         asyncio.run(api.create_pairing(_req("/api/v1/backup/pair", "POST", {}, b'{"role":"agent"}')))
     assert e.value.status_code == 400
+
+
+# ---- reminder plumbing: dispatch_alert threads push + cooldown to notify.sh -------------------
+def test_dispatch_alert_threads_force_gotify_and_cooldown(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(api.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(api.subprocess, "run",
+                        lambda cmd, env=None, timeout=None: calls.update(cmd=cmd, env=env))
+    api.dispatch_alert("WARN", "seagate: WARN", "over 30d", "cairn-seagate",
+                       force_gotify=True, cooldown=604800)
+    assert calls["cmd"][2] == "WARN"
+    assert calls["env"]["NOTIFY_FORCE_GOTIFY"] == "1"       # push a WARN even without the global flag
+    assert calls["env"]["NOTIFY_COOLDOWN"] == "604800"      # weekly re-nudge, not the default daily
+
+
+def test_dispatch_alert_info_confirmation_pushes_and_is_not_suppressed(monkeypatch):
+    # the "2nd copy refreshed" confirmation is INFO but must still push+email (info_email + force_gotify).
+    calls = {}
+    monkeypatch.setattr(api.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(api.subprocess, "run",
+                        lambda cmd, env=None, timeout=None: calls.update(cmd=cmd, env=env))
+    api.dispatch_alert("INFO", "seagate: 2nd copy refreshed", "synced", "cairn-seagate-ok",
+                       info_email=True, force_gotify=True, cooldown=0)
+    assert calls.get("cmd") and calls["cmd"][2] == "INFO"   # NOT dropped by the INFO guard
+    assert calls["env"]["NOTIFY_INFO_EMAIL"] == "1" and calls["env"]["NOTIFY_FORCE_GOTIFY"] == "1"
+
+
+def test_dispatch_alert_plain_info_still_suppressed(monkeypatch):
+    # a bare INFO with neither email nor push stays suppressed (unchanged behavior).
+    calls = {}
+    monkeypatch.setattr(api.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(api.subprocess, "run",
+                        lambda cmd, env=None, timeout=None: calls.update(cmd=cmd))
+    api.dispatch_alert("INFO", "fyi", "body", "k")
+    assert "cmd" not in calls

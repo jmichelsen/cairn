@@ -30,6 +30,8 @@ if [ -n "$KEY" ]; then
   SF="$STATE_DIR/alert-state"
   touch "$SF" 2>/dev/null
   case "$SEV" in CRIT) CD="${COOLDOWN_CRIT:-21600}";; WARN) CD="${COOLDOWN_WARN:-86400}";; *) CD=0;; esac
+  # per-call override (e.g. the removable reminder's weekly re-nudge, or 0 for a one-shot confirmation)
+  case "${NOTIFY_COOLDOWN:-}" in ''|*[!0-9]*) : ;; *) CD="$NOTIFY_COOLDOWN" ;; esac
   last="$(awk -F'\t' -v k="$KEY" '$1==k{print $2"\t"$3}' "$SF" 2>/dev/null | tail -1)"
   lsev="${last%%$'\t'*}"; lts="${last##*$'\t'}"
   if [ -n "$lts" ] && [ "$lsev" = "$SEV" ] && [ $((NOW - lts)) -lt "$CD" ]; then
@@ -97,8 +99,8 @@ push_gotify() {
 
 case "$SEV" in
   CRIT) send_email; push_gotify ;;
-  WARN) send_email; [ "${NOTIFY_GOTIFY_WARN:-0}" = "1" ] && push_gotify ;;
-  INFO) [ "${NOTIFY_INFO_EMAIL:-0}" = "1" ] && send_email ;;
+  WARN) send_email; { [ "${NOTIFY_GOTIFY_WARN:-0}" = "1" ] || [ "${NOTIFY_FORCE_GOTIFY:-0}" = "1" ]; } && push_gotify ;;
+  INFO) [ "${NOTIFY_INFO_EMAIL:-0}" = "1" ] && send_email; [ "${NOTIFY_FORCE_GOTIFY:-0}" = "1" ] && push_gotify ;;
   *)    log "unknown severity '$SEV'"; exit 2 ;;
 esac
 exit 0

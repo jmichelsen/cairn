@@ -862,15 +862,22 @@ async def _json(request):
     except Exception:
         raise HTTPException(400, "invalid JSON body")
 
-def dispatch_alert(sev, title, body, key, info_email=False):
-    """Central alerting - the API is the only place email/Gotify go out (agents carry no creds)."""
+def dispatch_alert(sev, title, body, key, info_email=False, force_gotify=False, cooldown=None):
+    """Central alerting - the API is the only place email/Gotify go out (agents carry no creds).
+    force_gotify: push to Gotify even for a WARN/INFO (used by the removable 2nd-leg reminder + its
+    'refreshed' confirmation, so they reach your phone, not just email). cooldown: per-key window in
+    seconds overriding notify.sh's severity default (e.g. weekly re-nudge, or 0 for a one-shot notice)."""
     if not os.path.exists(NOTIFY_SH):
         return
-    if sev == "INFO" and not info_email:
+    if sev == "INFO" and not info_email and not force_gotify:
         return
     env = dict(os.environ)
     if info_email:
         env["NOTIFY_INFO_EMAIL"] = "1"
+    if force_gotify:
+        env["NOTIFY_FORCE_GOTIFY"] = "1"
+    if cooldown is not None:
+        env["NOTIFY_COOLDOWN"] = str(int(cooldown))
     try:
         subprocess.run(["bash", NOTIFY_SH, sev, title, body or sev, key], env=env, timeout=30)
     except Exception:
@@ -993,17 +1000,36 @@ async def report(request: Request):
                 RETURNING id""",
                 (name, s.get("type"), s.get("source"), s.get("dest"), s.get("tier"),
                  s.get("location"), 1 if s.get("encrypted") else 0, agent)).fetchone()[0]
+            # prior severity BEFORE we insert this cycle's row - lets a removable 2nd-leg emit a one-shot
+            # "refreshed" confirmation when it flips WARN(stale/detached) -> OK(plugged in + freshly synced).
+            prev_sev = None
+            if s.get("type") == "removable":
+                pr = conn.execute("SELECT severity FROM status WHERE target_id=? ORDER BY ts DESC LIMIT 1",
+                                  (tid,)).fetchone()
+                prev_sev = pr["severity"] if pr else None
             cols = ["ts", "target_id", "severity"] + STATUS_INGEST_COLS
-            vals = [now, tid, s.get("severity", "UNKNOWN")] + [s.get(c) for c in STATUS_INGEST_COLS]
+            sev = s.get("severity", "UNKNOWN")
+            vals = [now, tid, sev] + [s.get(c) for c in STATUS_INGEST_COLS]
             conn.execute(f"INSERT INTO status({','.join(cols)}) VALUES({','.join('?'*len(cols))})", vals)
-            if s.get("severity") in ("WARN", "CRIT"):
-                d = {}
-                try:
-                    d = json.loads(s.get("detail_json") or "{}")
-                except (ValueError, TypeError):
-                    pass
+            d = {}
+            try:
+                d = json.loads(s.get("detail_json") or "{}")
+            except (ValueError, TypeError):
+                pass
+            if sev in ("WARN", "CRIT"):
                 why = ", ".join(d.get("reasons", [])) or (s.get("last_error") or "")
-                alerts.append((s["severity"], f"{name}: {s['severity']}", f"[{agent}] {why}".strip(), f"cairn-{name}"))
+                hint = d.get("notify_hint") or {}
+                kw = {}
+                if hint.get("force_gotify"):
+                    kw["force_gotify"] = True
+                if "cooldown" in hint:
+                    kw["cooldown"] = hint["cooldown"]
+                alerts.append((sev, f"{name}: {sev}", f"[{agent}] {why}".strip(), f"cairn-{name}", kw))
+            elif s.get("type") == "removable" and sev == "OK" and prev_sev == "WARN":
+                # plugged back in and synced current again - one-shot push + email so you know it took.
+                alerts.append(("INFO", f"{name}: 2nd copy refreshed",
+                               f"[{agent}] removable 2nd-leg attached and synced current again",
+                               f"cairn-{name}-ok", {"info_email": True, "force_gotify": True, "cooldown": 0}))
         # Authoritative report: retire (disable) targets THIS agent used to own but no longer reports,
         # so removing a target from targets.yaml - or reassigning it to another agent - doesn't leave a
         # ghost row on the board. A re-reported target is re-enabled above. Guard: only when the agent
@@ -1026,8 +1052,8 @@ async def report(request: Request):
             conn.execute("UPDATE agents SET update_requested=0 WHERE name=?", (agent,))
         conn.commit()
         _reap_agents(conn, now)   # dead-man's-switch: alert on any OTHER agent gone silent
-    for a in alerts:
-        dispatch_alert(*a)
+    for sev, title, body, key, kw in alerts:
+        dispatch_alert(sev, title, body, key, **kw)
     return {"ok": True, "ingested": len(statuses), "update": do_update}
 
 @app.get("/api/v1/backup/intents")
