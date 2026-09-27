@@ -1052,14 +1052,22 @@ def adapter_removable(t, defaults, now):
     caps = {"backupable": False}
     st = dict(severity="OK", last_error=None, last_run_ts=last)
     reasons = []
+    # Reminder: how many days since the last sync before we actively nudge you to plug it in + refresh.
+    # A stale/detached 2nd-leg stays WARN (never CRIT), but once it crosses this grace we tag the status
+    # with a `notify_hint` so the API pushes to your phone (not just email) and re-nudges weekly (not the
+    # default daily WARN) - see dispatch_alert / notify.sh. remind_every_d controls the re-nudge cadence.
+    dw = int(t.get("detach_warn_d", defaults.get("removable_detach_warn_d", 45)))
+    remind_hint = {"force_gotify": True, "cooldown": int(t.get("remind_every_d", 7)) * 86400}
+    overdue = last is not None and (now - last) >= dw * 86400
     if not pr["attached"]:
         # neutral detached state; only nudge WARN after a long grace since the last backup
         if last:
             age_d = (now - last) // 86400
             reasons.append(f"detached · last backup {age_d}d ago")
-            dw = int(t.get("detach_warn_d", defaults.get("removable_detach_warn_d", 45)))
-            if age_d >= dw:
-                st["severity"] = "WARN"; reasons.append(f"over {dw}d - attach it to refresh the 2nd copy")
+            if overdue:
+                st["severity"] = "WARN"
+                reasons.append(f"over {dw}d since last sync - plug it in to refresh the 2nd copy")
+                detail["notify_hint"] = remind_hint
         else:
             reasons.append("detached · never backed up by cairn")
         st["detail_json"] = json.dumps(dict(detail, reasons=reasons, caps=caps)); return [st]
@@ -1088,6 +1096,9 @@ def adapter_removable(t, defaults, now):
     else:
         caps["backupable"] = True
     reasons += _fresh(st, t, defaults, now, last, "last backup", cap="WARN")
+    if overdue and st["severity"] == "WARN":   # attached but the 2nd copy is still >dw old: same push nudge
+        reasons.append(f"over {dw}d since last sync - refresh the 2nd copy")
+        detail["notify_hint"] = remind_hint
     st["detail_json"] = json.dumps(dict(detail, reasons=reasons, caps=caps))
     return [st]
 

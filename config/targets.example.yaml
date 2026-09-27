@@ -70,7 +70,11 @@ targets:
   #       exclude      : optional rsync --exclude patterns.
   #       mirror       : true => rsync --delete (mirror). DEFAULT false = additive (never clobbers a
   #                      stale/diverged drive; surface + let a human decide, don't auto-delete).
-  #       detach_warn_d: days detached before a gentle WARN nudge (default 45). ---
+  #       detach_warn_d: days since the last sync before cairn nudges you to plug it in + refresh
+  #                      (default 45). The nudge is a WARN that PUSHES to Gotify (not just email) and
+  #                      re-fires every `remind_every_d` days; when you plug in + sync, a one-shot
+  #                      "2nd copy refreshed" push+email confirms it took.
+  #       remind_every_d: how often the plug-me-in nudge re-fires while overdue (default 7). ---
   # - { name: ext-photos, type: removable, tool: rsync,
   #     uuid: 1234abcd-....,  mount: /mnt/ext-backup,
   #     source: /tank/photos, dest_subpath: photos, tier: B, location: removable,

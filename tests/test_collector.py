@@ -1,6 +1,7 @@
 """Unit tests for the pure collector logic - command building, zpool/zfs output parsing, and the
 per-target capability probes. No ZFS host required: the `run` helper is monkeypatched with canned
 command output, so these run anywhere (CI included)."""
+import json
 import os
 import sys
 
@@ -324,6 +325,34 @@ def test_removable_last_backup_uses_freshest_per_link_stamp(tmp_path):
     # nothing on the drive -> falls back (no stamps) to host-side state (None here)
     empty = tmp_path / "empty"; empty.mkdir()
     assert collector._removable_last_backup(t, {"mounted": True, "mount": str(empty)}) is None
+
+
+def test_removable_reminder_hint_when_detached_and_overdue(monkeypatch):
+    # detached + last sync older than detach_warn_d -> WARN carrying a notify_hint so the API pushes
+    # (not just emails) and re-nudges every remind_every_d days.
+    now = 1_800_000_000
+    t = {"name": "seagate", "type": "removable", "tool": "rsync", "mount": "/mnt/ext",
+         "detach_warn_d": 30, "remind_every_d": 7}
+    monkeypatch.setattr(collector, "removable_probe",
+                        lambda tt: {"attached": False, "mounted": False, "mount": "/mnt/ext", "ro": False})
+    monkeypatch.setattr(collector, "_removable_last_backup", lambda tt, pr: now - 31 * 86400)
+    st = collector.adapter_removable(t, collector.DEFAULT_THRESHOLDS, now)[0]
+    assert st["severity"] == "WARN"
+    d = json.loads(st["detail_json"])
+    assert d["notify_hint"] == {"force_gotify": True, "cooldown": 7 * 86400}
+    assert any("plug it in" in r for r in d["reasons"])
+
+
+def test_removable_no_reminder_when_recently_synced(monkeypatch):
+    # detached but within the grace -> calm neutral OK, no push nudge.
+    now = 1_800_000_000
+    t = {"name": "seagate", "type": "removable", "tool": "rsync", "mount": "/mnt/ext", "detach_warn_d": 30}
+    monkeypatch.setattr(collector, "removable_probe",
+                        lambda tt: {"attached": False, "mounted": False, "mount": "/mnt/ext", "ro": False})
+    monkeypatch.setattr(collector, "_removable_last_backup", lambda tt, pr: now - 5 * 86400)
+    st = collector.adapter_removable(t, collector.DEFAULT_THRESHOLDS, now)[0]
+    assert st["severity"] == "OK"
+    assert "notify_hint" not in json.loads(st["detail_json"])
 
 
 def test_dev_is_removable_skips_usb(monkeypatch):
