@@ -2120,6 +2120,9 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .rl-exbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 10px;font-size:11px;color:var(--mut)}
 .rl-exbar button{appearance:none;font:600 11px/1 "Red Hat Text";border:1px solid var(--acc);background:var(--acc);
   color:#fff;border-radius:7px;padding:5px 9px;cursor:pointer}
+.rl-exadd{flex:1 1 160px;min-width:120px;font:400 11px/1.2 "Red Hat Text";color:var(--ink);
+  background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:5px 8px}
+.rl-exnote{padding:0 10px 8px;font-size:10.5px;color:var(--mut);line-height:1.4}
 .cact button:hover{filter:brightness(1.05)}
 /* custom modal + toast (replaces native confirm/alert/prompt) */
 .uim-ov{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;
@@ -2511,9 +2514,24 @@ async function relocateLink(removable, dataset){
   post({target:removable, action:'removable-relocate', dataset:dataset, requested_by:'ui'});
 }
 function toggleEx(tr){ tr.classList.toggle('excluded'); }   // tap a folder row to (un)exclude it
+function normPat(s){   // normalize a typed exclude: anchor a bare name to top-level, leave globs/paths alone
+  s=(s||'').trim(); if(!s) return '';
+  return (s[0]==='/'||s[0]==='*'||s.indexOf('/')>=0) ? s : '/'+s;
+}
+function addExPattern(btn){   // add an arbitrary path/glob (even one not in the listed folders)
+  var inp=btn.parentNode.querySelector('.rl-exadd'), v=normPat(inp.value); if(!v){ return; }
+  var tb=btn.closest('.rl-diff').querySelector('tbody');
+  var tr=document.createElement('tr'); tr.className='rl-frow excluded';
+  tr.setAttribute('data-folder', v[0]==='/'?v.slice(1):v); tr.setAttribute('data-pat', v);
+  tr.setAttribute('onclick','toggleEx(this)');
+  tr.innerHTML='<td>'+esc(v)+'</td><td></td><td></td><td class=rl-del>excl</td>';
+  tb.appendChild(tr); inp.value=''; inp.focus();
+}
 async function applyExcludes(btn, lid){   // save excluded folders, recompute census, then reload
   var box=btn.closest('.rl-diff'), ex=[];
-  box.querySelectorAll('tr.rl-frow.excluded').forEach(function(tr){ ex.push('/'+tr.getAttribute('data-folder')); });
+  box.querySelectorAll('tr.rl-frow.excluded').forEach(function(tr){
+    ex.push(tr.getAttribute('data-pat')||('/'+tr.getAttribute('data-folder'))); });
+  ex=Array.from(new Set(ex));   // dedupe (a typed pattern may match a listed folder)
   var r=await fetch('/api/v1/backup/removable-links/'+lid+'/excludes',{method:'POST',
     headers:{'Content-Type':'application/json'}, body:JSON.stringify({excludes:ex})});
   if(!r.ok){ toast('Saving exclusions failed','err'); return; }
@@ -3534,30 +3552,40 @@ def _removable_links_html(r, viewer=False):
             if exnames:
                 cen_html += f'<div class=rl-cen>excluding: <b>{_esc(", ".join(exnames))}</b></div>'
             bf = cen.get("by_folder") or []
-            if bf or exnames:
-                # merge census folders with currently-excluded folders (which drop out of a re-run
-                # census), so an excluded folder stays visible and can be un-checked to re-include.
+            srcf = cen.get("src_folders") or []
+            if bf or exnames or srcf:
+                # Build the excludable folder list from THREE sources so a folder is offered even when it
+                # is fully in sync (rsync -ni itemizes only differences, so by_folder is empty then):
+                #   - by_folder: folders that currently churn (new/changed/extra counts)
+                #   - src_folders: ALL top-level source entries (the "exclude at will" pick-list)
+                #   - exnames: already-excluded folders (dropped from a re-run census; keep them visible)
                 fmap = {b["folder"]: b for b in bf}
+                for fn in srcf:
+                    fmap.setdefault(fn, {"folder": fn, "add": 0, "update": 0, "delete": 0})
                 for en in exnames:
                     fmap.setdefault(en, {"folder": en, "add": 0, "update": 0, "delete": 0, "gone": True})
-                rowscol = sorted(fmap.values(), key=lambda b: -(b["add"] + b["update"] + b["delete"]))
+                # churn first, then in-sync folders alphabetically
+                rowscol = sorted(fmap.values(),
+                                 key=lambda b: (-(b["add"] + b["update"] + b["delete"]), b["folder"].lower()))
                 trows = "".join(
                     f'<tr class="rl-frow{" excluded" if b["folder"] in exset else ""}" '
-                    f'data-folder="{_esc(b["folder"])}" onclick="toggleEx(this)">'
+                    f'data-folder="{_esc(b["folder"])}" data-pat="/{_esc(b["folder"])}" onclick="toggleEx(this)">'
                     f'<td>{_esc(b["folder"])}</td>'
                     f'<td class=rl-add>{("+" + _kf(b["add"])) if b["add"] else ""}</td>'
                     f'<td class=rl-upd>{("~" + _kf(b["update"])) if b["update"] else ""}</td>'
-                    f'<td class=rl-del>{("-" + _kf(b["delete"])) if b["delete"] else ("excl" if b.get("gone") else "")}</td>'
+                    f'<td class=rl-del>{("-" + _kf(b["delete"])) if b["delete"] else ("excl" if b.get("gone") else ("in sync" if (not b["add"] and not b["update"] and b["folder"] not in exset) else ""))}</td>'
                     f'</tr>' for b in rowscol)
-                more = (cen.get("folders_total", 0) - len(bf))
-                if more > 0:
-                    trows += f'<tr><td colspan=4 class=rl-more>+{more} more folders (not excludable here)</td></tr>'
                 diff_html = (f'<div class=rl-diff hidden><table class=rl-dt><thead><tr>'
                              f'<th>folder</th><th>new</th><th>chg</th><th>extra</th></tr></thead>'
                              f'<tbody>{trows}</tbody></table>'
-                             f'<div class=rl-exbar><span>tap folders to exclude, then</span>'
+                             f'<div class=rl-exbar><span>tap a folder to exclude</span>'
+                             f'<input class=rl-exadd placeholder="+ pattern, e.g. /RAW or *.tmp" '
+                             f'onkeydown="if(event.key===\'Enter\'){{addExPattern(this.nextElementSibling);event.preventDefault();}}">'
+                             f'<button onclick="addExPattern(this)" data-tip="add any path/glob, even one not listed">Add</button>'
                              f'<button data-rem="{name}" data-ds="{ds_js}" onclick="applyExcludes(this,{lid})">'
-                             f'Apply exclusions &amp; re-check fit</button></div></div>')
+                             f'Apply exclusions &amp; re-check fit</button></div>'
+                             f'<div class=rl-exnote>Excluding stops future syncing. To also delete it from the '
+                             f'drive, run <b>Back up now</b> and tick “prune excluded”.</div></div>')
         ver = meta.get("verify") or {}
         # verification ladder: which levels have been run + their result. structure/census are ANALYSIS
         # (a match %); content (xattr/hash) is a PASS (clean = every source file's content is on the drive).

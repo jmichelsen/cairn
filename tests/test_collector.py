@@ -327,6 +327,25 @@ def test_removable_last_backup_uses_freshest_per_link_stamp(tmp_path):
     assert collector._removable_last_backup(t, {"mounted": True, "mount": str(empty)}) is None
 
 
+def test_rsync_census_lists_all_top_level_source_folders(tmp_path, monkeypatch):
+    # a fully in-sync dataset: rsync -ni itemizes NOTHING, so by_folder is empty - but src_folders must
+    # still enumerate every top-level source entry so the UI can offer any of them for exclusion.
+    src = tmp_path / "src"
+    (src / "2019").mkdir(parents=True)
+    (src / "2020").mkdir()
+    (src / "RAW").mkdir()
+    (src / "note.txt").write_text("x")
+    out = ("Number of files: 4 (reg: 1, dir: 3)\n"
+           "Number of regular files transferred: 0\n"
+           "Number of created files: 0\n"
+           "Total transferred file size: 0 bytes\n")
+    monkeypatch.setattr(collector, "run", lambda *a, **k: (0, out, ""))
+    cen, err = collector.rsync_census(str(src), str(tmp_path / "dest"))
+    assert err is None
+    assert cen["by_folder"] == []                                      # nothing differs
+    assert cen["src_folders"] == ["2019", "2020", "note.txt", "RAW"]   # case-insensitive sort
+
+
 def test_removable_reminder_hint_when_detached_and_overdue(monkeypatch):
     # detached + last sync older than detach_warn_d -> WARN carrying a notify_hint so the API pushes
     # (not just emails) and re-nudges every remind_every_d days.

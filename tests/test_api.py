@@ -399,3 +399,21 @@ def test_dispatch_alert_plain_info_still_suppressed(monkeypatch):
                         lambda cmd, env=None, timeout=None: calls.update(cmd=cmd))
     api.dispatch_alert("INFO", "fyi", "body", "k")
     assert "cmd" not in calls
+
+
+# ---- removable diff: exclude any folder at will (not just ones that currently differ) ----------
+def test_removable_diff_lists_source_folders_even_when_in_sync():
+    now = int(time.time())
+    with api.db() as conn:
+        api._link_confirm(conn, "local", "extS", "karlyX", "karlyX", now)
+        census = {"pct": 1.0, "reg_total": 10, "add": 0, "update": 0, "delete": 0, "bytes_add": 0,
+                  "by_folder": [], "src_folders": ["2019", "2020", "RAW"]}
+        conn.execute("UPDATE removable_links SET meta_json=?, last_backup_ts=? WHERE removable='extS'",
+                     (json.dumps({"census": census}), now))
+        conn.commit()
+    r = {"name": "extS", "type": "removable",
+         "detail_json": json.dumps({"free_bytes": 10**9, "total_bytes": 2 * 10**9})}
+    html = api._removable_links_html(r)
+    # every in-sync source folder is a tappable exclude row, and the free-text add box is present
+    assert 'data-pat="/RAW"' in html and 'data-pat="/2019"' in html and 'data-pat="/2020"' in html
+    assert "rl-exadd" in html

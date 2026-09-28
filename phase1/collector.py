@@ -858,9 +858,19 @@ def rsync_census(src, dest, excludes=None, timeout=1800):
     by_folder = sorted(({"folder": k, "add": v["add"], "update": v["update"], "delete": v["delete"]}
                         for k, v in buckets.items()),
                        key=lambda x: -(x["add"] + x["update"] + x["delete"]))
+    # Full top-level source entry list, INDEPENDENT of the diff. rsync -ni only itemizes files that
+    # DIFFER, so a fully-synced dataset (src == dest) yields an empty by_folder and the UI would offer
+    # nothing to exclude. Enumerating the source's own top-level entries lets a user exclude ANY folder
+    # at will, not just ones that currently churn.
+    src_folders = []
+    try:
+        with os.scandir(src.rstrip("/") or "/") as it:
+            src_folders = sorted((e.name for e in it), key=str.lower)[:500]
+    except OSError:
+        pass
     return {"pct": pct, "reg_total": reg_total, "transfer": transferred, "add": add,
             "update": update, "delete": deletes, "unchanged": unchanged, "bytes_add": bytes_add,
-            "folders_total": len(by_folder), "by_folder": by_folder[:40]}, None
+            "folders_total": len(by_folder), "by_folder": by_folder[:40], "src_folders": src_folders}, None
 
 def _xattr_hashset(root):
     """Set of full-hash b3sig values (hex, F stripped) under a tree, via cached xattrs. Also returns
