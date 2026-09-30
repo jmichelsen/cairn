@@ -136,7 +136,7 @@ Dockerfile  docker-compose.yml  entrypoint.sh   container build (api + agent)
 agent.py                        the ONE uniform agent (report + execute over HTTP)
 AGENT.md                        how to run it: local, vault, execute mode
 config/  *.example              generic env + targets templates (copy to real, edit)
-phase0/  notify.sh              notifier: email (SMTP) + Gotify on CRIT, per-key cooldown
+phase0/  notify.sh              notifier: per-severity email routing (immediate/digest/off) + daily digest, Gotify on CRIT, per-key cooldown
          check_backups.sh + units    standalone host alerting (Phase 0, optional)
 phase1/  schema.sql             SQLite schema (targets, status, intents)
          collector.py           adapter library (zfs/borg/restic/rclone/snapper/backupninja/smart) + collect_all()

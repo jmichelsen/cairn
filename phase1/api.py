@@ -35,6 +35,7 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def _lifespan(app):
     _start_heartbeat_task()   # defined below; the notify self-test loop (no-op unless configured)
+    _start_digest_task()      # once-daily email-digest flush (no-op unless CAIRN_DIGEST_HOUR set)
     yield
 
 app = FastAPI(title="Cairn", version="1.0", lifespan=_lifespan)
@@ -922,6 +923,65 @@ def _start_heartbeat_task():
             await asyncio.sleep(KUMA_INTERVAL)
     asyncio.get_event_loop().create_task(_loop())
     print(f"[heartbeat] notify self-test heartbeat every {KUMA_INTERVAL}s -> uptime-kuma", flush=True)
+
+# ---- daily email-digest flush ----
+# Notices routed to 'digest' (EMAIL_WARN=digest etc. in notify.sh) accumulate in a spool file;
+# this loop asks notify.sh to send ONE summary email per day, at/after CAIRN_DIGEST_HOUR local.
+# The scheduler is on by default (hour 8) but is a pure no-op until something is routed to digest
+# (empty spool -> notify.sh --flush-digest sends nothing). Set CAIRN_DIGEST_HOUR=off to disable.
+STATE_DIR = os.environ.get("STATE_DIR", "/var/lib/cairn")
+_DIGEST_HOUR_RAW = os.environ.get("CAIRN_DIGEST_HOUR", os.environ.get("DIGEST_HOUR", "8")).strip().lower()
+try:
+    DIGEST_HOUR = int(_DIGEST_HOUR_RAW) if _DIGEST_HOUR_RAW not in ("", "off", "none") else None
+    if DIGEST_HOUR is not None and not (0 <= DIGEST_HOUR <= 23):
+        DIGEST_HOUR = None
+except ValueError:
+    DIGEST_HOUR = None
+
+def _digest_flush_once():
+    """Flush the digest spool at most once per calendar day, at/after DIGEST_HOUR local. The compose/
+    send/atomic-spool-claim lives in notify.sh --flush-digest; this only decides WHEN, using a
+    per-day stamp file so a mid-day restart never double-sends and a late start still sends once."""
+    if DIGEST_HOUR is None or not os.path.exists(NOTIFY_SH):
+        return
+    nowt = time.localtime()
+    if nowt.tm_hour < DIGEST_HOUR:
+        return
+    today = time.strftime("%Y-%m-%d", nowt)
+    stamp = os.path.join(STATE_DIR, "digest-last-flush")
+    try:
+        with open(stamp) as f:
+            if f.read().strip() == today:
+                return
+    except OSError:
+        pass
+    try:
+        subprocess.run(["bash", NOTIFY_SH, "--flush-digest"], env=dict(os.environ), timeout=60)
+    except Exception:
+        pass
+    try:   # stamp regardless of whether the spool had anything - one flush attempt per day
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(stamp, "w") as f:
+            f.write(today)
+    except OSError:
+        pass
+
+def _start_digest_task():
+    """Launch the once-daily digest flush loop (called from lifespan startup). No-op if disabled."""
+    if DIGEST_HOUR is None:
+        print("[digest] CAIRN_DIGEST_HOUR=off - daily email digest disabled", flush=True)
+        return
+    import asyncio
+    async def _loop():
+        loop = asyncio.get_event_loop()
+        while True:
+            try:
+                await loop.run_in_executor(None, _digest_flush_once)
+            except Exception as e:
+                print(f"[digest] loop error: {e}", flush=True)
+            await asyncio.sleep(60)
+    asyncio.get_event_loop().create_task(_loop())
+    print(f"[digest] daily email-digest flush at {DIGEST_HOUR:02d}:00 local", flush=True)
 
 # ---- agent liveness (dead-man's-switch for remote agents e.g. the off-site vault) ----
 AGENT_STALE_FACTOR = int(os.environ.get("CAIRN_AGENT_STALE_FACTOR", "3"))     # missed N cycles -> WARN
