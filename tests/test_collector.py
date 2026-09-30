@@ -346,6 +346,30 @@ def test_rsync_census_lists_all_top_level_source_folders(tmp_path, monkeypatch):
     assert cen["src_folders"] == ["2019", "2020", "note.txt", "RAW"]   # case-insensitive sort
 
 
+def test_rsync_census_protects_and_hides_the_lastbackup_marker(tmp_path, monkeypatch):
+    # cairn's own dest-side marker must never surface in the diff UI nor be flagged for deletion.
+    src = tmp_path / "src"
+    (src / "2019").mkdir(parents=True)
+    (src / ".cairn-lastbackup").write_text("1700000000")   # even if one lands in the source, hide it
+    captured = {}
+    monkeypatch.setattr(collector, "run", lambda c, **k: (captured.setdefault("cmd", c),
+                                                          (0, "Number of files: 1 (reg: 0, dir: 1)\n", ""))[1])
+    cen, err = collector.rsync_census(str(src), str(tmp_path / "dest"))
+    assert err is None
+    assert ".cairn-lastbackup" not in cen["src_folders"]                       # kept out of the pick-list
+    assert "--filter=protect .cairn-lastbackup" in captured["cmd"]             # protected in the census scan
+
+
+def test_lastbackup_marker_protected_even_when_pruning_excludes():
+    # protect survives --delete AND --delete-excluded, so the marker persists through any real sync.
+    cmd, _ = collector.build_command("backup-now", dict(_REMOVABLE_T, mirror=True, exclude=["junk"]),
+                                     {"prune_excluded": True})
+    assert "--filter=protect .cairn-lastbackup" in cmd
+    assert "--delete-excluded" in cmd                                          # prune still happens
+    # the protect filter precedes --delete so it wins (first-match-wins in rsync filter rules)
+    assert cmd.index("--filter=protect .cairn-lastbackup") < cmd.index("--delete")
+
+
 def test_removable_reminder_hint_when_detached_and_overdue(monkeypatch):
     # detached + last sync older than detach_warn_d -> WARN carrying a notify_hint so the API pushes
     # (not just emails) and re-nudges every remind_every_d days.
