@@ -2803,10 +2803,13 @@ async function toggleHist(btn, target){
 var _SEVC={CRIT:'crit',WARN:'warn',UNKNOWN:'unk',OK:'ok'};
 var _sevRank={ok:0,ack:0,unk:1,warn:2,crit:3};
 function _cardSevClass(c){ var m=(c.className||'').match(/\\b(crit|warn|unk|ack|ok)\\b/); return m?m[1]:'unk'; }
-function _snapCard(c){   // capture expanded panels before a swap: History (reloads) + toggles (Job log/SMART)
+function _snapCard(c){   // capture expanded panels before a swap: History (reloads) + toggles (Job log/SMART) + open folder-diffs
   var togs=c.querySelectorAll('.histbtn:not([data-t])'), open=[];
   togs.forEach(function(b,i){ if(b.classList.contains('open')) open.push(i); });
-  return { hist: !!c.querySelector('.histbtn.open[data-t]'), tog: open };
+  var diffs=[];   // datasets whose folder-diff panel is open, so an explicit swap can re-open them
+  c.querySelectorAll('.rl-diff:not([hidden])').forEach(function(box){
+    var ab=box.querySelector('button[data-ds]'); if(ab) diffs.push(ab.getAttribute('data-ds')); });
+  return { hist: !!c.querySelector('.histbtn.open[data-t]'), tog: open, diffs: diffs };
 }
 function _restoreCard(c, snap, target){   // re-open the same panels on the freshly-swapped card
   if(snap.hist){ var hb=c.querySelector('.histbtn[data-t]');
@@ -2814,6 +2817,9 @@ function _restoreCard(c, snap, target){   // re-open the same panels on the fres
   var togs=c.querySelectorAll('.histbtn:not([data-t])');
   snap.tog.forEach(function(i){ var b=togs[i]; if(!b) return; b.classList.add('open');
     var sd=b.parentNode.querySelector('.smdet'); if(sd) sd.hidden=false; });
+  if(snap.diffs && snap.diffs.length){ c.querySelectorAll('.rl-diff').forEach(function(box){
+    var ab=box.querySelector('button[data-ds]');
+    if(ab && snap.diffs.indexOf(ab.getAttribute('data-ds'))>=0) box.hidden=false; }); }
   if(_busy[target]>0) c.classList.add('busy');   // busy state lives in the _busy ledger, not the swapped DOM
 }
 function _paneEscalate(c, oldCls){   // a card worsening while its pane is collapsed flags the pane's dot
@@ -2822,7 +2828,11 @@ function _paneEscalate(c, oldCls){   // a card worsening while its pane is colla
     var sec=c.closest('.pane.grp'); if(sec && sec.classList.contains('collapsed')) sec.classList.add('alerted');
   }
 }
-async function refreshCards(){
+async function refreshCards(auto){
+  // `auto` = the 20s background tick. Never disturb a card while its folder-diff panel is open: the
+  // whole-card swap would collapse the panel and wipe any in-progress exclude edits (checkboxes /
+  // typed patterns not yet applied). Explicit refreshes (liveRefresh after Apply/ack) still swap and
+  // re-open the panel via _snap/_restoreCard so the updated fit shows.
   var j; try{ j=await (await fetch('/api/v1/backup/cards')).json(); }catch(e){ return; }
   var seen={};
   (j.tabs||[]).forEach(function(tab){ (tab.panes||[]).forEach(function(p){
@@ -2831,6 +2841,7 @@ async function refreshCards(){
       seen[cd.cid]=1;
       var el=document.getElementById(cd.cid);
       if(el){
+        if(auto && el.querySelector('.rl-diff:not([hidden])')) return;   // leave an open diff untouched
         var oldCls=_cardSevClass(el), snap=_snapCard(el), target=el.getAttribute('data-t');
         el.outerHTML=cd.html;                            // full swap: the whole card from the server renderer
         var neu=document.getElementById(cd.cid);
@@ -2849,8 +2860,8 @@ async function refreshCards(){
   });
   if(typeof applyFilter==='function') applyFilter();   // re-honor an active severity filter after the swap
 }
-window.addEventListener('load', refreshCards);
-setInterval(refreshCards, 20000);
+window.addEventListener('load', function(){ refreshCards(); });
+setInterval(function(){ refreshCards(true); }, 20000);
 // ---- custom tooltips: styled, viewport-clamped, hover + keyboard focus (replaces native title=) ----
 (function(){
   var el=null, ht=null;

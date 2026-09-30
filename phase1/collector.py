@@ -26,6 +26,14 @@ HERE = Path(__file__).resolve().parent
 NOTIFY = HERE.parent / "phase0" / "notify.sh"
 DAY = 86400
 
+# cairn's own dest-side marker (written by the agent after a removable backup to stamp last-sync
+# time - see agent.py). It lives ON the drive, not in the source, so a --delete census/sync would
+# otherwise flag it for deletion and the diff UI would list it. It must always exist and must never
+# be touched, so every census/sync carries a `protect` filter for it (protect survives both --delete
+# and --delete-excluded, and keeps it out of the itemized diff).
+LASTBACKUP_MARKER = ".cairn-lastbackup"
+PROTECT_MARKER_FILTER = f"protect {LASTBACKUP_MARKER}"
+
 # ---------- small shell helpers ----------
 def run(cmd, timeout=60, env=None):
     """Return (rc, stdout, stderr). Never raises on nonzero."""
@@ -822,7 +830,7 @@ def rsync_census(src, dest, excludes=None, timeout=1800):
     NO transfer and NO delete (both -n). dest need not exist (then everything is 'add'). Returns
     (summary, err). summary = counts (add/update/delete/unchanged of `reg_total`), match `pct`,
     `bytes_add` (what a real backup would write), and a few sample itemized lines for a diff view."""
-    cmd = ["rsync", "-aHni", "--delete", "--stats", "--dry-run"]
+    cmd = ["rsync", "-aHni", "--delete", "--stats", "--dry-run", "--filter=" + PROTECT_MARKER_FILTER]
     for ex in (excludes or []):
         cmd += ["--exclude", str(ex)]
     cmd += ["--", src.rstrip("/") + "/", dest.rstrip("/") + "/"]
@@ -865,7 +873,8 @@ def rsync_census(src, dest, excludes=None, timeout=1800):
     src_folders = []
     try:
         with os.scandir(src.rstrip("/") or "/") as it:
-            src_folders = sorted((e.name for e in it), key=str.lower)[:500]
+            src_folders = sorted((e.name for e in it if e.name != LASTBACKUP_MARKER),
+                                 key=str.lower)[:500]
     except OSError:
         pass
     return {"pct": pct, "reg_total": reg_total, "transfer": transferred, "add": add,
@@ -2014,7 +2023,7 @@ def build_command(action, t, opts=None):
         # free xattr compare; -H preserves the dataset's internal hardlinks (space saving carries over);
         # -h makes the --stats sizes human-readable in the result/log (this rsync's output isn't parsed,
         # unlike the census, so -h is safe here).
-        cmd = ["rsync", "-aHXh", "--stats"]
+        cmd = ["rsync", "-aHXh", "--stats", "--filter=" + PROTECT_MARKER_FILTER]
         # Persistent, appended rsync log (real runs only - a dry run's "would transfer" lines would
         # pollute the record of actual backups; dry output still comes back in the intent result).
         # --info=progress2 emits ONE running whole-transfer line (bytes / % / rate / ETA), rewritten via
