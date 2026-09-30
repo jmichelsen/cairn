@@ -19,6 +19,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 RUN apt-get update -qq && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir pytest
 WORKDIR /src
+COPY phase0 /src/phase0
 COPY phase1 /src/phase1
 COPY tools  /src/tools
 COPY tests  /src/tests
