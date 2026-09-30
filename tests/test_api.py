@@ -224,6 +224,35 @@ def test_link_suggest_preserves_confirmed_and_drops_stale_suggestions():
         assert got == {"Pics"}                        # unconfirmed karly dropped, confirmed Pics kept
 
 
+def test_backup_now_preview_builds_real_rsync_with_mount_placeholder():
+    with api.db() as conn:
+        conn.execute("INSERT INTO targets(name,type,source,dest,agent,enabled) VALUES(?,?,?,?,?,1)",
+                     ("extP", "removable", "", "", "local"))
+        conn.execute("INSERT INTO targets(name,type,source,agent,enabled) VALUES(?,?,?,?,1)",
+                     ("PicsP", "zfs-local", "/mcz/mclife/PicsP", "local"))   # source path for srcmap
+        api._link_confirm(conn, "local", "extP", "PicsP", "bk/PicsP", 3000)
+        conn.execute("UPDATE removable_links SET excludes=?, mirror=1 WHERE removable='extP'",
+                     ('["/RAW"]',))
+        conn.commit()
+    res = api.preview_action("extP", "backup-now")
+    cmd = res["cmd"]
+    assert cmd and cmd.startswith("rsync ")
+    assert "/mcz/mclife/PicsP/" in cmd                       # real source path (from srcmap)
+    assert "<mount>/bk/PicsP/" in cmd                        # mount placeholder + dest subpath
+    assert "--filter=protect .cairn-lastbackup" in cmd       # the internal-marker guard
+    assert "--delete" in cmd                                 # mirror flag honored
+    assert "--exclude /RAW" in cmd                           # stored exclusion applied
+
+
+def test_backup_now_preview_falls_back_when_no_links():
+    with api.db() as conn:
+        conn.execute("INSERT INTO targets(name,type,source,dest,agent,enabled) VALUES(?,?,?,?,?,1)",
+                     ("extQ", "removable", "/tank/q", "sub", "local"))
+        conn.commit()
+    res = api.preview_action("extQ", "backup-now")
+    assert res["cmd"] and "/tank/q/" in res["cmd"] and "<mount>/sub/" in res["cmd"]
+
+
 def test_scorecard_credits_fresh_removable_copy():
     now = int(time.time())
     _seed_repl("PicsA", "mcz/mclife/PicsA", "vault/PicsA")     # 2 copies (mcz+vault), off-site, fails 3-2-1

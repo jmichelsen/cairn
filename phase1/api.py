@@ -335,6 +335,7 @@ def _init_db():
                 verify_method TEXT,
                 verify_ts     INTEGER,
                 excludes      TEXT,
+                mirror        INTEGER DEFAULT 0,
                 updated_ts    INTEGER NOT NULL,
                 UNIQUE(agent, removable, dataset))""")
             # CI pipeline status broker: one row per badge name (e.g. 'tests', 'deploy'), latest wins.
@@ -1665,15 +1666,54 @@ def recovery_manifest_get(target: str, kind: str = "deleted"):
 
 PREVIEWABLE = {"snapshot", "sync", "scrub", "recover-points"}  # build_command touches no ZFS for these
 
+def _preview_backup_now(target, r):
+    """Preview the rsync(s) a removable 'Back up now' will run. The one runtime-variable part is the
+    drive's mountpoint (probed on the agent each cycle), so we show it as the literal `<mount>` and
+    fill in everything else - source, dest subpath, excludes, mirror, the protect filter - from the
+    stored per-dataset links, using the SAME build_command the agent runs (so it matches byte-for-byte
+    except the mount). One line per confirmed dataset link (a drive can back up several)."""
+    MOUNT = "<mount>"
+    with db() as conn:
+        links = _links_for(conn, removable=target, confirmed_only=True)
+        srcmap = {x["name"]: x["source"] for x in conn.execute(
+            "SELECT DISTINCT name, source FROM targets WHERE type IN ('zfs-local','zfs-repl') "
+            "AND source IS NOT NULL AND enabled=1").fetchall()}
+    jobs = []   # (source_path, dest_subpath, excludes, mirror)
+    if links:
+        for L in links:
+            try:
+                exc = json.loads(L.get("excludes") or "[]")
+            except (ValueError, TypeError):
+                exc = []
+            jobs.append((srcmap.get(L["dataset"]) or L["dataset"], L.get("dest_subpath") or "",
+                         exc, bool(L.get("mirror"))))
+    elif r["source"]:
+        jobs.append((r["source"], r["dest"] or "", [], False))   # single-source fallback (no links yet)
+    cmds = []
+    for src, sub, exc, mirror in jobs:
+        t = {"type": "removable", "tool": "rsync", "source": src, "mount": MOUNT,
+             "dest_subpath": sub, "exclude": exc, "mirror": mirror,
+             "encrypted": bool(r["encrypted"]), "name": target}
+        cmd, err = _cmd.build_command("backup-now", t, {})   # {} = a plain click (no mirror/prune/dry override)
+        if not err and cmd:
+            cmds.append(" ".join(cmd))
+    if not cmds:
+        return {"cmd": None, "note": "built on the agent at run time"}
+    return {"cmd": "\n".join(cmds),
+            "note": "<mount> = the drive's live mountpoint (resolved at run time)"}
+
 @app.get("/api/v1/backup/actions/preview")
 def preview_action(target: str, action: str, create_snapshot: bool = True, path: str = None):
     """Return the exact argv a click WILL run, rebuilt from the stored target row - so the confirm
     dialog can show it. Read-only: only actions whose build_command has no side effects are previewed;
-    others resolve on the agent at run time (path→mountpoint needs a live ZFS read)."""
+    the removable 'backup-now' is rebuilt from its stored links with a <mount> placeholder (see
+    _preview_backup_now); any remaining action resolves on the agent at run time."""
     with db() as conn:
         r = conn.execute("SELECT name,type,source,dest,encrypted FROM targets WHERE name=?", (target,)).fetchone()
     if not r:
         raise HTTPException(404, f"unknown target '{target}'")
+    if action == "backup-now" and r["type"] == "removable":
+        return _preview_backup_now(target, r)
     if action not in PREVIEWABLE:
         return {"cmd": None, "note": "built on the agent at run time"}
     t = {"name": r["name"], "type": r["type"], "source": r["source"], "dest": r["dest"],
