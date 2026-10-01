@@ -244,6 +244,23 @@ def test_backup_now_preview_builds_real_rsync_with_mount_placeholder():
     assert "--exclude /RAW" in cmd                           # stored exclusion applied
 
 
+def test_backup_now_preview_uses_live_mount_when_reported():
+    with api.db() as conn:
+        tid = conn.execute("INSERT INTO targets(name,type,source,dest,agent,enabled) "
+                           "VALUES(?,?,?,?,?,1) RETURNING id",
+                           ("extM", "removable", "", "", "local")).fetchone()[0]
+        conn.execute("INSERT INTO targets(name,type,source,agent,enabled) VALUES(?,?,?,?,1)",
+                     ("PicsM", "zfs-local", "/mcz/mclife/PicsM", "local"))
+        api._link_confirm(conn, "local", "extM", "PicsM", "bk/PicsM", 4000)
+        conn.execute("INSERT INTO status(ts,target_id,severity,detail_json) VALUES(?,?,?,?)",
+                     (4001, tid, "OK", '{"mount": "/media/seagate", "mounted": true}'))
+        conn.commit()
+    res = api.preview_action("extM", "backup-now")
+    assert "/media/seagate/bk/PicsM/" in res["cmd"]   # real probed mount, not the placeholder
+    assert "<mount>" not in res["cmd"]
+    assert "note" not in res                           # no placeholder note when the mount is real
+
+
 def test_backup_now_preview_falls_back_when_no_links():
     with api.db() as conn:
         conn.execute("INSERT INTO targets(name,type,source,dest,agent,enabled) VALUES(?,?,?,?,?,1)",
