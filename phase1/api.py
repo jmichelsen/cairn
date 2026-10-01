@@ -1667,17 +1667,25 @@ def recovery_manifest_get(target: str, kind: str = "deleted"):
 PREVIEWABLE = {"snapshot", "sync", "scrub", "recover-points"}  # build_command touches no ZFS for these
 
 def _preview_backup_now(target, r):
-    """Preview the rsync(s) a removable 'Back up now' will run. The one runtime-variable part is the
-    drive's mountpoint (probed on the agent each cycle), so we show it as the literal `<mount>` and
-    fill in everything else - source, dest subpath, excludes, mirror, the protect filter - from the
-    stored per-dataset links, using the SAME build_command the agent runs (so it matches byte-for-byte
-    except the mount). One line per confirmed dataset link (a drive can back up several)."""
-    MOUNT = "<mount>"
+    """Preview the rsync(s) a removable 'Back up now' will run, using the SAME build_command the agent
+    runs so it matches what executes. The agent probes the drive every cycle and reports its live
+    mountpoint in detail_json, so we use that real mount; the `<mount>` placeholder is only a fallback
+    for a currently-detached drive. Everything else (source, dest subpath, excludes, mirror, the
+    protect filter) comes from the stored per-dataset links. One line per confirmed link."""
     with db() as conn:
         links = _links_for(conn, removable=target, confirmed_only=True)
         srcmap = {x["name"]: x["source"] for x in conn.execute(
             "SELECT DISTINCT name, source FROM targets WHERE type IN ('zfs-local','zfs-repl') "
             "AND source IS NOT NULL AND enabled=1").fetchall()}
+        drow = conn.execute("SELECT s.detail_json FROM status s JOIN targets t ON t.id=s.target_id "
+                            "WHERE t.name=? ORDER BY s.ts DESC LIMIT 1", (target,)).fetchone()
+    mount = None
+    if drow and drow["detail_json"]:
+        try:
+            mount = (json.loads(drow["detail_json"]) or {}).get("mount")
+        except (ValueError, TypeError):
+            mount = None
+    MOUNT = mount or "<mount>"   # real probed mountpoint when the drive is attached; placeholder if not
     jobs = []   # (source_path, dest_subpath, excludes, mirror)
     if links:
         for L in links:
@@ -1699,8 +1707,10 @@ def _preview_backup_now(target, r):
             cmds.append(" ".join(cmd))
     if not cmds:
         return {"cmd": None, "note": "built on the agent at run time"}
-    return {"cmd": "\n".join(cmds),
-            "note": "<mount> = the drive's live mountpoint (resolved at run time)"}
+    out = {"cmd": "\n".join(cmds)}
+    if not mount:
+        out["note"] = "<mount> = the drive's live mountpoint (drive currently detached)"
+    return out
 
 @app.get("/api/v1/backup/actions/preview")
 def preview_action(target: str, action: str, create_snapshot: bool = True, path: str = None):
