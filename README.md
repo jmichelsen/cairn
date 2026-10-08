@@ -174,6 +174,32 @@ phase1/  schema.sql             SQLite schema (targets, status, intents)
   edits to `sanoid.conf`. Pin a target manually by setting both `fresh_warn_h` and `fresh_crit_h`
   (see `CAIRN_SANOID_DERIVE`).
 
+## Pre/post hooks (e.g. consistent VM snapshots)
+
+A target in `config/targets.yaml` can wrap cairn's **snapshot**, **sync** and **backup-now**
+actions in its own commands, e.g. freeze a VM's filesystems so its snapshot is consistent, then
+release it before the snapshot is copied elsewhere:
+
+```yaml
+- { name: vms, type: zfs-local, source: tank/vms,
+    pre_cmd: "virsh domfsfreeze web", post_cmd: "virsh domfsthaw web" }
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `pre_cmd` | none | Runs (`sh -c`) before the action. Non-zero exit **skips** the action. |
+| `post_cmd` | none | Always runs after the action once `pre_cmd` has run, even if the action failed or was skipped. Non-zero exit fails the action. |
+| `hook_actions` | all three | Limit which actions are wrapped, e.g. `[snapshot]`. Other actions (scrub, restore, ...) are never hooked. |
+| `hook_timeout_s` | `600` | Each hook is killed after this many seconds (counts as a failure). |
+
+Hooks see `CAIRN_ACTION`, `CAIRN_TARGET` and `CAIRN_SOURCE`; `post_cmd` also gets
+`CAIRN_RESULT=ok|fail|skipped`. They run as the agent's user, come only from the local
+`targets.yaml` (never from the dashboard or the API), and a dry-run lists them without running them.
+
+**Scheduled snapshots don't go through cairn.** For sanoid's own snapshots use its
+`pre_snapshot_script` / `post_snapshot_script` (with `no_inconsistent_snapshot = yes`), and run
+syncoid with `--no-sync-snap` so it only sends those quiesced snapshots instead of taking its own.
+
 ## Notify self-test heartbeat
 
 A dead-man's switch on cairn's *own* alerting. cairn is the thing that tells you when a backup
