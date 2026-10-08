@@ -44,6 +44,12 @@ asks a few questions, elevates **once** (a single sudo for prerequisites + borg/
 access + linger), then builds, configures, and starts everything - control plane, dashboard, and
 the execute-capable local agent. Re-running is idempotent (your tokens/config are kept).
 
+**Podman works too.** If the host has Podman (native `podman`, or its `docker` emulation from
+`podman-docker`), the installer uses it instead of Docker: it enables `podman.socket` (needed by
+compose) and `podman-restart.service` (restarts the container after a reboot), as root or rootless
+(rootless also enables linger). Compose comes from `podman compose` with either docker-compose or
+podman-compose as its provider.
+
 ```bash
 # one-liner - self-clones, then installs:
 curl -fsSL https://raw.githubusercontent.com/youruser/cairn/main/install.sh | bash

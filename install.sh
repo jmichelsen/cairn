@@ -64,7 +64,8 @@ pkg_install() {  # required package(s): die on failure
 pkgname() { case "$1:$PKG" in
     yaml:apt-get) echo python3-yaml;;  yaml:*) echo python3-pyyaml;;
     docker:apt-get) echo docker.io;;   docker:*) echo docker;;
-    compose:apt-get) echo docker-compose-v2;; compose:*) echo docker-compose;;
+    compose:*) if [ "$RUNTIME" = podman ]; then echo podman-compose
+               elif [ "$PKG" = apt-get ]; then echo docker-compose-v2; else echo docker-compose; fi;;
     syncoid:*) echo sanoid;;            # the sanoid package ships both sanoid + syncoid
     borg:*) echo borgbackup;;           # command is `borg`, package is borgbackup
     *) echo "$1";; esac; }
@@ -123,12 +124,35 @@ print(c[0] if c else '')" "$ext" 2>/dev/null)"
   warn "httm not found - the recovery-point catalog (points / deleted-file / version search) needs it"
   info "install a .deb/.rpm from https://github.com/kimono-koans/httm/releases, or 'cargo install httm'"
 }
+# Container runtime: Docker, or Podman (either native `podman` or its `docker` CLI emulation from
+# podman-docker). Podman is daemonless, so `docker info` succeeds without any service running, but
+# `compose` (docker-compose as podman's provider) talks to the Docker-compatible API socket, which
+# podman only serves while podman.socket is active. Podman also has no daemon to bring
+# `restart: unless-stopped` containers back after a reboot - podman-restart.service does that.
+RUNTIME=docker; CTR=docker
+if docker --version 2>/dev/null | grep -qi podman; then RUNTIME=podman
+elif ! command -v docker >/dev/null 2>&1 && command -v podman >/dev/null 2>&1; then RUNTIME=podman; CTR=podman; fi
 # docker CLI access: daemon is root; if this user isn't in the docker group, install-time docker runs
 # via sudo (and we add the user to the group for future sudoless use - takes effect next login).
 DOCKER_SUDO=0
-dc()  { if [ "$DOCKER_SUDO" = 1 ]; then sudo docker compose "$@"; else docker compose "$@"; fi; }
-dps() { if [ "$DOCKER_SUDO" = 1 ]; then sudo docker ps "$@"; else docker ps "$@"; fi; }
+dc()  { if [ "$DOCKER_SUDO" = 1 ]; then sudo "$CTR" compose "$@"; else "$CTR" compose "$@"; fi; }
+dps() { if [ "$DOCKER_SUDO" = 1 ]; then sudo "$CTR" ps "$@"; else "$CTR" ps "$@"; fi; }
+API_NAMES='cairn|cairn-api-1|cairn_api_1'   # docker-compose vs podman-compose container naming
+ensure_podman_access() {
+  if [ "$(id -u)" = 0 ]; then
+    systemctl enable --now podman.socket podman-restart.service >/dev/null 2>&1 \
+      || die "could not start podman.socket - check 'systemctl status podman.socket'"
+  else
+    # rootless: per-user socket + restart unit, and linger so they run without a login session
+    systemctl --user enable --now podman.socket podman-restart.service >/dev/null 2>&1 \
+      || die "could not start the user podman.socket - check 'systemctl --user status podman.socket'"
+    loginctl enable-linger "$USER" 2>/dev/null || { prime_sudo; sudo loginctl enable-linger "$USER"; } \
+      || warn "could not enable linger for $USER - cairn stops when you log out"
+  fi
+  ok "podman socket + restart-on-boot enabled"
+}
 ensure_docker_access() {
+  [ "$RUNTIME" = podman ] && { ensure_podman_access; return 0; }
   docker info >/dev/null 2>&1 && return 0
   sudo -n true 2>/dev/null || prime_sudo
   sudo systemctl enable --now docker 2>/dev/null || true
@@ -230,10 +254,10 @@ command -v openssl >/dev/null || warn "openssl missing - tokens will use /dev/ur
 ensure "command -v python3 >/dev/null" python3 "python3"
 ensure "python3 -c 'import yaml'"      yaml    "python3 yaml"
 if [ "$ROLE" = home ]; then
-  ensure "command -v docker >/dev/null"          docker  "docker"
-  ensure "docker compose version >/dev/null 2>&1" compose "docker compose plugin"
+  [ "$RUNTIME" = podman ] || ensure "command -v docker >/dev/null" docker "docker"
   ensure_docker_access
-  ok "docker + compose ready"
+  ensure "\"\$CTR\" compose version >/dev/null 2>&1" compose "$CTR compose"
+  ok "$RUNTIME + compose ready"
 else
   command -v systemctl >/dev/null || die "systemd needed for the vault agent"
   ok "python/yaml + systemd ready"
@@ -346,7 +370,7 @@ EOF
 
   # ---- control plane (idempotent: never clobber an api container managed elsewhere, e.g. CI/proxy) ----
   local API_LOCAL_OK=0
-  if dps --format '{{.Names}}' | grep -qxE 'cairn|cairn-api-1'; then
+  if dps --format '{{.Names}}' | grep -qxE "$API_NAMES"; then
     ok "an api container is already running - leaving it as-is (not rebuilding)"
     info "if you deploy the api another way (CI / a custom compose behind a proxy), this respects it."
     info "to force a rebuild from THIS compose: docker compose up -d --build api"
@@ -564,7 +588,7 @@ provision_replication() {
 # add a vault to an already-running home (no home rebuild). Needs the api container up to mint a token.
 add_vault_only() {
   ensure_docker_access
-  dps --format '{{.Names}}' | grep -qxE 'cairn|cairn-api-1' \
+  dps --format '{{.Names}}' | grep -qxE "$API_NAMES" \
     || die "no api container running - set up home first (./install.sh home), then re-run with --add-vault"
   say "Add a remote vault to this home"
   provision_vault
