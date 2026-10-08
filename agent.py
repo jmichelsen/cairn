@@ -470,6 +470,8 @@ def do_execute(cfg):
                 for _ds in skipped_enc:
                     lines.append(f"{_ds}: SKIPPED (encrypted - would be plaintext on the removable)")
                 ok = all(oks) and bool(oks)
+                if C.hook_note(t, "backup-now"):
+                    lines.insert(0, C.hook_note(t, "backup-now"))
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                          {"ok": ok, "output": ("[DRY-RUN] " + "\n".join(lines))[-1800:], "dryrun": True})
                 print(f"  intent {iid} {target} backup-now [dry] -> {'ok' if ok else 'FAIL'}"); continue
@@ -479,6 +481,11 @@ def do_execute(cfg):
             sd = C._cairn_state_dir(); jout = os.path.join(sd, f"job-{iid}.out"); jdone = os.path.join(sd, f"job-{iid}.done")
             jcur = os.path.join(sd, f"job-{iid}.cur")   # current-dataset marker (reaper reads it for the label)
             sl = ['ok=1']; ds_stamps = []
+            _pre = C.hook_shell(t, "pre", "backup-now")
+            _post_skip = C.hook_shell(t, "post", "backup-now", "skipped")
+            if _pre:   # a failed pre_cmd skips the copy; post_cmd still runs to release what pre held
+                sl.append(f'if ! {_pre}; then echo "pre_cmd FAILED - backup skipped"; '
+                          f'{(_post_skip + "; ") if _post_skip else ""}exit 1; fi')
             for _ds in skipped_enc:
                 sl.append(f'echo {C.shlex.quote(_ds + ": SKIPPED (encrypted dataset - refusing plaintext copy to removable)")}')
             for ds, jt, have_src in jobs:
@@ -497,6 +504,10 @@ def do_execute(cfg):
                         ds_stamps.append({"name": ds, "stamp": stamp})
                 else:
                     sl.append(f'{C.shlex.join(cmd)} || ok=0')
+            _post = C.hook_shell(t, "post", "backup-now", '"$r"')
+            if _post:  # always runs after the copies, told whether they succeeded
+                sl.append('if [ "$ok" = 1 ]; then r=ok; else r=fail; fi')
+                sl.append(f'{_post} || {{ echo "post_cmd FAILED"; ok=0; }}')
             sl.append('[ "$ok" = 1 ]')   # the script's exit code = overall success
             pid = C.spawn_detached("\n".join(sl), jout, jdone)
             _jobs_add(iid, {"removable": target, "out": jout, "done": jdone, "cur": jcur, "nlinks": len(jobs),
@@ -513,6 +524,8 @@ def do_execute(cfg):
         if dry:
             dcmd, note = C.build_dryrun(action, t, opts)
             header = f"[DRY-RUN] would run: {' '.join(cmd)}"
+            if C.hook_note(t, action):
+                header += f"\n{C.hook_note(t, action)}"
             if dcmd is None:
                 rc, out = 0, f"{header}\n\n{note}"
             else:
@@ -520,8 +533,8 @@ def do_execute(cfg):
                 out = f"{header}\n\nprobe: {' '.join(dcmd)}\n\n{(so + se).strip()}"
             body = {"ok": rc == 0, "output": out.strip()[-1800:], "cmd": " ".join(cmd), "dryrun": True}
         else:
-            rc, so, se = C.run(cmd, timeout=TIMEOUT)
-            full = (so + se).strip()
+            rc, full = C.run_hooked(t, action, cmd, TIMEOUT)
+            full = full.strip()
             # Recovery LISTINGS are JSON / tab-separated tables that the dashboard parses, so they must
             # arrive whole and from the START (tail-truncated JSON is unparseable). Keep the head with a
             # generous cap for those; every other action keeps the compact last-1500 for the activity log.

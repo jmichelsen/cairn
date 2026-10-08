@@ -40,6 +40,13 @@ targets:
   # fresh_warn_h and fresh_crit_h (that fully overrides the sanoid derivation for that target):
   - { name: tank,   type: zfs-local, source: tank }
   - { name: backup, type: zfs-local, source: backup, fresh_warn_h: 26, fresh_crit_h: 50 }
+  # Pre/post hooks around cairn's own snapshot / sync / backup-now actions, e.g. quiesce a VM so its
+  # snapshot is consistent. A failing pre_cmd skips the action; post_cmd always runs after it (with
+  # CAIRN_RESULT=ok|fail|skipped) and its failure fails the action. Optional: hook_actions: [snapshot]
+  # to wrap only some actions, hook_timeout_s (default 600). Scheduled sanoid snapshots don't go
+  # through cairn - use sanoid's own pre_snapshot_script / post_snapshot_script for those.
+  # - { name: vms, type: zfs-local, source: tank/vms,
+  #     pre_cmd: "virsh domfsfreeze web", post_cmd: "virsh domfsthaw web" }
 
   # --- borg repos (mount them read-only into the container). Encrypted repos need the
   #     passphrase: set an env var and reference it with passphrase_env. ---

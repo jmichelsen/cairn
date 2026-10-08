@@ -2067,6 +2067,80 @@ def collect_all(cfg, now=None):
             out.append((dict(t, name=name), st))
     return out
 
+# ---- pre/post action hooks --------------------------------------------------------------------
+# A target may wrap its data-moving actions in its own commands, e.g. quiesce a VM before a snapshot
+# and release it after:  { name: vms, type: zfs-local, source: tank/vms,
+#                          pre_cmd: "virsh domfsfreeze web", post_cmd: "virsh domfsthaw web" }
+# Hooks come ONLY from the trusted local targets.yaml (never the wire), run via `sh -c` under
+# `timeout hook_timeout_s` (default 600), and see CAIRN_ACTION / CAIRN_TARGET / CAIRN_SOURCE (+
+# CAIRN_RESULT=ok|fail|skipped for post). A failing pre_cmd SKIPS the action (no inconsistent copy);
+# post_cmd ALWAYS runs once pre_cmd has run (so a frozen VM is never left frozen) and its failure fails
+# the action. `hook_actions` narrows which actions are wrapped (default: all of HOOK_ACTIONS).
+HOOK_ACTIONS = ("snapshot", "sync", "backup-now")
+
+def hook_argv(t, which, action):
+    """argv for the target's `pre_cmd`/`post_cmd` around `action`, or None when not configured or the
+    action isn't hooked. Only data-moving actions can be hooked, whatever hook_actions says."""
+    cmd = t.get(f"{which}_cmd")
+    if not cmd or action not in HOOK_ACTIONS:
+        return None
+    acts = t.get("hook_actions") or HOOK_ACTIONS
+    if isinstance(acts, str):
+        acts = [acts]
+    if action not in acts:
+        return None
+    return ["timeout", str(int(t.get("hook_timeout_s", 600))), "sh", "-c", str(cmd)]
+
+def hook_env(t, action, result=None):
+    env = {"CAIRN_ACTION": action, "CAIRN_TARGET": str(t.get("name") or ""),
+           "CAIRN_SOURCE": str(t.get("source") or "")}
+    if result:
+        env["CAIRN_RESULT"] = result
+    return env
+
+def hook_shell(t, which, action, result_expr=None):
+    """The hook as one shell line (for detached job scripts), or None. result_expr is inserted
+    unquoted so it can be a shell variable like "$r"."""
+    argv = hook_argv(t, which, action)
+    if not argv:
+        return None
+    env = hook_env(t, action)
+    pre = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
+    if result_expr:
+        pre += f" CAIRN_RESULT={result_expr}"
+    return f"{pre} {shlex.join(argv)}"
+
+def hook_note(t, action):
+    """One line describing the hooks a dry-run did NOT run, or '' when none apply."""
+    bits = [f"{w}_cmd: {t[w + '_cmd']}" for w in ("pre", "post") if hook_argv(t, w, action)]
+    return ("hooks (not run in dry-run): " + "; ".join(bits)) if bits else ""
+
+def run_hooked(t, action, cmd, timeout):
+    """Run `cmd` wrapped by the target's pre/post hooks. Returns (rc, combined output). With no hooks
+    this is exactly run(cmd) with stdout+stderr joined."""
+    pre, post = hook_argv(t, "pre", action), hook_argv(t, "post", action)
+    if not pre and not post:
+        rc, so, se = run(cmd, timeout=timeout)
+        return rc, so + se
+    parts, rc, result = [], 0, "ok"
+    if pre:
+        prc, pso, pse = run(pre, timeout=int(pre[1]) + 5, env=hook_env(t, action))
+        parts.append(f"[pre_cmd exit {prc}] {(pso + pse).strip()}".rstrip())
+        if prc != 0:
+            rc, result = prc, "skipped"
+            parts.append("pre_cmd failed - action skipped")
+    if result != "skipped":
+        rc, so, se = run(cmd, timeout=timeout)
+        parts.append((so + se).strip())
+        result = "ok" if rc == 0 else "fail"
+    if post:
+        prc, pso, pse = run(post, timeout=int(post[1]) + 5, env=hook_env(t, action, result))
+        parts.append(f"[post_cmd exit {prc}] {(pso + pse).strip()}".rstrip())
+        if prc != 0 and rc == 0:
+            rc = prc
+            parts.append("post_cmd failed")
+    return rc, "\n".join(x for x in parts if x)
+
 def build_command(action, t, opts=None):
     """Map (action, target) -> argv from the TRUSTED local target config. Never from the wire.
     Returns (argv|None, error|None). The action allowlist for the agent's executor."""

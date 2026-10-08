@@ -846,3 +846,49 @@ def test_zed_unreturned_drop_and_unknown_events_kept():
     tl = collector._zed_timeline(evs)
     assert tl[0].split("  ", 1)[1].startswith("checksum")
     assert tl[1].endswith("FAULTED, not back yet")
+
+
+# ---- pre/post action hooks -------------------------------------------------------------------
+def _hook_target(**kw):
+    return dict(name="vms", type="zfs-local", source="tank/vms", **kw)
+
+
+def test_hooks_absent_is_plain_run():
+    rc, out = collector.run_hooked(_hook_target(), "snapshot", ["sh", "-c", "echo hi"], 10)
+    assert rc == 0 and out.strip() == "hi"
+
+
+def test_hooks_wrap_in_order_and_see_env(tmp_path):
+    log = tmp_path / "log"
+    t = _hook_target(pre_cmd=f'echo "pre $CAIRN_ACTION $CAIRN_TARGET" >> {log}',
+                     post_cmd=f'echo "post $CAIRN_RESULT" >> {log}')
+    rc, out = collector.run_hooked(t, "snapshot", ["sh", "-c", f"echo action >> {log}"], 10)
+    assert rc == 0
+    assert log.read_text().split("\n")[:3] == ["pre snapshot vms", "action", "post ok"]
+
+
+def test_failed_pre_skips_action_but_runs_post(tmp_path):
+    log = tmp_path / "log"
+    t = _hook_target(pre_cmd="exit 3", post_cmd=f'echo "post $CAIRN_RESULT" >> {log}')
+    rc, out = collector.run_hooked(t, "snapshot", ["sh", "-c", f"echo action >> {log}"], 10)
+    assert rc == 3 and "action skipped" in out
+    assert log.read_text().strip() == "post skipped"
+
+
+def test_failed_post_fails_a_successful_action():
+    rc, out = collector.run_hooked(_hook_target(post_cmd="exit 5"), "sync", ["true"], 10)
+    assert rc == 5 and "post_cmd failed" in out
+
+
+def test_hooks_only_wrap_data_moving_and_selected_actions():
+    t = _hook_target(pre_cmd="x", hook_actions=["snapshot"], hook_timeout_s=30)
+    assert collector.hook_argv(t, "pre", "snapshot") == ["timeout", "30", "sh", "-c", "x"]
+    assert collector.hook_argv(t, "pre", "sync") is None            # not selected
+    assert collector.hook_argv(_hook_target(pre_cmd="x"), "pre", "scrub") is None   # never hookable
+
+
+def test_hook_shell_for_detached_scripts():
+    t = _hook_target(post_cmd="virsh domfsthaw web")
+    line = collector.hook_shell(t, "post", "backup-now", '"$r"')
+    assert line.startswith("CAIRN_ACTION=backup-now CAIRN_TARGET=vms CAIRN_SOURCE=tank/vms CAIRN_RESULT=\"$r\" ")
+    assert line.endswith("timeout 600 sh -c 'virsh domfsthaw web'")
