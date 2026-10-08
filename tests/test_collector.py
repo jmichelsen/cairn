@@ -809,3 +809,40 @@ def test_schedules_disabled_timer_reports_ok_not_warn(monkeypatch):
     assert syncoid["severity"] == "OK" and syncoid["last_error"] is None
     d = json.loads(syncoid["detail_json"])
     assert d.get("disabled") is True and "journal" not in d   # old failure NOT surfaced for a disabled timer
+
+
+# ---- zed timeline collapsing -----------------------------------------------------------------
+def _ev(ts, cls, pool="mcz", vdev=None, vstate=None):
+    return dict(ts=ts, cls=cls, pool=pool, vdev=vdev, vstate=vstate, pstate=None, err=None, delay=None)
+
+
+def test_zed_drop_and_resilver_collapse_to_one_line():
+    v = "scsi-35000-part1"
+    evs = [_ev(100, "statechange", vdev=v, vstate="REMOVED"), _ev(101, "removed", vdev=v, vstate="REMOVED"),
+           _ev(101, "config_sync"), _ev(105, "statechange", vdev=v, vstate="ONLINE"),
+           _ev(105, "vdev_online", vdev=v, vstate="ONLINE"), _ev(105, "resilver_start"),
+           _ev(107, "resilver_finish"), _ev(107, "config_sync")]
+    tl = collector._zed_timeline(evs)
+    assert len(tl) == 1
+    assert "REMOVED, back ONLINE after 5s, resilvered in 2s" in tl[0]
+
+
+def test_zed_restarted_resilvers_and_scrub_pairing():
+    v = "d-part1"
+    evs = [_ev(0, "scrub_start"), _ev(3700, "scrub_finish"),
+           _ev(5000, "statechange", vdev=v, vstate="REMOVED"), _ev(5004, "statechange", vdev=v, vstate="ONLINE"),
+           _ev(5005, "resilver_start"),
+           _ev(5060, "statechange", vdev=v, vstate="REMOVED"), _ev(5066, "statechange", vdev=v, vstate="ONLINE"),
+           _ev(5067, "resilver_start"), _ev(5100, "resilver_finish")]
+    tl = collector._zed_timeline(evs)
+    assert len(tl) == 3
+    assert tl[0].endswith("resilvered in 33s")          # newest first
+    assert tl[1].endswith("resilver restarted")
+    assert tl[2].endswith("scrub  mcz  1h01m")
+
+
+def test_zed_unreturned_drop_and_unknown_events_kept():
+    evs = [_ev(10, "statechange", vdev="x-part1", vstate="FAULTED"), _ev(20, "checksum", vdev="y")]
+    tl = collector._zed_timeline(evs)
+    assert tl[0].split("  ", 1)[1].startswith("checksum")
+    assert tl[1].endswith("FAULTED, not back yet")

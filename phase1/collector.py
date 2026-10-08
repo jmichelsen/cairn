@@ -1227,6 +1227,105 @@ def adapter_reachability(t, defaults, now):
                  last_error=f"cannot reach {host} after {tries} tries: {last}",
                  detail_json=json.dumps(dict(host=host, tries=tries, probe=probe, last_error=last)))]
 
+_ZED_NOISE = {"config_sync"}
+_ZED_BAD_VSTATES = {"REMOVED", "FAULTED", "UNAVAIL", "OFFLINE", "DEGRADED"}
+
+def _dur(secs):
+    secs = max(0, int(secs))
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m{secs % 60:02d}s"
+    return f"{secs // 3600}h{secs % 3600 // 60:02d}m"
+
+def _zed_timeline(events):
+    """Collapse raw zed events into one human line per real-world event, newest first. A transient
+    disk drop is ~8 raw events (statechange REMOVED, removed, config_sync, statechange ONLINE,
+    vdev_online, resilver_start, resilver_finish...) that read like several separate resilvers, so:
+    pair each *_start with its *_finish into one line with a duration, fold a drop and its return
+    into one line, attach the resilver that follows a drop to that drop, and drop config_sync."""
+    items, open_ops, open_drops, last_drop = [], {}, {}, {}
+    for e in sorted(events, key=lambda x: x["ts"]):
+        cls, pool, vdev = e["cls"], e.get("pool"), e.get("vdev")
+        vs = (e.get("vstate") or "").upper()
+        if cls in _ZED_NOISE:
+            continue
+        m = re.fullmatch(r"(scrub|resilver|trim|initialize)_(\w+)", cls)
+        if m:
+            op, phase = m.groups()
+            key = (pool, op, vdev)
+            if phase == "start":
+                prev = open_ops.pop(key, None)
+                if prev:
+                    prev["status"] = "restarted"
+                it = dict(ts=e["ts"], kind="op", op=op, pool=pool, vdev=vdev, end=None, status=None)
+                d = last_drop.get(pool)
+                if op == "resilver" and d and d.get("end") and e["ts"] - d["end"] <= 120 \
+                        and "resilver" not in d:
+                    d["resilver"] = it                # the catch-up resilver of that drop
+                else:
+                    items.append(it)
+                open_ops[key] = it
+            else:
+                it = open_ops.pop(key, None)
+                if it:
+                    it["end"], it["status"] = e["ts"], ("done" if phase == "finish" else phase)
+                else:
+                    items.append(dict(ts=e["ts"], kind="raw", e=e))
+            continue
+        if vdev and vs in _ZED_BAD_VSTATES:
+            if (pool, vdev) not in open_drops:        # `removed` repeats the statechange - absorb it
+                it = dict(ts=e["ts"], kind="drop", pool=pool, vdev=vdev, state=vs, end=None)
+                open_drops[(pool, vdev)] = it
+                items.append(it)
+            continue
+        if vdev and vs == "ONLINE" and cls in ("statechange", "vdev_online"):
+            d = open_drops.pop((pool, vdev), None)
+            if d:
+                d["end"] = e["ts"]; last_drop[pool] = d
+                continue
+            d = last_drop.get(pool)
+            if d and d["vdev"] == vdev and e["ts"] - d["end"] <= 60:
+                continue                              # vdev_online echo of the return just recorded
+        items.append(dict(ts=e["ts"], kind="raw", e=e))
+
+    def _op_tail(it):
+        if it["status"] == "done":
+            return f"{_dur(it['end'] - it['ts'])}"
+        if it["status"] == "restarted":
+            return "restarted"
+        if it["status"]:
+            return f"{it['status']} after {_dur(it['end'] - it['ts'])}"
+        return "in progress"
+
+    def _fmt(it):
+        when = time.strftime("%m-%d %H:%M", time.localtime(it["ts"])) if it["ts"] else "?"
+        if it["kind"] == "drop":
+            line = f"{when}  {it['pool'] or '?'}  vdev={it['vdev']} {it['state']}"
+            if it["end"] is None:
+                return line + ", not back yet"
+            line += f", back ONLINE after {_dur(it['end'] - it['ts'])}"
+            r = it.get("resilver")
+            if r:
+                line += (f", resilvered in {_dur(r['end'] - r['ts'])}" if r["status"] == "done"
+                         else f", resilver {_op_tail(r)}")
+            return line
+        if it["kind"] == "op":
+            bits = [when, it["op"], it["pool"] or "?"]
+            if it.get("vdev"):
+                bits.append(f"vdev={it['vdev']}")
+            return "  ".join(bits + [_op_tail(it)])
+        e = it["e"]
+        bits = [when, e["cls"]]
+        if e.get("pool"):   bits.append(e["pool"])
+        if e.get("vdev"):   bits.append(f"vdev={e['vdev']}")
+        if e.get("vstate"): bits.append(e["vstate"])
+        if e.get("err"):    bits.append(f"err={e['err']}")
+        if e.get("delay"):  bits.append(f"delay={e['delay']}ms")
+        return "  ".join(bits)
+
+    return [_fmt(it) for it in sorted(items, key=lambda x: x["ts"], reverse=True)]
+
 def adapter_zfs_events(t, defaults, now):
     """A ZFS event timeline from zed's journal (the all-syslog.sh zedlet). Portable: needs only a
     default OpenZFS + systemd box, no custom script. Lists recent pool events (scrub/resilver,
@@ -1288,18 +1387,10 @@ def adapter_zfs_events(t, defaults, now):
     st["severity"] = sev
     if reasons:
         st["last_error"] = "; ".join(dict.fromkeys(reasons))[:300]
-    def _fmt(e):
-        when = time.strftime("%m-%d %H:%M", time.localtime(e["ts"])) if e["ts"] else "?"
-        bits = [when, e["cls"]]
-        if e.get("pool"):   bits.append(e["pool"])
-        if e.get("vdev"):   bits.append(f"vdev={e['vdev']}")
-        if e.get("vstate"): bits.append(e["vstate"])
-        if e.get("err"):    bits.append(f"err={e['err']}")
-        if e.get("delay"):  bits.append(f"delay={e['delay']}ms")
-        return "  ".join(bits)
-    timeline = [_fmt(e) for e in sorted(events, key=lambda x: x["ts"], reverse=True)][:40]
+    timeline = _zed_timeline(events)
     st["detail_json"] = json.dumps({"label": "ZFS events (zed)", "log_label": "ZFS events",
-                                    "summary": f"{len(events)} event(s) in {days}d", "journal": timeline})
+                                    "summary": f"{len(timeline)} event(s) in {days}d",
+                                    "journal": timeline[:40]})
     return [st]
 
 def _sd_show(unit, props):
