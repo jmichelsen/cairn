@@ -43,11 +43,12 @@ One entry point. It **installs any missing prerequisites** (docker, compose, pyt
 asks a few questions, elevates **once** (a single sudo for prerequisites + borg/backupninja read
 access + linger), then builds, configures, and starts everything - control plane, dashboard, and
 the execute-capable local agent. Re-running is idempotent (your tokens/config are kept).
+Run it as your normal user, not root: the agent is a systemd user service.
 
 **Podman works too.** If the host has Podman (native `podman`, or its `docker` emulation from
 `podman-docker`), the installer uses it instead of Docker: it enables `podman.socket` (needed by
-compose) and `podman-restart.service` (restarts the container after a reboot), as root or rootless
-(rootless also enables linger). Compose comes from `podman compose` with either docker-compose or
+compose) and `podman-restart.service` (restarts the container after a reboot) as rootless user
+units, with linger. Compose comes from `podman compose` with either docker-compose or
 podman-compose as its provider.
 
 ```bash
