@@ -139,16 +139,12 @@ dc()  { if [ "$DOCKER_SUDO" = 1 ]; then sudo "$CTR" compose "$@"; else "$CTR" co
 dps() { if [ "$DOCKER_SUDO" = 1 ]; then sudo "$CTR" ps "$@"; else "$CTR" ps "$@"; fi; }
 API_NAMES='cairn|cairn-api-1|cairn_api_1'   # docker-compose vs podman-compose container naming
 ensure_podman_access() {
-  if [ "$(id -u)" = 0 ]; then
-    systemctl enable --now podman.socket podman-restart.service >/dev/null 2>&1 \
-      || die "could not start podman.socket - check 'systemctl status podman.socket'"
-  else
-    # rootless: per-user socket + restart unit, and linger so they run without a login session
-    systemctl --user enable --now podman.socket podman-restart.service >/dev/null 2>&1 \
-      || die "could not start the user podman.socket - check 'systemctl --user status podman.socket'"
-    loginctl enable-linger "$USER" 2>/dev/null || { prime_sudo; sudo loginctl enable-linger "$USER"; } \
-      || warn "could not enable linger for $USER - cairn stops when you log out"
-  fi
+  # rootless (install.sh refuses root): per-user socket + restart unit, and linger so they keep
+  # running without a login session
+  systemctl --user enable --now podman.socket podman-restart.service >/dev/null 2>&1 \
+    || die "could not start the user podman.socket - check 'systemctl --user status podman.socket'"
+  loginctl enable-linger "$USER" 2>/dev/null || { prime_sudo; sudo loginctl enable-linger "$USER"; } \
+    || warn "could not enable linger for $USER - cairn stops when you log out"
   ok "podman socket + restart-on-boot enabled"
 }
 ensure_docker_access() {
@@ -248,6 +244,10 @@ if [ -z "$ROLE" ]; then
   ask ROLE "role (home/vault)" home
 fi
 [ "$ROLE" = home ] || [ "$ROLE" = vault ] || die "role must be 'home' or 'vault'"
+# The agent is a systemd --user service (plus linger), so it must belong to a real login user. Under
+# root (`su`/`sudo -i`) there is no user bus ("$DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not
+# defined") and the install half-finishes. Refuse up front; the script elevates via sudo itself.
+[ "$(id -u)" != 0 ] || die "run install.sh as your normal user, not root - it asks for sudo once when it needs it"
 
 ensure "command -v curl >/dev/null"    curl   "curl"
 command -v openssl >/dev/null || warn "openssl missing - tokens will use /dev/urandom"
