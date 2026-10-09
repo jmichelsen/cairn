@@ -463,3 +463,22 @@ def test_removable_diff_lists_source_folders_even_when_in_sync():
     # every in-sync source folder is a tappable exclude row, and the free-text add box is present
     assert 'data-pat="/RAW"' in html and 'data-pat="/2019"' in html and 'data-pat="/2020"' in html
     assert "rl-exadd" in html
+
+
+# ---- AIDE integrity card ---------------------------------------------------------------------
+def _aide_row(pending):
+    return {"name": "aide", "type": "aide", "source": None, "severity": "WARN" if pending else "OK",
+            "agent": "a", "detail_json": json.dumps({"aide_pending": pending, "aide_total": len(pending)})}
+
+
+def test_aide_card_lists_changes_with_accept_for_admin_only():
+    r = _aide_row([{"first": "2026-10-09", "kind": "changed", "path": "/etc/hosts"}])
+    admin = api._card(r, can_act=True, viewer=False)
+    assert "/etc/hosts" in admin and ">Accept<" in admin and "Accept all (1)" in admin
+    assert ">Acknowledge<" not in admin            # Accept is the acknowledgement on this card
+    ro = api._card(r, can_act=False, viewer=True)
+    assert "/etc/hosts" in ro and ">Accept<" not in ro and "Accept all" not in ro
+
+
+def test_aide_accept_is_allowed_action():
+    assert "aide-accept" in api.ALLOWED_ACTIONS

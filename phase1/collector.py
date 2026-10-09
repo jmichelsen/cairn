@@ -1326,6 +1326,38 @@ def _zed_timeline(events):
 
     return [_fmt(it) for it in sorted(items, key=lambda x: x["ts"], reverse=True)]
 
+AIDE_CHECK = "/usr/local/sbin/aide-check.sh"
+
+def _aide_cmd(t):
+    return str(t.get("check_cmd") or AIDE_CHECK)
+
+def adapter_aide(t, defaults, now):
+    """File-integrity changes from AIDE that nobody has acknowledged yet. Reads the pending list via
+    `sudo -n <check_cmd> --list` (first_seen<TAB>kind<TAB>path per line); needs a sudoers rule for
+    that one script, since AIDE's state is root-only. Package-update changes never reach the list
+    (the checker absorbs them), so anything here is a change a human should look at. Severity while
+    anything is pending = `severity` (default WARN). Accepting is the `aide-accept` action."""
+    rc, out, err = run(["sudo", "-n", _aide_cmd(t), "--list"], timeout=30)
+    if rc != 0:
+        return [dict(severity="UNKNOWN",
+                     last_error=f"can't read the AIDE pending list ({(err or out).strip()[-160:] or f'exit {rc}'}) "
+                                f"- needs a sudoers rule for {_aide_cmd(t)}")]
+    rows = []
+    for ln in out.splitlines():
+        f = ln.split("\t")
+        if len(f) >= 3 and f[2].startswith("/"):
+            rows.append({"first": f[0], "kind": f[1], "path": f[2]})
+    n = len(rows)
+    st = dict(severity="OK")
+    if n:
+        st["severity"] = str(t.get("severity", "WARN")).upper()
+        st["last_error"] = f"{n} unacknowledged integrity change(s)"
+    st["detail_json"] = json.dumps({"label": t.get("label") or "File integrity (AIDE)",
+                                    "summary": (f"{n} change(s) awaiting review" if n
+                                                else "no unacknowledged changes"),
+                                    "aide_pending": rows[:300], "aide_total": n})
+    return [st]
+
 def adapter_zfs_events(t, defaults, now):
     """A ZFS event timeline from zed's journal (the all-syslog.sh zedlet). Portable: needs only a
     default OpenZFS + systemd box, no custom script. Lists recent pool events (scrub/resilver,
@@ -2045,6 +2077,8 @@ def collect_all(cfg, now=None):
                 sts = adapter_schedules(t, defaults, now)
             elif typ == "zfs-events":
                 sts = adapter_zfs_events(t, defaults, now)
+            elif typ == "aide":
+                sts = adapter_aide(t, defaults, now)
             elif typ == "reachability":
                 sts = adapter_reachability(t, defaults, now)
             else:
@@ -2146,6 +2180,15 @@ def build_command(action, t, opts=None):
     Returns (argv|None, error|None). The action allowlist for the agent's executor."""
     opts = opts or {}
     typ = t.get("type"); src = t.get("source")
+    if action == "aide-accept":
+        # acknowledge AIDE pending changes: one path (opts.path) or all. The path is only ever an
+        # ARGUMENT to the root-owned checker, which matches it against its own pending list.
+        if typ != "aide":
+            return None, f"'aide-accept' not allowed for type '{typ}'"
+        p = opts.get("path")
+        if p is not None and (not str(p).startswith("/") or "\n" in str(p) or "\x00" in str(p)):
+            return None, "aide-accept path must be an absolute path"
+        return ["sudo", "-n", _aide_cmd(t), "--accept"] + ([str(p)] if p else []), None
     if action == "snapshot":
         if not src:
             return None, "target has no source dataset"
@@ -2304,6 +2347,9 @@ def build_dryrun(action, t, opts=None):
         return build_command(action, t, opts)                          # read-only anyway
     if action == "restore":
         return None, "would copy the chosen snapshot version into the staging dir (copy-only, never overwrites live)"
+    if action == "aide-accept":
+        return None, (f"would acknowledge AIDE pending change {opts['path']}" if opts.get("path")
+                      else "would acknowledge ALL AIDE pending changes")
     return None, f"no dry-run for '{action}'"
 
 def _nice_prefix():

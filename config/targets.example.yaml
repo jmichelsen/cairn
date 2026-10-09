@@ -98,6 +98,10 @@ targets:
   #     Lists scrub/resilver + vdev state changes + checksum/io errors; warns only on a currently
   #     bad vdev or recent checksum/io/data errors (a resolved flap stays in the log as history). ---
   - { name: zfs-events, type: zfs-events, window_h: 168, alert_h: 48 }
+  # --- AIDE file integrity: changes nobody has reviewed yet, each with an Accept button. Reads the
+  #     pending list via `sudo -n <check_cmd> --list` and accepts via `--accept [path]`, so it needs
+  #     a NOPASSWD sudoers rule for that one script. See README "File integrity (AIDE)". ---
+  # - { name: aide, type: aide, check_cmd: /usr/local/sbin/aide-check.sh, severity: WARN }
 
   # --- reachability: SSH-probe a remote host and alert if it can't be reached. Intended for an
   #     OFF-SITE agent to prove it can still reach HOME over the VPN - it reports to cairn over the
