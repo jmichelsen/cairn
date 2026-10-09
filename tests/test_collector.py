@@ -892,3 +892,31 @@ def test_hook_shell_for_detached_scripts():
     line = collector.hook_shell(t, "post", "backup-now", '"$r"')
     assert line.startswith("CAIRN_ACTION=backup-now CAIRN_TARGET=vms CAIRN_SOURCE=tank/vms CAIRN_RESULT=\"$r\" ")
     assert line.endswith("timeout 600 sh -c 'virsh domfsthaw web'")
+
+
+# ---- AIDE integrity target -------------------------------------------------------------------
+def test_aide_pending_list_drives_severity(monkeypatch):
+    out = "2026-10-09\tchanged\t/etc/hosts\n2026-10-09\tadded (again 2026-10-10)\t/usr/local/bin/x\n"
+    monkeypatch.setattr(collector, "run", _canned(out))
+    st = collector.adapter_aide({"name": "aide", "type": "aide"}, {}, 0)[0]
+    d = json.loads(st["detail_json"])
+    assert st["severity"] == "WARN" and d["aide_total"] == 2
+    assert d["aide_pending"][1] == {"first": "2026-10-09", "kind": "added (again 2026-10-10)",
+                                    "path": "/usr/local/bin/x"}
+
+
+def test_aide_empty_is_ok_and_unreadable_is_unknown(monkeypatch):
+    monkeypatch.setattr(collector, "run", _canned(""))
+    assert collector.adapter_aide({"name": "aide", "type": "aide"}, {}, 0)[0]["severity"] == "OK"
+    monkeypatch.setattr(collector, "run", lambda *a, **k: (1, "", "sudo: a password is required"))
+    st = collector.adapter_aide({"name": "aide", "type": "aide"}, {}, 0)[0]
+    assert st["severity"] == "UNKNOWN" and "sudoers" in st["last_error"]
+
+
+def test_aide_accept_command():
+    t = {"name": "aide", "type": "aide"}
+    assert collector.build_command("aide-accept", t, {})[0] == \
+        ["sudo", "-n", "/usr/local/sbin/aide-check.sh", "--accept"]
+    assert collector.build_command("aide-accept", t, {"path": "/etc/hosts"})[0][-1] == "/etc/hosts"
+    assert collector.build_command("aide-accept", t, {"path": "--evil"})[0] is None
+    assert collector.build_command("aide-accept", {"type": "zfs-local", "source": "p"}, {})[0] is None

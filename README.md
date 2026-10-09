@@ -200,6 +200,30 @@ Hooks see `CAIRN_ACTION`, `CAIRN_TARGET` and `CAIRN_SOURCE`; `post_cmd` also get
 `pre_snapshot_script` / `post_snapshot_script` (with `no_inconsistent_snapshot = yes`), and run
 syncoid with `--no-sync-snap` so it only sends those quiesced snapshots instead of taking its own.
 
+## File integrity (AIDE)
+
+An `aide` target shows file-integrity changes that nobody has reviewed yet, one row per changed
+path, each with an **Accept** button (plus **Accept all**). Read-only viewers see the list without
+the buttons. cairn stores which account clicked with each accept (the intent's `requested_by`).
+
+```yaml
+- { name: aide, type: aide }        # optional: check_cmd (default /usr/local/sbin/aide-check.sh), severity (WARN)
+```
+
+cairn doesn't run AIDE itself. It expects a root-owned checker script that keeps a pending list
+and supports two commands: `--list` (print `first_seen<TAB>kind<TAB>path` lines) and
+`--accept [PATH...]` (acknowledge all, or just those paths). Because AIDE's state is root-only, the
+agent's user needs a NOPASSWD sudoers rule for exactly that script (sudo-rs friendly, no argument
+wildcards):
+
+```
+youruser ALL=(root) NOPASSWD: /usr/local/sbin/aide-check.sh
+```
+
+A sensible checker absorbs changes that package updates explain (so routine upgrades never reach
+the list) and re-sends unexplained ones daily until accepted. Its alert mail can link straight to
+the card: `https://<your-cairn>/#cc-<agent>-<target>` opens the right tab and highlights it.
+
 ## Notify self-test heartbeat
 
 A dead-man's switch on cairn's *own* alerting. cairn is the thing that tells you when a backup

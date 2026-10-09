@@ -149,6 +149,18 @@ def _lookup_role(token):
         c.commit()
     return r["role"]
 
+def _whoami(request):
+    """The signed-in identity for audit trails: the username for a password session (stored in the
+    session token's `parent`), else the token's label (e.g. 'bootstrap-admin'). None if unknown."""
+    tok = _extract_token(request)
+    if not tok:
+        return None
+    with db() as c:
+        r = c.execute("SELECT kind,label,parent FROM auth_tokens WHERE hash=?", (_hash(tok),)).fetchone()
+    if not r:
+        return None
+    return (r["parent"] if r["kind"] == "session" and r["parent"] else r["label"]) or None
+
 @app.middleware("http")
 async def auth_gate(request: Request, call_next):
     """Three-axis gate. Agent paths: admin or agent. Token-admin paths (sensitive even on GET):
@@ -852,7 +864,8 @@ ALLOWED_ACTIONS = {"snapshot", "sync", "scrub", "pull", "backup-now", "removable
                    "recover-points", "recover-search", "recover-deleted", "restore",
                    "recover-walk",       # on-demand deleted-files walk that FILLS the stored manifest
                    "recover-versions",   # folder-wide file version history (enumerate + batch httm)
-                   "recover-dirtree"}    # cheap folder tree (os.scandir dirs) that seeds the browser
+                   "recover-dirtree",    # cheap folder tree (os.scandir dirs) that seeds the browser
+                   "aide-accept"}        # acknowledge AIDE pending integrity change(s)
 STATUS_INGEST_COLS = ["snap_age_src_s","snap_age_dst_s","repl_lag_s","pool_health","pool_cap_pct",
     "last_scrub_ts","usedbysnapshots","compressratio","key_status","archive_count","dedup_ratio",
     "logical_size","physical_size","last_check_ts","last_check_result","lock_state","handler_type",
@@ -1201,6 +1214,9 @@ async def create_action(request: Request):
     body = await _json(request)
     target = body.get("target"); action = body.get("action")
     requested_by = body.get("requested_by", "ui")
+    who = _whoami(request)
+    if who and requested_by == "ui":
+        requested_by = f"ui:{who}"     # audit trail: which account queued it (session user or token label)
     if action not in ALLOWED_ACTIONS:
         raise HTTPException(400, f"action must be one of {sorted(ALLOWED_ACTIONS)}")
     # options carried to the agent (it builds the command from its trusted config + these).
@@ -1237,6 +1253,8 @@ async def create_action(request: Request):
                 raise HTTPException(400, "backup-now only valid for removable targets")
         if action in ("removable-scan", "removable-verify", "removable-relocate") and r["type"] != "removable":
             raise HTTPException(400, f"{action} only valid for removable targets")
+        if action == "aide-accept" and r["type"] != "aide":
+            raise HTTPException(400, "aide-accept only valid for aide targets")
         if action == "recover-walk" and r["type"] != "zfs-local":
             raise HTTPException(400, "recover-walk only valid for zfs-local targets")
         if action == "pull" and r["type"] != "zfs-local":
@@ -1935,7 +1953,8 @@ GROUPS = {"zfs-local": (0, "Pools"),
           "schedules": (4, "Scheduled jobs"),
           "smart": (5, "Disk health (SMART)"),
           "kernel-errors": (6, "Hardware watch"),
-          "zfs-events": (6, "Hardware watch")}
+          "zfs-events": (6, "Hardware watch"),
+          "aide": (7, "Integrity (AIDE)")}
 
 def _group(r):
     if r["type"] == "zfs-repl" and r.get("location") == "offsite":
@@ -2298,6 +2317,14 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .jrow .jk{font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);font-weight:700}
 .jrow .jv{color:var(--ink);font-family:"Roboto Mono",monospace;font-size:11.5px;word-break:break-word;line-height:1.4}
 .jrun{color:var(--mut);font-family:"Roboto Mono",monospace;font-size:11px;margin-top:2px}
+/* AIDE integrity card: one row per unacknowledged change, each with its own Accept */
+.card.flash{outline:2px solid var(--warn);outline-offset:2px;transition:outline-color .4s}
+.aidelist{margin-top:11px;display:flex;flex-direction:column;gap:6px;max-height:320px;overflow:auto}
+.aiderow{display:grid;grid-template-columns:1fr auto;gap:4px 9px;align-items:center;
+  padding-bottom:6px;border-bottom:1px solid var(--line)}
+.aiderow .ap{color:var(--ink);font-family:"Roboto Mono",monospace;font-size:11.5px;word-break:break-all;line-height:1.4}
+.aiderow .am{grid-column:1;color:var(--mut);font-size:10.5px}
+.aiderow .ackbtn{margin-top:0;grid-column:2;grid-row:1/span 2;padding:5px 9px}
 .logct{font-size:9px;font-weight:700;color:var(--mut);background:var(--rail);border:1px solid var(--line);
   border-radius:20px;padding:1px 6px;margin-left:4px}
 .jlogpre{margin:0;padding:8px 10px;font:10.5px/1.5 "Roboto Mono",monospace;color:var(--ink);
@@ -2549,6 +2576,14 @@ async function act(target, action, createSnap){
   if(!(await confirmRun(b,label))) return;
   post(b);
 }
+async function aideAccept(target, path){   // acknowledge AIDE change(s): one path, or all
+  var b={target:target, action:'aide-accept', requested_by:'ui', dryrun:!!window.CAIRN_DRY};
+  if(path) b.path=path;
+  var what = path ? ('<code>'+esc(path)+'</code>') : '<b>all</b> pending changes';
+  var ok = await uiConfirm('Accept integrity change', 'Mark '+what+' on <b>'+esc(target)+'</b> as reviewed '
+    +'and expected? It stops being reported until it changes again.', {okText:'Accept'});
+  if(ok) post(b);
+}
 async function mirrorRemovable(name){
   // Destructive: rsync --delete makes the drive an EXACT mirror, removing anything not in the source.
   var b={target:name, action:'backup-now', mirror:true, requested_by:'ui', dryrun:!!window.CAIRN_DRY};
@@ -2772,6 +2807,16 @@ function showAgent(slug){
   filterHidden(slug);
   try{ localStorage.setItem('bm_agtab', slug); }catch(e){}
 }
+function jumpToCard(){   // deep link (#cc-<agent>-<target>, e.g. from an alert email): open its tab + pane
+  var id=(location.hash||'').slice(1); if(id.indexOf('cc-')!==0) return;
+  var c=document.getElementById(id); if(!c) return;
+  var ap=c.closest('[data-agpane]'); if(ap) showAgent(ap.getAttribute('data-agpane'));
+  var pn=c.closest('.pane'); if(pn && pn.classList.contains('collapsed')) togglePane(pn.getAttribute('data-pane'));
+  c.scrollIntoView({block:'center'}); c.classList.add('flash');
+  setTimeout(function(){ c.classList.remove('flash'); }, 2500);
+}
+window.addEventListener('load', jumpToCard);
+window.addEventListener('hashchange', jumpToCard);
 function filterHidden(slug){   // the Hidden pane lives below Activity but follows the active agent tab
   var pane=document.querySelector('.hidpane'); if(!pane) return;
   var shown=0;
@@ -3394,6 +3439,11 @@ def _acts(r, can_act, viewer=False):
                 main += f'<button class=scrubbtn data-scrub disabled>{lbl}</button>'
             else:
                 main += f'<button class=scrubbtn data-scrub onclick="act(\'{n}\',\'scrub\',true)">Scrub</button>'
+    elif t == "aide":
+        tot = _d.get("aide_total") or 0
+        main = (f"<button class=pri onclick=\"aideAccept('{n}')\" "
+                f"title=\"mark every pending change as reviewed and expected\">Accept all ({tot})</button>"
+                if tot else "")
     elif t == "removable":
         # Back up now only when the drive is present AND writable (caps.backupable); a detached or
         # read-only drive shows no button - the card's reasons say why ("detached" / "read-only").
@@ -3808,6 +3858,28 @@ def _subtitle(path_html, metas=()):
                 + '</div>') if items else ""
     return f'<div class=src>{path_row}{meta_row}</div>' if (path_row or meta_row) else ""
 
+def _aide_html(r, can_act, viewer):
+    """AIDE card body: every unacknowledged change, newest first-seen first. Admins (on an execute-
+    capable agent) get a per-row Accept; viewers see the list only."""
+    if r["type"] != "aide":
+        return ""
+    d = json.loads(r.get("detail_json") or "{}")
+    rows = sorted(d.get("aide_pending") or [], key=lambda x: x.get("first", ""), reverse=True)
+    if not rows:
+        return ""
+    n = _esc(r["name"]); out = ""
+    for x in rows:
+        p = x.get("path") or ""
+        btn = "" if (viewer or not can_act) else (
+            f'<button class=ackbtn data-p="{_esc(p)}" onclick="aideAccept(\'{n}\',this.dataset.p)" '
+            f'data-tip="mark this change as reviewed and expected">Accept</button>')
+        out += (f'<div class=aiderow><span class=ap>{_esc(p)}</span>{btn}'
+                f'<span class=am>{_esc(x.get("kind"))} · first seen {_esc(x.get("first"))}</span></div>')
+    more = d.get("aide_total", len(rows)) - len(rows)
+    if more > 0:
+        out += f'<div class=am>+{more} more (accept these to see the rest)</div>'
+    return f'<div class=aidelist>{out}</div>'
+
 def _card(r, can_act, viewer=False, cid=""):
     nm = r["name"]; n = _esc(nm); sev = SEVCLS.get(r["severity"], "unk")
     src = r.get("source") or ""
@@ -3875,7 +3947,7 @@ def _card(r, can_act, viewer=False, cid=""):
     elif acked:
         ack_html = (f'<button class="ackbtn on" onclick="unackTarget(\'{nm}\')" '
                     f'data-tip="acknowledged - click to clear">✓ acknowledged</button>')
-    elif r["severity"] in ("WARN", "CRIT"):
+    elif r["severity"] in ("WARN", "CRIT") and r["type"] != "aide":
         ack_html = f'<button class=ackbtn onclick="ackTarget(\'{nm}\')">Acknowledge</button>'
     else:
         ack_html = ""
@@ -3889,7 +3961,7 @@ def _card(r, can_act, viewer=False, cid=""):
     return (f'<div class="card {card_cls}"{idattr} data-t="{n}"><div class="ch"><span class="cn">{title}{_tier_badge(r.get("tier"))}</span>'
             f'<span class="chr"><span class="cbusy" data-tip="action running"></span>'
             f'<span class="cs">{cs_text}</span></span></div>{src_html}{sched_html}{mr_html}{scrub_html}{why_html}'
-            f'{ack_html}{_acts(r, can_act, viewer)}{_removable_links_html(r, viewer)}'
+            f'{_aide_html(r, can_act, viewer)}{ack_html}{_acts(r, can_act, viewer)}{_removable_links_html(r, viewer)}'
             f'{hist_html}{log_html}{hide_html}</div>')
 
 def _heatmap(order_names):
