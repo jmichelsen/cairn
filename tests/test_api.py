@@ -482,3 +482,9 @@ def test_aide_card_lists_changes_with_accept_for_admin_only():
 
 def test_aide_accept_is_allowed_action():
     assert "aide-accept" in api.ALLOWED_ACTIONS
+
+
+def test_privacy_page_is_public_and_names_the_android_app():
+    assert _gate("/privacy", "") == 200                      # no token needed (Play links here)
+    body = api.privacy().body.decode()
+    assert "cc.mclife.cairn" in body and "Privacy policy" in body

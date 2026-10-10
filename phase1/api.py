@@ -168,7 +168,7 @@ async def auth_gate(request: Request, call_next):
     admin only. The resolved role is stashed on request.state.role for the dashboard to render
     read-only. 401 = not signed in (HTML GET redirects to /login); 403 = signed in but read-only."""
     p = request.url.path
-    if p in ("/login", "/logout", "/favicon.ico", "/api/v1/identify",
+    if p in ("/login", "/logout", "/favicon.ico", "/api/v1/identify", "/privacy",
              "/api/v1/backup/enroll", "/api/v1/ci/status") \
             or p.startswith("/badge/"):
         # /enroll and /ci/status self-authenticate on their own shared secret (enrollment secret /
@@ -229,6 +229,51 @@ _FAVICON = _b64.b64decode(
 def favicon():
     return Response(content=_FAVICON, media_type="image/x-icon",
                     headers={"Cache-Control": "public, max-age=604800"})
+
+PRIVACY_HTML = """<!doctype html><html lang=en><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>Cairn privacy policy</title>
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:46rem;margin:2rem auto;padding:0 1.2rem;color:#1d2433}
+h1{font-size:1.6rem;margin-bottom:.2rem}h2{font-size:1.1rem;margin-top:1.8rem}.d{color:#5a6478;font-size:.9rem}
+li{margin:.3rem 0}code{font-size:.9em}</style>
+<h1>Privacy policy &mdash; Cairn and Cairn for Android</h1>
+<p class=d>Last updated 10 October 2026</p>
+<p>Cairn is a self-hosted backup monitor: you run the server yourself, and the Cairn for Android app
+(<code>cc.mclife.cairn</code>) is a client for <b>your</b> server. Nobody else operates a Cairn service, so
+there is no company server that your data could go to.</p>
+<h2>What the app sends, and where</h2>
+<ul>
+<li>The app talks only to the Cairn server addresses you add, and &mdash; only if you turn on instant
+alerts &mdash; to the Gotify server you enter. It does not contact the developer or any third party.</li>
+<li>To those servers it sends your access token (or, if you choose to sign in with a password, your username
+and password, once, to obtain a token) and the requests needed to show status and run the actions you tap.</li>
+<li>Addresses on your local network (for example <code>192.168.x.x</code>) use plain HTTP on that network;
+public addresses use HTTPS.</li>
+</ul>
+<h2>What stays on your phone</h2>
+<ul>
+<li>Your server addresses, access tokens and the optional Gotify token, encrypted with a key held in the
+Android Keystore.</li>
+<li>The latest health summary (for the home-screen widget) and your settings.</li>
+<li>The camera is used only to scan a Cairn pairing code; images are not stored or sent.</li>
+<li>Notifications are created on the phone from your own server's status (or your Gotify messages).</li>
+</ul>
+<h2>What Cairn does not do</h2>
+<p>No accounts with the developer, no advertising, no analytics or tracking, no crash-reporting service, no
+selling or sharing of data. The app requests no location, contacts or advertising ID.</p>
+<h2>Your control and deletion</h2>
+<ul>
+<li>Remove a server in the app's Settings, or uninstall the app, to delete everything it stored.</li>
+<li>Tokens can be revoked on your Cairn server at any time; data on your server is yours to keep or delete.</li>
+</ul>
+<h2>Contact</h2>
+<p>Questions or requests: open an issue at
+<a href="https://github.com/jmichelsen/cairn/issues">github.com/jmichelsen/cairn/issues</a>.</p>
+</html>"""
+
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy():
+    """PUBLIC privacy policy for Cairn and the Android client (the Play listing links here)."""
+    return HTMLResponse(PRIVACY_HTML)
 
 @app.get("/login", response_class=HTMLResponse)
 def login_form(request: Request, bad: int = 0, token: str = ""):
