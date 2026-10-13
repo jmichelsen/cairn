@@ -484,7 +484,7 @@ def test_aide_accept_is_allowed_action():
     assert "aide-accept" in api.ALLOWED_ACTIONS
 
 
-def test_privacy_page_is_public_and_names_the_android_app():
-    assert _gate("/privacy", "") == 200                      # no token needed (Play links here)
-    body = api.privacy().body.decode()
-    assert "cc.mclife.cairn" in body and "Privacy policy" in body
+def test_privacy_is_public_and_redirects_to_the_studio_policy():
+    assert _gate("/privacy", "") == 200                      # no token needed (old links point here)
+    r = api.privacy()
+    assert r.status_code == 302 and r.headers["location"] == "https://lowandslowstudio.com/apps/cairn/privacy/"
