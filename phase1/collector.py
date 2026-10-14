@@ -2142,6 +2142,8 @@ def adapter_smart(t, defaults, now):
         when the cache is stale/missing or smartd just flagged a change.
     Default install therefore elevates NOTHING at runtime; the attribute table is simply absent until
     opted in."""
+    if not shutil.which("smartctl"):
+        return [dict(severity="UNKNOWN", last_error="smartctl isn't installed (package smartmontools)")]
     alerts = _smartd_alerts(int(t.get("smartd_window_h", 72)))
     detail_on = os.environ.get("CAIRN_SMART_DETAIL", "").lower() in ("1", "true", "yes", "on") \
         or os.geteuid() == 0
