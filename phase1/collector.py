@@ -2281,7 +2281,7 @@ def collect_all(cfg, now=None):
         for i, st in enumerate(sts):
             # uniform passthrough: any target may advertise WHAT it backs up + its schedule; merge
             # into detail without overriding a value the adapter already derived (e.g. per-handler).
-            extra = {k: t[k] for k in ("backs_up", "schedule", "source_agent") if t.get(k)}
+            extra = {k: t[k] for k in ("backs_up", "schedule", "source_agent", "dest_agent") if t.get(k)}
             if extra:
                 try:
                     d = json.loads(st.get("detail_json") or "{}")

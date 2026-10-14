@@ -317,6 +317,8 @@ def _init_db():
                                   ("agents", "agent_version", "TEXT"),
                                   ("agents", "update_requested", "INTEGER DEFAULT 0"),
                                   ("agents", "hostname", "TEXT"),
+                                  ("agents", "host_conflict", "TEXT"),
+                                  ("agents", "host_conflict_ts", "INTEGER"),
                                   ("removable_links", "meta_json", "TEXT"),
                                   ("removable_links", "verify_method", "TEXT"),
                                   ("removable_links", "verify_ts", "INTEGER"),
@@ -1049,6 +1051,147 @@ def _reap_agents(conn, now):
                            f"(expects every {_ago_s(a['report_interval'])})",
                            f"agent-stale-{a['name']}")
 
+HOST_CONFLICT_TTL = 86400   # a duplicate-agent finding stays up this long after the last flip
+
+def _note_host_conflict(conn, agent, hostname, now):
+    """Two processes reporting under ONE agent name (typically a container agent next to the systemd
+    one) alternate hostnames. A flip while the previous host is still reporting is recorded so the
+    fleet check can name both hosts; a one-off move to a new box (old host long silent) isn't."""
+    if not hostname:
+        return
+    prev = conn.execute("SELECT hostname,last_report_ts,report_interval FROM agents WHERE name=?",
+                        (agent,)).fetchone()
+    if not prev or not prev["hostname"] or prev["hostname"] == hostname:
+        return
+    if now - (prev["last_report_ts"] or 0) < max(2 * (prev["report_interval"] or 120), AGENT_STALE_FLOOR):
+        conn.execute("UPDATE agents SET host_conflict=?, host_conflict_ts=? WHERE name=?",
+                     (f"{prev['hostname']} and {hostname}", now, agent))
+
+def _detail(r):
+    try:
+        d = json.loads(r.get("detail_json") or "{}")
+        return d if isinstance(d, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+def fleet_doctor(conn, now=None):
+    """Config problems only the control plane can see, because they span agents: a dest_agent naming
+    no agent, a home->vault replication with no receiving half, a pair whose names disagree (the vault's
+    Replicate now pulls by target name), a receiver nothing sends to, two agents sharing a name,
+    agents behind the server version. Each finding: {severity, agent, target, problem, fix}."""
+    now = now or int(time.time())
+    out = []
+    def add(sev, agent, target, problem, fix):
+        out.append({"severity": sev, "agent": agent, "target": target, "problem": problem, "fix": fix})
+    states = {a["name"]: a for a in agent_states(conn, now)}
+    known = sorted(states)
+    for a in conn.execute("SELECT name,host_conflict,host_conflict_ts FROM agents").fetchall():
+        if a["host_conflict"] and now - (a["host_conflict_ts"] or 0) < HOST_CONFLICT_TTL:
+            add("CRIT", a["name"], None,
+                f"two agents report as '{a['name']}' (hosts {a['host_conflict']}), overwriting each other's cards",
+                "stop the extra one (a container agent next to the systemd agent: `podman compose down`, then "
+                "`podman compose up -d api`), or give each box its own CAIRN_AGENT_NAME")
+    for st in states.values():
+        if st["severity"] != "OK":
+            add(st["severity"], st["name"], None, f"agent '{st['name']}' hasn't reported for {_ago_s(st['age_s'])}",
+                "on that host: systemctl --user status cairn-agent, then phase1/doctor.py")
+        v, sv = st.get("version"), CAIRN_VERSION
+        if v and v != sv:
+            vt = lambda x: tuple(int(p) for p in x.split(".") if p.isdigit())
+            if vt(v) < vt(sv):
+                add("WARN", st["name"], None, f"agent '{st['name']}' runs {v}, the server runs {sv}",
+                    "press Update on its Agents row, or git pull + restart the agent on that host")
+            else:
+                add("WARN", st["name"], None, f"agent '{st['name']}' runs {v}, newer than the server ({sv})",
+                    "rebuild the API on its host: git pull, then `podman compose up -d --build api`")
+    rows = latest_status(conn)
+    repl = [r for r in rows if r["type"] == "zfs-repl"]
+    local = [r for r in rows if r["type"] == "zfs-local"]
+    for r in repl:
+        d = _detail(r); ag = r.get("agent") or ""
+        da = d.get("dest_agent") or d.get("paired")   # agents before 0.38 only send `paired`
+        if not da:
+            recv = [l for l in local if l.get("source") == r.get("dest") and (l.get("agent") or "") != ag]
+            if recv:
+                add("INFO", ag, r["name"],
+                    f"'{r['name']}' is paired with '{recv[0]['agent']}' but has no dest_agent, so it reports UNKNOWN",
+                    f"add `dest_agent: {recv[0]['agent']}` to '{r['name']}' in {ag}'s targets.yaml")
+            continue
+        if da not in states:
+            add("CRIT", ag, r["name"], f"'{r['name']}' has dest_agent '{da}', which isn't an agent cairn knows "
+                f"(agents: {', '.join(known)})", "set dest_agent to the vault's CAIRN_AGENT_NAME exactly")
+            continue
+        theirs = [l for l in local if (l.get("agent") or "") == da]
+        recv = [l for l in theirs if l.get("source") == r.get("dest")]
+        if not recv:
+            leaf = (r.get("dest") or "").rsplit("/", 1)[-1]
+            near = [l for l in theirs if (l.get("source") or "").rsplit("/", 1)[-1] == leaf or l["name"] == r["name"]]
+            hint = (f" ('{near[0]['name']}' there watches {near[0]['source']}: one of the two dataset names is wrong)"
+                    if near else "")
+            add("WARN", ag, r["name"], f"'{r['name']}' sends to {r.get('dest')} on '{da}', but '{da}' has no zfs-local "
+                f"watching {r.get('dest')}, so the pair doesn't join{hint}",
+                f"on '{da}' add `- {{ name: {r['name']}, type: zfs-local, source: {r.get('dest')}, source_agent: {ag} }}` "
+                f"and restart its agent")
+            continue
+        l = recv[0]; ld = _detail(l)
+        if l["name"] != r["name"]:
+            add("WARN", da, l["name"], f"'{da}' calls the copy of '{r['name']}' '{l['name']}': the pull SET is named "
+                f"'{r['name']}', so Replicate now on '{da}' (which pulls by target name) finds nothing",
+                f"rename '{l['name']}' to '{r['name']}' in {da}'s targets.yaml")
+        if not ld.get("source_agent"):
+            add("WARN", da, l["name"], f"'{l['name']}' on '{da}' has no source_agent, so it has no Replicate now button",
+                f"add `source_agent: {ag}` to '{l['name']}' in {da}'s targets.yaml")
+        elif ld["source_agent"] != ag:
+            add("WARN", da, l["name"], f"'{l['name']}' says source_agent '{ld['source_agent']}' but '{ag}' sends it",
+                f"set `source_agent: {ag}`")
+    for l in local:
+        sa = _detail(l).get("source_agent")
+        if not sa:
+            continue
+        if sa not in states:
+            add("WARN", l.get("agent"), l["name"], f"'{l['name']}' has source_agent '{sa}', which isn't an agent cairn "
+                f"knows (agents: {', '.join(known)})", "set it to the sending box's CAIRN_AGENT_NAME")
+        elif not any(r.get("dest") == l.get("source") and (r.get("agent") or "") == sa for r in repl):
+            add("WARN", l.get("agent"), l["name"], f"'{l['name']}' says '{sa}' sends it, but '{sa}' has no zfs-repl "
+                f"with dest {l.get('source')}, so its 3-2-1 copy isn't linked to a source",
+                f"on '{sa}' add a zfs-repl: source <dataset>, dest: {l.get('source')}, dest_agent: {l.get('agent')}")
+    dests = {}
+    for r in repl:
+        if r.get("dest"):
+            dests.setdefault(r["dest"], []).append(r)
+    for dst, rs in dests.items():
+        if len({(x.get("agent"), x.get("source")) for x in rs}) > 1:
+            add("WARN", rs[0].get("agent"), rs[0]["name"],
+                f"{len(rs)} replications write into the same {dst}: " + ", ".join(f"{x.get('agent')}/{x['name']}" for x in rs),
+                "give each its own dest dataset")
+    for r in rows:
+        err = r.get("last_error") or ""
+        if err.startswith(("unknown type", "adapter error")):
+            add("WARN", r.get("agent"), r["name"], f"'{r['name']}': {err}", "run phase1/doctor.py on that host")
+        pm = _detail(r).get("perm_missing")
+        if pm:
+            add("WARN", r.get("agent"), r["name"], f"'{r['name']}': ZFS permission missing (" +
+                ", ".join(f"{x['perms'] if isinstance(x['perms'], str) else ','.join(x['perms'])} on {x['dataset']}" for x in pm) + ")",
+                f"on '{r.get('agent')}': phase1/zfs-perms.py --apply")
+    order = {"CRIT": 0, "WARN": 1, "INFO": 2}
+    out.sort(key=lambda f: (order.get(f["severity"], 3), f["agent"] or "", f["target"] or ""))
+    return out
+
+@app.get("/api/v1/backup/doctor")
+def doctor_view():
+    """Fleet config check (dashboard banner + `curl`): problems that span agents. (auth: admin/viewer)"""
+    with db() as conn:
+        return {"findings": fleet_doctor(conn), "ts": int(time.time())}
+
+@app.get("/api/v1/backup/agent/doctor")
+def agent_doctor(name: str):
+    """The same check filtered to findings ABOUT one agent, for phase1/doctor.py run on that host
+    with the agent's own credential. Read-only. (auth: agent)"""
+    with db() as conn:
+        known = bool(conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone())
+        found = [f for f in fleet_doctor(conn) if f["agent"] == name]
+    return {"agent": name, "known": known, "findings": found, "version": CAIRN_VERSION}
+
 @app.post("/api/v1/backup/report")
 async def report(request: Request):
     """An agent reports its host's status. Upserts targets (ownership = reporting agent) +
@@ -1063,6 +1206,7 @@ async def report(request: Request):
     statuses = payload.get("statuses", [])
     alerts = []
     with db() as conn:
+        _note_host_conflict(conn, agent, hostname, now)
         conn.execute("""INSERT INTO agents(name,can_execute,last_report_ts,report_interval,agent_version,hostname)
             VALUES(?,?,?,?,?,?)
             ON CONFLICT(name) DO UPDATE SET can_execute=excluded.can_execute,
@@ -2034,6 +2178,8 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .agenttab.active{box-shadow:inset 0 0 0 2px var(--acc)}
 .agenttab .verbtn{cursor:pointer}
 .agentpane{display:block}
+.cfgbanner{margin:12px 16px 0;padding:9px 13px;border-radius:9px;font-size:12.5px;line-height:1.45;color:var(--ink);background:color-mix(in srgb,var(--warn) 12%,var(--surf));border:1px solid color-mix(in srgb,var(--warn) 45%,var(--line))}
+.cfgbanner summary{cursor:pointer}.cfgbanner ul{margin:8px 0 2px;padding-left:18px}.cfgbanner li{margin:6px 0;overflow-wrap:anywhere}.cfgbanner .cfgfix{color:var(--mut,inherit);opacity:.85;font-family:ui-monospace,monospace;font-size:11.5px}
 .reconbanner{margin:12px 16px 0;padding:9px 13px;border-radius:9px;font-size:12.5px;line-height:1.45;color:var(--ink);background:color-mix(in srgb,var(--warn) 16%,var(--surf));border:1px solid color-mix(in srgb,var(--warn) 50%,var(--line));display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .reconbtn{margin-left:auto;border:1px solid var(--line);background:var(--surf);color:var(--ink);border-radius:7px;padding:5px 12px;font-size:12px;cursor:pointer}
 .reconbtn:hover{border-color:var(--warn)}
@@ -4262,6 +4408,19 @@ def index(request: Request):
             'until an execute-capable agent reports. If Cairn just started or restarted this clears '
             'within a poll interval; if it persists, check the Agents section for a stale agent.</div>')
 
+    with db() as conn:
+        cfg_problems = [f for f in fleet_doctor(conn) if f["severity"] != "INFO"]
+    cfg_banner = ""
+    if cfg_problems:
+        n = len(cfg_problems)
+        items = "".join(
+            f'<li><b>{_esc(f["agent"] or "")}</b>{" / " + _esc(f["target"]) if f["target"] else ""}: '
+            f'{_esc(f["problem"])}<div class=cfgfix>fix: {_esc(f["fix"])}</div></li>' for f in cfg_problems)
+        cfg_banner = (
+            f'<details class=cfgbanner><summary>&#9881; {n} configuration problem{"s" if n != 1 else ""} '
+            'found across agents (click for each fix; run <code>phase1/doctor.py</code> on a host for its own checks)'
+            f'</summary><ul>{items}</ul></details>')
+
     recon_banner = ""
     if overlaps and not viewer:   # reconciling is a mutating action; a viewer can't act on it
         n = len(overlaps)
@@ -4288,7 +4447,7 @@ def index(request: Request):
     {ro_badge}{dry_html}
     {'' if viewer else '<a class=signout href=/pair>pair phone</a>'}
     <a class=signout href=# onclick="lo.submit();return false">sign out</a></div>
-  {warm_banner}{recon_banner}
+  {warm_banner}{cfg_banner}{recon_banner}
   <div id=hero-steel class=herox>{steel_hero}</div>
   <div id=hero-heat class=herox><div class=hero>
     <div class=hero-top><span class="verd {vcls}" id=heatverd>{verdict}</span>
