@@ -60,6 +60,17 @@ local_sshd_port() {
   printf '%s' "${p:-22}"
 }
 
+# Record the vault's ssh address in cairn.env (CAIRN_VAULT_SSH, comma-separated for several) so
+# `phase1/doctor.py` on home can check it over ssh without being told where it is.
+remember_vault() {
+  local f="$HERE/config/cairn.env" v="$1${VAULT_PORT:+:$VAULT_PORT}" cur
+  [ -f "$f" ] && [ -n "$1" ] || return 0
+  cur="$(sed -n 's/^CAIRN_VAULT_SSH=//p' "$f" | head -1)"
+  case ",$cur," in *",$v,"*) return 0 ;; esac
+  if [ -n "$cur" ]; then sed -i "s|^CAIRN_VAULT_SSH=.*|CAIRN_VAULT_SSH=$cur,$v|" "$f"
+  else printf '\n# where phase1/doctor.py finds the vault(s) to check over ssh (user@host[:port], comma-separated)\nCAIRN_VAULT_SSH=%s\n' "$v" >> "$f"; fi
+}
+
 # ZFS delegation for the agent's user, derived from THIS host's targets.yaml by phase1/zfs-perms.py:
 # shows what each dataset needs and why, then (on a yes) grants only the missing REQUIRED ones.
 ensure_zfs_perms() {
@@ -624,6 +635,7 @@ provision_replication() {
     printf '   \033[1;35m>>> first pull on the vault <<<\033[0m\n'
     vssh "$ssh_t" '~/cairn/replication/vault-pull.sh' 2>&1 | sed 's/^/   /' || warn "first pull returned non-zero (check on the vault)"
   fi
+  remember_vault "$ssh_t"
   ok "Replication configured. Add the replica datasets to the VAULT's targets.yaml (zfs-local) to see their freshness on the dashboard."
 }
 

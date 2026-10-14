@@ -208,3 +208,62 @@ def test_agent_doctor_filters_to_one_agent():
     _target("dr-home6", "g6", "zfs-repl", "rpool/g6", "tank/g6", dest_agent="nobody6")
     j = api.agent_doctor("dr-home6")
     assert j["known"] and j["findings"] and all(x["agent"] == "dr-home6" for x in j["findings"])
+
+
+# ---- main box: checking the vault over ssh -------------------------------------------------------
+def test_split_hostport():
+    assert doctor.split_hostport("alice@vault:2222") == ("alice@vault", "2222")
+    assert doctor.split_hostport("vault") == ("vault", "")
+
+
+def _vault(targets, pull=CONF, name="offsite-vault", pools=("tank",)):
+    out = "@@NAME\n%s\n@@VERSION\n0.38.0\n@@POOLS\n%s\n@@TARGETS\n%s\n@@PULL\n%s@@END\n" % (
+        name, "\n".join(pools), json.dumps({"targets": targets}), pull)
+    v, err = doctor.parse_remote(out)
+    assert err is None
+    return v
+
+
+HOME = [{"name": "wiki_offsite", "type": "zfs-repl", "source": "rpool/apps/wiki",
+         "dest": "tank/homebox/apps/wiki", "dest_agent": "offsite-vault"}]
+
+
+def test_vault_compare_clean():
+    v = _vault([{"name": "wiki_offsite", "type": "zfs-local", "source": "tank/homebox/apps/wiki",
+                 "source_agent": "local"}])
+    f = doctor.compare_vault(HOME, "local", v)
+    assert [x[0] for x in f] == ["OK"]
+
+
+def test_vault_compare_reported_mismatch():
+    # vault target named 'wiki', and the home dest missed the vault's dataset path
+    home = [dict(HOME[0], dest="tank/apps/wiki")]
+    v = _vault([{"name": "wiki", "type": "zfs-local", "source": "tank/homebox/apps/wiki"}],
+               pull="HOME_SSH s@e\nKEY /k\nSET wiki_offsite rpool/apps/wiki tank/homebox/apps/wiki\n")
+    msgs = " | ".join(m for lvl, m, _ in doctor.compare_vault(home, "local", v) if lvl == "FAIL")
+    assert "no zfs-local on 'offsite-vault' watches tank/apps/wiki" in msgs and "'wiki' there watches tank/homebox/apps/wiki" in msgs
+    assert "no SET in the vault's replication.conf pulls into tank/apps/wiki" in msgs
+
+
+def test_vault_compare_wrong_dest_agent_name_and_no_pull_conf():
+    home = [dict(HOME[0], dest_agent="offsite")]
+    v = _vault([{"name": "wiki_offsite", "type": "zfs-local", "source": "tank/homebox/apps/wiki",
+                 "source_agent": "local"}], pull="")
+    v["pull"] = None
+    msgs = " | ".join(m for lvl, m, _ in doctor.compare_vault(home, "local", v) if lvl == "FAIL")
+    assert "dest_agent is 'offsite' but the vault's agent is named 'offsite-vault'" in msgs
+    assert "no replication.conf" in msgs
+
+
+def test_vault_compare_undeclared_pull_and_raw_mismatch():
+    home = [dict(HOME[0], encrypted=True)]
+    v = _vault([{"name": "wiki_offsite", "type": "zfs-local", "source": "tank/homebox/apps/wiki",
+                 "source_agent": "local"}],
+               pull=CONF + "SET photos rpool/photos tank/homebox/photos\n")
+    f = doctor.compare_vault(home, "local", v)
+    assert any("is not raw" in m for _, m, _ in f)
+    assert any("SET 'photos'" in m and "no zfs-repl here declares it" in m for _, m, _ in f)
+
+
+def test_parse_remote_reports_missing_checkout():
+    assert doctor.parse_remote("@@ERR no ~/cairn on this host\n") == (None, "no ~/cairn on this host")
