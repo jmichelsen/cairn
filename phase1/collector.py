@@ -153,6 +153,9 @@ def load_env(path="/etc/cairn/cairn.env"):
             if not line or line.startswith("#") or "=" not in line:
                 continue
             k, v = line.split("=", 1)
+            # drop a trailing "  # comment" (cairn.env.example uses them; compose and notify.sh's
+            # shell `.` both ignore them, so the agent must too) - a '#' inside a value is kept.
+            v = re.split(r"\s+#", v, maxsplit=1)[0]
             os.environ.setdefault(k.strip(), v.strip())
 
 # ---------- ZFS primitives ----------
@@ -1483,6 +1486,13 @@ def adapter_zfs_events(t, defaults, now):
                            vstate=g(r"vdev_state=(\S+)"), pstate=g(r"pool_state=(\S+)"),
                            err=g(r"\berr=(\d+)"), delay=g(r"delay=(\d+)ms")))
     st = dict(severity="OK", name_suffix="zed", last_error=None)
+    if rc != 0 and not events:
+        # no journalctl (e.g. the container agent) or no journal access: unknown, NOT "no events".
+        st["severity"] = "UNKNOWN"
+        st["last_error"] = f"can't read zed's journal (journalctl rc={rc})"
+        st["detail_json"] = json.dumps({"label": "ZFS events (zed)", "log_label": "ZFS events",
+                                        "summary": "journal unreadable"})
+        return [st]
     if not events:
         st["detail_json"] = json.dumps({"label": "ZFS events (zed)", "log_label": "ZFS events",
                                         "summary": f"no ZFS events in {days}d"})

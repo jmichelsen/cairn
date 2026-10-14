@@ -991,3 +991,19 @@ def test_non_httm_commands_bypass_the_httm_path(monkeypatch):
     monkeypatch.setenv("CAIRN_HTTM", "0")
     rc, out, _ = collector.run(["echo", "hi"])
     assert rc == 0 and out.strip() == "hi"
+
+
+def test_load_env_strips_inline_comments(tmp_path, monkeypatch):
+    f = tmp_path / "cairn.env"
+    f.write_text("A_X=0   # turn it off\nB_X=pa#ss\nC_X=v\t# tab comment\n# full comment\n")
+    for k in ("A_X", "B_X", "C_X"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("CAIRN_ENV", str(f))
+    collector.load_env()
+    assert (os.environ["A_X"], os.environ["B_X"], os.environ["C_X"]) == ("0", "pa#ss", "v")
+
+
+def test_zfs_events_unreadable_journal_is_unknown_not_ok(monkeypatch):
+    monkeypatch.setattr(collector, "run", lambda *a, **k: (127, "", "No such file"))
+    st = collector.adapter_zfs_events({"name": "zfs-events", "type": "zfs-events"}, {}, 0)[0]
+    assert st["severity"] == "UNKNOWN" and "journal" in st["last_error"]
