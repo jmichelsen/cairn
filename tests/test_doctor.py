@@ -267,3 +267,20 @@ def test_vault_compare_undeclared_pull_and_raw_mismatch():
 
 def test_parse_remote_reports_missing_checkout():
     assert doctor.parse_remote("@@ERR no ~/cairn on this host\n") == (None, "no ~/cairn on this host")
+
+
+def test_doctor_empty_dest():
+    def fake(state):
+        def sh(cmd, timeout=20):
+            if "receive_resume_token" in cmd:
+                return 0, state.get("token", "-"), ""
+            if "snapshot" in cmd:
+                return 0, state.get("snaps", ""), ""
+            if "used" in cmd:
+                return 0, "192K", ""
+            return (0, "tank/g", "") if state.get("exists", True) else (1, "", "no such dataset")
+        return sh
+    assert doctor.empty_dest("tank/g", fake({})) == "192K"
+    assert doctor.empty_dest("tank/g", fake({"exists": False})) is None
+    assert doctor.empty_dest("tank/g", fake({"snaps": "tank/g@a"})) is None
+    assert doctor.empty_dest("tank/g", fake({"token": "1-abc"})) is None
