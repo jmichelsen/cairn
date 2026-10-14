@@ -598,7 +598,7 @@ def check_pull(r, targets, pools, offline):
     _, st, _ = _sh(["systemctl", "--user", "show", "cairn-pull.service", "-p", "ExecMainStatus", "--value"])
     _, when, _ = _sh(["systemctl", "--user", "show", "cairn-pull.service", "-p", "ExecMainExitTimestamp", "--value"])
     if st.isdigit() and int(st) != 0:
-        r.warn(f"the last pull ({when or 'unknown time'}) exited {st} (3 = home unreachable)",
+        r.warn(f"the last pull ({when or 'unknown time'}) exited {st} (3 = home unreachable, 4 = reached but couldn't log in)",
                "journalctl --user -u cairn-pull -n 60")
     elif when:
         r.ok(f"last pull finished OK at {when}")
