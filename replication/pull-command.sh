@@ -11,13 +11,14 @@
 #   2. Reject every metacharacter that could chain / substitute / redirect / subshell / escape
 #      (`; & ` $ < > ( ) \` + newline). The ONE control char left is the pipe `|`.
 #   3. Split on `|` and validate EVERY stage: stage command must be read-only zfs/zpool, a stream
-#      filter (lzop/mbuffer/pv/zstd/gzip/lz4), or a harmless probe (echo/exit/which/`command -v`).
+#      filter (lzop/mbuffer/pv/zstd/gzip/lz4), or a harmless probe (echo/exit/which/type/true/:/`command -v`).
 #      Stream filters are additionally denied any file read/write (-o/-i/--output/--input or a path
 #      token), so `mbuffer -o /home/.../evil` can't write and `mbuffer -i /etc/shadow` can't read.
 #   4. Only then run via the shell (eval) so quoted dataset/snapshot names parse. Because every
 #      dangerous metacharacter is gone and every stage is whitelisted, eval can run ONLY a zfs-send
 #      data pipeline - no arbitrary command, no file access, no shell.
-#   5. The user's zfs delegation (send/snapshot/hold, no destroy/receive) is the backstop under it all.
+#   5. The user's zfs delegation (send/snapshot/hold, no destroy/receive) narrows it further, but the
+#      user is your normal login, so the forced command above is the real limit.
 # Every attempt (allowed + denied) is logged to $CAIRN_PULL_LOG.
 # A fixed PATH (never the caller's): Debian's sshd gives a normal user no /usr/sbin, where zfs lives.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH

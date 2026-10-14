@@ -1139,7 +1139,7 @@ def fleet_doctor(conn, now=None):
                 f"'{r['name']}', so Replicate now on '{da}' (which pulls by target name) finds nothing",
                 f"rename '{l['name']}' to '{r['name']}' in {da}'s targets.yaml")
         if not ld.get("source_agent"):
-            add("WARN", da, l["name"], f"'{l['name']}' on '{da}' has no source_agent, so it has no Replicate now button",
+            add("WARN", da, l["name"], f"'{l['name']}' on '{da}' has no source_agent, so cairn doesn't treat it as a pulled copy (its Snapshot isn't refused, and the doctor and sanoid-setup can't tell it's a copy)",
                 f"add `source_agent: {ag}` to '{l['name']}' in {da}'s targets.yaml")
         elif ld["source_agent"] != ag:
             add("WARN", da, l["name"], f"'{l['name']}' says source_agent '{ld['source_agent']}' but '{ag}' sends it",
@@ -2745,7 +2745,7 @@ async function mirrorRemovable(name){
   var body='<p>Mirror <b>'+esc(name)+'</b>: makes the drive match the source, <b class=uim-danger>deleting</b> '
     +'files on the drive that are not in the source.</p>'
     +'<label class=uim-chk><input type=checkbox id=uim-prune> Also delete <b>excluded</b> folders from the '
-    +'drive (reclaim their space — drive becomes exactly the included subset)</label>';
+    +'drive (reclaim their space - drive becomes exactly the included subset)</label>';
   var r=await uiModal({title:(b.dryrun?'Preview mirror':'Mirror'), body:body, buttons:[
     {label:'Cancel', value:false, cls:'uim-safe uim-focus'},
     {label:(b.dryrun?'Preview':'Mirror'), value:true, cls:'danger'}]});
@@ -2797,7 +2797,7 @@ async function verifyContent(btn, removable, dataset){   // fast if tagged, else
   var tagged=parseFloat(btn.getAttribute('data-tagged'));   // NaN until the agent reports it
   var used=parseFloat(btn.getAttribute('data-used'))||0, gb=used/1e9, body, danger=false;
   if(tagged>=0.8){
-    body='Verify <b>'+esc(dataset)+'</b> content using the drive’s cached hashes — fast, no re-read.';
+    body='Verify <b>'+esc(dataset)+'</b> content using the drive’s cached hashes - fast, no re-read.';
   } else {
     var mins=used/1e6/60/60;   // ~60 MB/s rough
     var eta = mins<1 ? '<1 min' : (mins<90 ? Math.round(mins)+' min' : (mins/60).toFixed(1)+' h');
@@ -3374,7 +3374,7 @@ async function openVersions(target, refresh){
   catch(e){ body.innerHTML='<div class=hempty>request failed: '+esc(String(e))+'</div>'; return; }
   if(!r.ok){ body.innerHTML='<div class=hempty>rejected: '+esc(j.detail||('HTTP '+r.status))+'</div>'; return; }
   var out; try{ out=await pollAction(j.id, 300); }
-  catch(e){ body.innerHTML='<div class=hempty>Still building the folder list \\u2014 reopen Versions shortly.</div>'; return; }
+  catch(e){ body.innerHTML='<div class=hempty>Still building the folder list - reopen Versions shortly.</div>'; return; }
   var dt2=await loadRecManifest(target,'dirtree');
   if(dt2 && dt2.present && dt2.manifest && dt2.manifest.tree){ showVersions(dt2, await loadRecManifest(target,'versions')); }
   else { body.innerHTML='<div class=hempty>Could not build the folder list.</div>'; }
@@ -3406,7 +3406,7 @@ async function scanFolder(path){
   recBusy(true);
   var target=_recTarget;
   var body=document.getElementById('recbody');
-  body.innerHTML='<div class=hempty>scanning '+esc(path?(target+' / '+path):(target+' (dataset root)'))+' for older versions\\u2026<br>queued for the agent \\u2014 this can take a minute.</div>';
+  body.innerHTML='<div class=hempty>scanning '+esc(path?(target+' / '+path):(target+' (dataset root)'))+' for older versions\\u2026<br>queued for the agent - this can take a minute.</div>';
   try{
     var b={target:target, action:'recover-versions', requested_by:'ui', refresh:true}; if(path) b.path=path;
     var r,j;
@@ -3414,7 +3414,7 @@ async function scanFolder(path){
     catch(e){ body.innerHTML='<div class=hempty>request failed: '+esc(String(e))+'</div>'; return; }
     if(!r.ok){ body.innerHTML='<div class=hempty>rejected: '+esc(j.detail||('HTTP '+r.status))+'</div>'; return; }
     var out; try{ out=await pollAction(j.id, 300); }
-    catch(e){ body.innerHTML='<div class=hempty>Scan still running \\u2014 reopen this folder shortly.</div>'; return; }
+    catch(e){ body.innerHTML='<div class=hempty>Scan still running - reopen this folder shortly.</div>'; return; }
     if(out.state!=='done'){ body.innerHTML='<div class=hempty>scan '+esc(out.state)+':</div><pre class=recpre>'+esc(out.output||'(no output)')+'</pre>'; return; }
     var vm=await loadRecManifest(target,'versions');
     if(vm && vm.present && vm.manifest && vm.manifest.files){ _recVersFiles=vm.manifest.files; }
@@ -3443,11 +3443,11 @@ async function openDeleted(target, refresh){
   catch(e){ body.innerHTML='<div class=hempty>request failed: '+esc(String(e))+'</div>'; return; }
   if(!r.ok){ body.innerHTML='<div class=hempty>rejected: '+esc(j.detail||('HTTP '+r.status))+'</div>'; return; }
   var out; try{ out=await pollAction(j.id, 300); }        // walks are slower: allow ~10 min
-  catch(e){ body.innerHTML='<div class=hempty>Walk still running \\u2014 it will finish in the background and fill the list. Reopen Deleted in a bit.</div>'; return; }
+  catch(e){ body.innerHTML='<div class=hempty>Walk still running - it will finish in the background and fill the list. Reopen Deleted in a bit.</div>'; return; }
   if(out.state!=='done'){ body.innerHTML='<div class=hempty>walk '+esc(out.state)+':</div><pre class=recpre>'+esc(out.output||'(no output)')+'</pre>'; return; }
   var mj2=await loadManifest();
   if(mj2 && mj2.present){ renderDeletedManifest(mj2.manifest||{}, mj2.walked_ts, mj2.entry_count||0); }
-  else { body.innerHTML='<div class=hempty>Walk finished \\u2014 no deleted files found in snapshots.</div>'; }
+  else { body.innerHTML='<div class=hempty>Walk finished - no deleted files found in snapshots.</div>'; }
 }
 function renderPoints(txt){
   var body=document.getElementById('recbody');
@@ -3532,7 +3532,7 @@ function renderDeletedManifest(m, walkedTs, total){
   }).join('');
   var shown=keys.length, capped=(total && total>shown);
   body.innerHTML='<p class=reccached>'+when+' \\u00b7 '+(capped?('showing newest '+shown+' of '+total+' deleted files'):(shown+' deleted file'+(shown==1?'':'s')))+'</p>'
-    +'<p class=recnote>Restore copies the file\\u2019s last snapshot version into <code>.cairn-restores/</code> \\u2014 live files untouched.'
+    +'<p class=recnote>Restore copies the file\\u2019s last snapshot version into <code>.cairn-restores/</code> - live files untouched.'
     +(capped?' Use <b>Versions</b> for a specific file not listed here.':'')+'</p>'
     +'<div class=rectblwrap><table class=rectbl><thead><tr><th>Deleted file</th><th>Size</th><th>Last modified</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
@@ -3890,7 +3890,7 @@ def _removable_links_html(r, viewer=False):
             cen_html = (f'<div class="rl-cen{" rl-nofit" if wontfit else ""}">match '
                         f'<b>{cen.get("pct",0):.0%}</b> · +{cen.get("add",0)} new / {cen.get("update",0)} '
                         f'changed / {cen.get("delete",0)} extra · would add <b>{_cap(cen.get("bytes_add",0))}</b>'
-                        f'{" — WON’T FIT" if wontfit else ""}</div>')
+                        f'{" - WON’T FIT" if wontfit else ""}</div>')
             if exnames:
                 cen_html += f'<div class=rl-cen>excluding: <b>{_esc(", ".join(exnames))}</b></div>'
             bf = cen.get("by_folder") or []
@@ -3950,17 +3950,17 @@ def _removable_links_html(r, viewer=False):
         if fresh:
             cen_html = diff_html = ver_html = ""
             if src_locked:
-                fresh_html = ('<div class="rl-cen rl-nofit">source is encrypted and its key isn’t loaded — '
+                fresh_html = ('<div class="rl-cen rl-nofit">source is encrypted and its key isn’t loaded - '
                               'load its key / mount it before backing up (files aren’t readable)</div>')
             elif not src_mounted:
-                fresh_html = '<div class="rl-cen rl-nofit">source dataset isn’t mounted — mount it before backing up</div>'
+                fresh_html = '<div class="rl-cen rl-nofit">source dataset isn’t mounted - mount it before backing up</div>'
             elif src_bytes and free is not None:
                 fits = src_bytes <= free
-                fresh_html = (f'<div class="rl-cen{"" if fits else " rl-nofit"}">Not on this drive yet — first sync '
+                fresh_html = (f'<div class="rl-cen{"" if fits else " rl-nofit"}">Not on this drive yet - first sync '
                               f'copies <b>{_cap(src_bytes)}</b> · {"fits" if fits else "WON’T FIT"} in {_cap(free)} free. '
                               f'Use <b>Back up now</b> above to seed it.</div>')
             else:
-                fresh_html = ('<div class=rl-cen>Not on this drive yet — run <b>Check</b> to size it, then '
+                fresh_html = ('<div class=rl-cen>Not on this drive yet - run <b>Check</b> to size it, then '
                               '<b>Back up now</b> above to seed it.</div>')
         # status word for the meta line
         if confirmed:

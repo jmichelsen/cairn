@@ -59,14 +59,15 @@ read from here and from `defaults`: a `scrub_warn_d` / `scrub_crit_d` set on a t
 | `encrypted` | no | `true` on `zfs-repl`: raw sends and the dest key check. On any dataset target: refuses (by target name) linking it to a removable drive, and shows the "enc" badge. |
 | `backs_up` | no | Free text "what this protects", shown on the card. Never overrides a value the adapter derived itself. |
 | `schedule` | no | Free text schedule, shown on the card (same passthrough rule). |
-| `source_agent` | no | Documentation on a receiving `zfs-local`: the agent that sends this data. Shown on the card; it does not drive pairing. |
+| `source_agent` | no | On a receiving `zfs-local`: the sending agent's `CAIRN_AGENT_NAME`. Marks the dataset as a pulled copy: Snapshot is refused on it (it would break the next pull), its card gets Replicate now when unpaired, `zfs-perms.py` plans receive-side grants, `sanoid-setup.py` offers only prune-only policies, and the fleet check verifies the sender. It doesn't affect pair merging. `./install.sh home --replication` adds these entries for you. |
 | `note` | no | Free text. On `zfs-local`, a note containing `not in sanoid` makes a pool root with no snapshots show "no snapshots". |
 | `cadence`, `transport` | no | Stored with the target, not used by any check. |
 | `pre_cmd`, `post_cmd`, `hook_actions`, `hook_timeout_s` | no | Wrap cairn's own `snapshot`, `sync` and `backup-now` actions. See [README: Pre/post hooks](../README.md#prepost-hooks-eg-consistent-vm-snapshots). |
 
 The agent sends only `type`, `source`, `dest`, `tier`, `location`, `encrypted` and `cadence` to the
-API as target metadata. Everything else stays on the agent and reaches the dashboard only through
-the status it computes.
+API as target metadata. `backs_up`, `schedule`, `source_agent` and `dest_agent` also travel, inside
+each status's detail, where the dashboard and the fleet check read them. Everything else stays on
+the agent and reaches the dashboard only through the status it computes.
 
 ## Sanoid-derived freshness
 
@@ -124,7 +125,8 @@ this host. A child dataset gets dataset properties and snapshot freshness only.
 Dashboard actions (execute-capable agent, admin):
 
 - **Snapshot** (`zfs snapshot <source>@cairn-manual-<ts>`): shown only when the agent's user holds
-  `snapshot` via `zfs allow` on the dataset (user, one of its groups, or everyone). Hookable.
+  `snapshot` via `zfs allow` on the dataset (user, one of its groups, or everyone), and never on a
+  target with `source_agent` (a received copy: refused, it would break the next pull). Hookable.
 - **Scrub**: pool roots only, and only when `sudo -n -l` allows the scrub wrapper
   (`CAIRN_ZPOOL_WRAPPER`, default `/opt/cairn/phase1/zpool-scrub.sh`, installed by
   `grant-access.sh --scrub`). Dry-run shows `zpool status`.
@@ -165,7 +167,8 @@ Dashboard actions: **Replicate** (`syncoid --no-privilege-elevation --no-stream 
 raw when `encrypted`; dry-run is a real `zfs send -nvP` estimate), **no-snap** (same with
 `--no-sync-snap`), **Snapshot** of the source, and the recovery buttons on the source. `sync` and
 `snapshot` are hookable. Requires `syncoid` and `zfs allow` delegation (send/snapshot/hold on the
-source, receive on the dest).
+source; create,mount,receive on the dest pool, mountpoint recommended). With `dest_agent` there is no
+Replicate/no-snap here: the vault pulls it (the agent refuses `sync`), and the card offers Snapshot only.
 
 ### Replication pairs and the 3-2-1 scorecard
 
@@ -200,8 +203,11 @@ after the home `zfs-repl` target. So keep one name for all three: the home `zfs-
 # home
 - { name: photos_offsite, type: zfs-repl, source: tank/photos, dest: vault/photos, tier: A, dest_agent: vault }
 # vault
-- { name: photos_offsite, type: zfs-local, source: vault/photos, source_agent: home }
+- { name: photos_offsite, type: zfs-local, source: vault/photos, source_agent: homebox }
 ```
+
+`source_agent` is the main box agent's `CAIRN_AGENT_NAME`: its short hostname on a fresh install
+(`homebox` here), `local` on installs from before 0.41.
 
 ### `borg-repo`
 

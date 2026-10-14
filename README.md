@@ -59,8 +59,9 @@ and replication **pair cards** that merge a source and its off-site copy into on
 ## Quick start (`./install.sh`)
 
 One entry point. It **installs missing prerequisites** (docker or podman, compose, python3-yaml,
-...), asks a few questions, elevates **once** (a single sudo for prerequisites, borg/backupninja
-read access and linger), then builds, configures and starts the API container and the
+...), asks a few questions, elevates with one sudo for the system parts (prerequisites,
+borg/backupninja read access and linger; later steps you say yes to, like ZFS permissions or sanoid
+entries, may ask again), then builds, configures and starts the API container and the
 execute-capable host agent. Re-running is idempotent (tokens and config are kept). Run it as
 your normal user, not root: the agent is a systemd user service.
 
@@ -90,11 +91,11 @@ Prompts read from your terminal even under `curl ... | bash`. The bootstrap clon
 | `./install.sh --smart-detail` | Also install the scoped `smartctl` wrapper for SMART attribute tables |
 | `./install.sh --check` | Preflight only, changes nothing |
 | `phase1/zfs-perms.py [--apply]` | Show (and grant) the ZFS permissions this host's targets need, see [ZFS permissions](#zfs-permissions) |
-| `phase1/sanoid-setup.py [--print]` | Wizard: asks what snapshot schedule each dataset cairn watches should get (sanoid's example policies) and writes the sanoid.conf entries, see [docs/getting-started.md](docs/getting-started.md#4-snapshot-on-a-schedule-sanoid) |
+| `phase1/sanoid-setup.py [--print] [--yes] [--dataset DS] [--vault [user@host[:port]]] [--vault-only]` | Wizard: asks what snapshot schedule each dataset cairn watches should get (sanoid's example policies) and writes the sanoid.conf entries. `--vault` does the vault too, over ssh (bare: `CAIRN_VAULT_SSH`). See [docs/getting-started.md](docs/getting-started.md#4-snapshot-on-a-schedule-sanoid) |
 | `./install.sh --rename-agent NEW` | Rename this box's agent without losing its history (stops it, renames it in the API, switches the setting, restarts it; offers to update the vault), see [AGENT.md](AGENT.md#renaming-an-agent) |
-| `phase1/doctor.py` | Check this host's whole setup and list every problem with its fix, see [Checking a setup](#checking-a-setup-doctor) |
+| `phase1/doctor.py [--problems] [--vault user@host[:port]]` | Check this host's whole setup (and the vault's) and list every problem with its fix, see [Checking a setup](#checking-a-setup-doctor) |
 | `./install.sh home --configure` | Re-run configuration. **Destructive:** regenerates every token, so every agent must be re-enrolled |
-| `--yes` / `-y` | Accept defaults, no prompts |
+| `--yes` / `-y` | Accept defaults, no prompts. Adds no optional tools; on home it still writes the default sanoid policy (production) for watched datasets sanoid.conf doesn't cover, and takes their first snapshots |
 
 **Podman works too.** If the host has Podman (native `podman`, or its `docker` emulation from
 `podman-docker`), the installer uses it: it enables `podman.socket` (needed by compose) and
@@ -104,7 +105,8 @@ linger. Compose comes from `podman compose` with docker-compose or podman-compos
 **Remote off-site vault.** When `install.sh` (on home) asks *"add a remote vault?"*, it mints a
 per-vault enrollment secret and either writes a `vault-install.conf` bundle to copy over, **or**,
 if the vault is reachable by SSH, offers `ssh-copy-id` and then pushes and runs the vault install
-for you. It then offers to set up the nightly replication pull.
+for you (non-interactively: sanoid is installed there, and the vault agent can run its dashboard
+actions). It then offers to set up the nightly replication pull.
 
 <details><summary>Manual Docker setup (what install.sh automates)</summary>
 
@@ -116,8 +118,8 @@ docker compose --profile container-agent up -d --build         # api + report-on
 A plain **`docker compose up -d --build`** starts the **api only**. That's the mode for the
 execute-capable host agent (`phase1/grant-access.sh` + the host agent unit, see `AGENT.md`), and
 it's what `install.sh home` sets up. The container agent is opt-in (the `container-agent` profile)
-so it can never run alongside the host agent: both report as `local` and would fight over the same
-targets. Same commands with `podman-compose` (1.0.6+ for profiles).
+so it can't start alongside the host agent by accident: both report this host's targets, so running
+both either overwrites each other's cards (same name) or shows every dataset twice (different names). Same commands with `podman-compose` (1.0.6+ for profiles).
 </details>
 
 ### Report-only container mode
@@ -218,7 +220,7 @@ and prints each check as `ok`, `info`, `WARN` or `FAIL`, every problem with a `f
 | zfs | Sources exist; a `zfs-repl` dest on another box has `dest_agent` (and a local one doesn't); a vault-pulled source has snapshots to pull; every required ZFS delegation is held (same rules as `zfs-perms.py`); httm installed or opted out; stuck httm processes |
 | sanoid | Every replicated source is snapshotted on a schedule (else the copy stops moving); a received copy is never snapshotted by sanoid (that breaks the next pull); copies nothing prunes are noted; `sanoid.timer` enabled. Points at `phase1/sanoid-setup.py` |
 | tools | The programs each configured target type needs (`borg`, `restic`, `smartctl`, `rsync`, `syncoid`...) |
-| pull | Vault only: `replication.conf` complete, pull key present and private, `syncoid` installed, **each SET named like the target that watches its dest** (the "Replicate now" join), receivers have `source_agent`, ssh to home with the pull key (on its port), the timer is enabled, the last pull's result |
+| pull | Vault only: `replication.conf` complete, pull key present and private, `syncoid` installed, **each SET named like the target that watches its dest** (the "Replicate now" join), receivers have `source_agent`, no existing empty dest blocking the first pull, ssh to home with the pull key (on its port), the timer is enabled, the last pull's result |
 | status | A dry collection: what the agent would report right now, every non-OK target with its reason |
 
 Exit code 0 means nothing FAILed. The output holds no secrets, so paste all of it when asking for help.
@@ -258,14 +260,16 @@ shows UNKNOWN "dest has no snapshots".
 The nightly pull is set up **from home**: `./install.sh home --replication` (also offered when you
 add a vault) turns each home `zfs-repl` target into a pull set and installs the vault's nightly
 `cairn-pull` timer; see [replication/README.md](replication/README.md). An agent only sees its own
-pools, so declare the pair on both sides, **using the same `name`**:
+pools, so the pair is declared on both sides, **using the same `name`**. `--replication` adds the
+vault's half for you when it's missing:
 
 ```yaml
 # home targets.yaml: the sending half (dest = the dataset name ON THE VAULT)
 - { name: photos_offsite, type: zfs-repl, source: tank/photos, dest: vault/photos, tier: A,
     dest_agent: vault }
-# vault targets.yaml: the receiving half (source_agent = the home agent's CAIRN_AGENT_NAME)
-- { name: photos_offsite, type: zfs-local, source: vault/photos, source_agent: local }
+# vault targets.yaml: the receiving half (source_agent = the home agent's CAIRN_AGENT_NAME: its
+# short hostname on a fresh install, "local" on installs from before 0.41)
+- { name: photos_offsite, type: zfs-local, source: vault/photos, source_agent: homebox }
 ```
 
 The halves merge into one pair card because home's `dest` is exactly the vault target's `source`.
@@ -327,7 +331,7 @@ off-site copy, a stale removable drive, or a missing 3rd copy).
   from the Hidden pane). A target you remove from an agent's `targets.yaml` disappears on its own
   at the agent's next report. If two agents report the same dataset under the same name, a
   **reconcile** banner offers to retire one or keep both.
-- **Recovery browser** (dataset cards): **Points** lists snapshots instantly; **Deleted** and
+- **Recovery browser** (dataset cards): **Snapshots** lists snapshots instantly; **Deleted** and
   **Versions** browse files that are gone or changed, from a nightly scan plus on-demand folder
   scans (needs `httm`, optional); **Restore** copies a version into the dataset's
   `.cairn-restores/` folder and never touches live files. Details in
@@ -395,6 +399,8 @@ The API sends every alert; agents hold no mail or push credentials. Settings liv
   restarts the agent.
 - **The API container:** re-running `install.sh` leaves a running API alone, so rebuild it
   yourself after pulling: `cd ~/cairn && git pull && docker compose up -d --build api`.
+- **Read-only accounts** see "X available (admin only)" as plain text instead of the Update button;
+  sign in as an admin to update.
 
 ## Pre/post hooks (e.g. consistent VM snapshots)
 
@@ -535,7 +541,7 @@ agent.py  cairn-agent.service   the ONE uniform agent (report + execute over HTT
 run-local-agent.sh              run the agent by hand (report / dry / live), for testing
 AGENT.md                        the agent: auth, settings, actions, recovery, troubleshooting
 config/   *.example             env + targets templates (copy to real, edit)
-docs/     architecture.md  targets.md  img/
+docs/     getting-started.md  architecture.md  targets.md  img/
 phase0/   notify.sh             email/Gotify sender: per-severity routing, digest, cooldowns
           check_backups.sh      legacy standalone hourly alerter (optional, see phase0/INSTALL.md)
 phase1/   api.py                control plane: report ingest, intent routing, views, dashboard

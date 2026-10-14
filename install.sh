@@ -8,7 +8,12 @@
 #   ./install.sh home --replication [--vault-ssh user@host[:port]] [--home-port N]  # set up the nightly vault-pull replication
 #   ./install.sh home --configure  # re-run config on an existing install (DESTRUCTIVE: regenerates tokens)
 #   ./install.sh --rename-agent NEW  # rename THIS box's agent, keeping its history (run on the dashboard's box)
+#   ./install.sh --update        # refresh the code and restart the agent, keeping every setting
 #   ./install.sh --check         # preflight only, change nothing
+#
+# Flags: --yes/-y (accept defaults, no prompts; adds no optional tools), --role home|vault,
+#   --api-url URL (the URL a vault uses to reach this home), --vault-ssh user@host[:port],
+#   --vault-port N, --home-port N, --smart-detail (scoped smartctl wrapper for SMART detail).
 #
 # Design: you run ONE command, answer a few questions, and elevate ONCE (a single sudo for the
 # borg/backupninja read-access + linger). Everything else - build, config, start - runs as your
@@ -63,12 +68,75 @@ local_sshd_port() {
   printf '%s' "${p:-22}"
 }
 
+# This box's agent name, as the agent sees it: the unit's Environment= wins over cairn.env; unset = local.
+this_agent_name() {
+  local n; n="$(sed -n 's/^Environment=CAIRN_AGENT_NAME=//p' "$HOME/.config/systemd/user/cairn-agent.service" 2>/dev/null | tail -1)"
+  [ -n "$n" ] || n="$(sed -n 's/^CAIRN_AGENT_NAME=//p' "$HERE/config/cairn.env" 2>/dev/null | sed 's/[[:space:]]#.*//' | tail -1)"
+  printf '%s' "${n:-local}"
+}
+
+# Add a zfs-local to the VAULT's targets.yaml for each pulled dataset nothing there watches yet.
+# $1 = vault ssh target, $2 = the SET lines ("name source dest raw"). Appends only when `targets:` is
+# the file's last top-level key (keeping its list indentation) and the result still parses with the
+# new entries in it; otherwise prints the entries to add by hand.
+ensure_vault_targets() {
+  local ssh_t="$1" sets="$2" me cur out rc
+  me="$(this_agent_name)"
+  cur="$(vssh "$ssh_t" 'cat ~/cairn/config/targets.yaml 2>/dev/null')" || cur=""
+  [ -n "$cur" ] || { info "vault has no ~/cairn/config/targets.yaml yet - add a zfs-local per pulled dataset there (see docs/targets.md)"; return 0; }
+  out="$(VT="$cur" SETS="$sets" ME="$me" python3 - 3>&1 1>&2 <<'PY'
+import os, re, sys, yaml
+text = os.environ["VT"]
+try:
+    cfg = yaml.safe_load(text) or {}
+except Exception as e:
+    print(f"   ! the vault's targets.yaml doesn't parse ({e}); not touching it"); sys.exit(4)
+have = {t.get("source") for t in (cfg.get("targets") or []) if isinstance(t, dict) and t.get("type") == "zfs-local"}
+names = {t.get("name") for t in (cfg.get("targets") or []) if isinstance(t, dict)}
+add = []
+for ln in os.environ["SETS"].splitlines():
+    f = ln.split()
+    if len(f) >= 3 and f[2] not in have:
+        n = f[0] if f[0] not in names else f[0] + "_copy"
+        add.append("{ name: %s, type: zfs-local, source: %s, source_agent: %s }" % (n, f[2], os.environ["ME"]))
+if not add:
+    sys.exit(3)
+lines = text.rstrip("\n").split("\n")
+tops = [i for i, l in enumerate(lines) if re.match(r"^[A-Za-z_][\w-]*:", l)]
+ti = next((i for i in tops if lines[i].startswith("targets:")), None)
+items = [re.match(r"^(\s*)- ", l) for l in lines[ti + 1:]] if ti is not None else []
+indent = next((m.group(1) for m in items if m), "  ")
+new = text.rstrip("\n") + "\n" + "".join(f"{indent}- {a}\n" for a in add)
+ok = ti is not None and tops[-1] == ti
+if ok:
+    try:
+        chk = yaml.safe_load(new)
+        ok = sum(1 for t in chk.get("targets") or [] if isinstance(t, dict)) == len(cfg.get("targets") or []) + len(add)
+    except Exception:
+        ok = False
+for a in add:
+    print(f"     {indent}- {a}")
+if not ok:
+    print("   ! can't append safely (targets: isn't the last section); add the lines above by hand"); sys.exit(4)
+os.write(3, new.encode())
+PY
+)"; rc=$?
+  case "$rc" in
+    3) ok "vault targets.yaml already watches every pulled dataset" ;;
+    0) if askyn "add these to the vault's targets.yaml (backup kept) and restart its agent?" y; then
+         printf '%s' "$out" | vssh "$ssh_t" 'cd ~/cairn/config && cp -a targets.yaml targets.yaml.bak-$(date +%Y%m%d-%H%M%S) && cat > targets.yaml.new && mv targets.yaml.new targets.yaml && systemctl --user restart cairn-agent' \
+           && ok "vault targets.yaml updated, agent restarted" || warn "couldn't update the vault's targets.yaml - add the lines above by hand"
+       fi ;;
+    *) warn "vault targets.yaml not changed" ;;
+  esac
+}
+
 # Record the vault's ssh address in cairn.env (CAIRN_VAULT_SSH, comma-separated for several) so
 # `phase1/doctor.py` on home can check it over ssh without being told where it is.
 remember_vault() {
   local f="$HERE/config/cairn.env" v="$1${VAULT_PORT:+:$VAULT_PORT}" cur
   [ -f "$f" ] && [ -n "$1" ] || return 0
-  cur="$(sed -n 's/^CAIRN_VAULT_SSH=//p' "$f" | head -1)"
+  cur="$(sed -n 's/^CAIRN_VAULT_SSH=//p' "$f" | head -1 | sed 's/[[:space:]]*#.*//; s/[[:space:]]*$//')"
   case ",$cur," in *",$v,"*) return 0 ;; esac
   if [ -n "$cur" ]; then sed -i "s|^CAIRN_VAULT_SSH=.*|CAIRN_VAULT_SSH=$cur,$v|" "$f"
   else printf '\n# where phase1/doctor.py finds the vault(s) to check over ssh (user@host[:port], comma-separated)\nCAIRN_VAULT_SSH=%s\n' "$v" >> "$f"; fi
@@ -228,7 +296,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --rename-agent) RENAME_TO="${2:-}"; [ -n "$RENAME_TO" ] || die "--rename-agent needs the new name"; shift;;
   --yes|-y) YES=1;;
   --check) CHECK=1;;
-  -h|--help) sed -n '2,20p' "$0"; exit 0;;
+  -h|--help) awk 'NR>1 && !/^#/{exit} NR>1{print}' "$0"; exit 0;;
   *) die "unknown arg: $1 (try --help)";;
 esac; shift; done
 [ -n "$CONFIG_IN" ] && [ -z "$ROLE" ] && ROLE=vault
@@ -285,9 +353,7 @@ rename_agent() {
   local OLD api tool=/app/phase1/cairn-agent-rename.py
   [[ "$NEW" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "'$NEW' isn't a valid agent name (letters, digits, . _ -)"
   [ -f "$unit" ] || die "no agent unit at $unit - run this on the box whose agent you're renaming"
-  OLD="$(sed -n 's/^Environment=CAIRN_AGENT_NAME=//p' "$unit" | tail -1)"
-  [ -n "$OLD" ] || OLD="$(sed -n 's/^CAIRN_AGENT_NAME=//p' "$envf" 2>/dev/null | sed 's/[[:space:]]#.*//' | tail -1)"
-  [ -n "$OLD" ] || OLD=local
+  OLD="$(this_agent_name)"
   [ "$OLD" != "$NEW" ] || die "this box's agent is already named '$NEW'"
   ensure_docker_access
   api="$(dps --format '{{.Names}}' | grep -xE "$API_NAMES" | head -1 || true)"
@@ -486,6 +552,7 @@ EOF
     info "  example:  https://cairn.example.com    (scheme optional - https is assumed if you omit it)"
     info "  blank  =  LAN only: the vault must share this LAN and will use  http://<this-host-ip>:8929"
     ask API_URL "URL a vault uses to reach this home (blank = LAN only)" ""
+    [ -z "$API_URL" ] && { API_URL="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.)' | head -1)"; API_URL="${API_URL:+http://$API_URL:8929}"; }
   fi
   API_URL="$(normurl "$API_URL")"
 
@@ -566,7 +633,8 @@ EOF
 provision_vault() {
   local NAME SECRET BUNDLE="$HERE/vault-install.conf"
   ask NAME "a name for the vault agent" "vault"
-  [ -z "$API_URL" ] && ask API_URL "URL the vault uses to reach THIS home (e.g. https://cairn.example.com; https assumed if no scheme)" ""
+  local lan; lan="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.)' | head -1)"
+  [ -z "$API_URL" ] && ask API_URL "URL the vault uses to reach THIS home's dashboard (e.g. https://cairn.example.com; https assumed if no scheme)" "${lan:+http://$lan:8929}"
   API_URL="$(normurl "$API_URL")"
   [ -z "$API_URL" ] && { warn "no reachable URL for home - skipping vault provisioning (set one and re-run)"; return; }
   say "Minting a per-vault enrollment secret (hash-at-rest; shown once)"
@@ -582,7 +650,7 @@ CAIRN_ENROLL_SECRET=$SECRET
 EOF
   chmod 600 "$BUNDLE"; ok "wrote $BUNDLE"
 
-  if askyn "configure the vault now over SSH from here?" n; then
+  if askyn "configure the vault now over SSH from here? (no = copy the bundle there yourself)" y; then
     ask VAULT_SSH "vault ssh target (user@host, or user@host:port)" "$VAULT_SSH${VAULT_PORT:+:$VAULT_PORT}"
     split_vault_port
     [ -n "$VAULT_SSH" ] || { warn "no ssh target - bundle is ready to copy manually instead"; return; }
@@ -718,6 +786,15 @@ provision_replication() {
       vssh -t "$ssh_t" "sudo zfs allow $vuser create,mount,receive,mountpoint $p" <"$TTY" && ok "vault: delegated receive on $p" || warn "vault: could not delegate receive on $p"; fi
   done
 
+  # 4b. VAULT: create each dest's PARENT (zfs receive won't create missing parents), never the dest
+  # itself: the first pull creates that. -u: don't mount (a non-root user can't).
+  local par d
+  for d in $(echo "$sets" | awk 'NF{print $3}'); do
+    par="${d%/*}"; [ "$par" = "$d" ] && continue
+    vssh "$ssh_t" "zfs list -H -o name '$par' >/dev/null 2>&1 || zfs create -p -u '$par'" 2>/dev/null \
+      && ok "vault: parent $par ready" || warn "vault: couldn't create $par - create it there: sudo zfs create -p $par"
+  done
+
   # 5. VAULT: push the runner + units, write the conf, enable the nightly timer
   vssh "$ssh_t" 'mkdir -p ~/cairn/replication ~/.config/cairn ~/.config/systemd/user' 2>/dev/null
   vrsync -a "$HERE/replication/vault-pull.sh" "$ssh_t:cairn/replication/vault-pull.sh" 2>/dev/null
@@ -746,15 +823,19 @@ provision_replication() {
     warn "can't read /etc/ssh/ssh_host_*_key.pub here; on the vault run once: ssh ${home_port:+-p $home_port }$HOME_SSH true (accept the key)"
   fi
 
-  # 7. Snapshot schedules: home must snapshot what the vault pulls (the pull copies existing snapshots
+  # 7. VAULT targets: a zfs-local per pulled dataset, named like its SET (so the pair joins and the
+  # vault's Replicate now finds the SET) with source_agent = this box's agent. The vault's targets.yaml
+  # is its own trusted config, so this is written here, during setup over your SSH login, never by the
+  # API at runtime. Only MISSING entries are added (never edits existing lines), after a backup.
+  ensure_vault_targets "$ssh_t" "$sets"
+
+  # 8. Snapshot schedules: home must snapshot what the vault pulls (the pull copies existing snapshots
   # only). On the vault it's optional: pruning old copies (never snapshotting them: that breaks the
   # next pull). Without it the vault keeps every snapshot it receives; the wizard defaults to that.
   ensure_sanoid
-  vrsync -a "$HERE/phase1/sanoid-setup.py" "$HERE/phase1/sanoid_parser.py" "$ssh_t:cairn/phase1/" 2>/dev/null
-  printf '   \033[1;35m>>> snapshot pruning on the vault (a sudo prompt below is the VAULT) <<<\033[0m\n'
-  local vyes=""; [ "$YES" = 1 ] && vyes=" --yes"
-  vssh -t "$ssh_t" "cd ~/cairn && python3 phase1/sanoid-setup.py$vyes" <"$TTY" \
-    || warn "vault sanoid setup didn't finish - on the vault: ~/cairn/phase1/sanoid-setup.py"
+  local vyes=(); [ "$YES" = 1 ] && vyes=(--yes)
+  python3 "$HERE/phase1/sanoid-setup.py" --vault "$ssh_t${VAULT_PORT:+:$VAULT_PORT}" --vault-only ${vyes[@]+"${vyes[@]}"} <"$TTY" \
+    || warn "vault sanoid setup didn't finish - re-run: phase1/sanoid-setup.py --vault --vault-only"
   printf '   \033[1;35m>>> back on home (local) <<<\033[0m\n'
 
   if askyn "run the first pull now?" y; then
@@ -792,6 +873,9 @@ install_vault() {
   CAIRN_API_URL="$(normurl "$CAIRN_API_URL")"   # tolerate a scheme-less URL in the bundle
   local NAME="${CAIRN_AGENT_NAME:-vault}"
 
+  # the nightly pull runs syncoid ON THE VAULT, so sanoid (which ships syncoid) is required here,
+  # not optional - including for a vault pushed non-interactively (--yes) by `install.sh home --add-vault`
+  ensure "command -v syncoid >/dev/null" syncoid "the nightly pull (syncoid)"
   say "Reachability check: $CAIRN_API_URL"
   curl -fs -o /dev/null "${CAIRN_API_URL%/}/login" && ok "home API reachable" || warn "could not reach $CAIRN_API_URL/login yet - will keep retrying once the agent runs"
 
@@ -814,7 +898,8 @@ EOF
     {
       echo "# cairn vault targets - auto-generated $(date -u +%Y-%m-%dT%H:%M:%SZ). Edit to taste."
       echo "# List only what lives on THIS host. Add snapshot-freshness checks for replicas as they land,"
-      echo "# e.g.  - { name: Pics-replica, type: zfs-local, source: iwolf/Pics }"
+      echo "# e.g.  - { name: photos_offsite, type: zfs-local, source: tank/homebox/photos, source_agent: homebox }"
+      echo "# (install.sh home --replication adds these for you, named like the pull's SETs)"
       echo "targets:"
       if command -v zpool >/dev/null 2>&1; then
         for p in $(zpool list -H -o name 2>/dev/null); do echo "  - { name: $p, type: zfs-local, source: $p }"; done
@@ -830,7 +915,9 @@ EOF
     askyn "review/edit it now?" n && { "${EDITOR:-vi}" "$TGT" <"$TTY" >/dev/tty 2>&1 || true; }
   fi
 
-  local CAN=0; askyn "should the vault EXECUTE actions (e.g. run its own scrubs)? (default: report-only)" n && CAN=1
+  # Execute-capable by default: the vault's Replicate now (pull) and scrub buttons need it. It only
+  # ever runs its own fixed actions built from its own targets.yaml (see docs/architecture.md).
+  local CAN=1; askyn "should the vault run dashboard actions (Replicate now, scrub)? (no = report-only)" y || CAN=0
 
   say "Installing the vault agent (systemd --user)"
   mkdir -p "$HOME/.config/systemd/user"

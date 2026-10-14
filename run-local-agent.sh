@@ -12,7 +12,8 @@ cd "$(dirname "$0")"
 MODE="${1:-report}"
 export CAIRN_ENV="$PWD/config/cairn.env"   # agent.py load_env() reads CAIRN_API_TOKEN from here
 export CAIRN_API_URL="${CAIRN_API_URL:-http://localhost:8929}"
-export CAIRN_AGENT_NAME="${CAIRN_AGENT_NAME:-local}"               # same name as the container agent = clean ownership handoff
+# CAIRN_AGENT_NAME: left to cairn.env (install.sh writes this box's name there), else "local", which
+# is also the container agent's name, so the takeover from the container agent keeps ownership
 export CAIRN_TARGETS="${CAIRN_TARGETS:-$PWD/config/targets.yaml}"
 export CAIRN_INTERVAL="${CAIRN_INTERVAL:-900}"
 

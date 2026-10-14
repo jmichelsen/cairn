@@ -16,7 +16,8 @@
 #   docker compose --profile container-agent up -d --build
 #                                         # CONTAINER mode: api + the report-only container agent
 #                                         #   (edit its borg/backupninja mounts below first).
-#   Never run both modes: the container agent and the host agent both report as `local`.
+#   Never run both modes: both agents report this host's targets (same name: they overwrite each
+#   other; different names: every dataset shows up twice).
 #   podman-compose works the same way (profiles need podman-compose 1.0.6+).
 
 name: cairn
@@ -47,7 +48,7 @@ services:
   # ---- local agent: reads THIS host's ZFS/borg/backupninja and reports to the API ----
   # Opt-in (profile `container-agent`): a plain `docker compose up` does NOT start it, so it can't
   # collide with the host agent that install.sh sets up. Running this container AND the host agent =
-  # two agents reporting as `local` for one host.
+  # two agents reporting one host's targets.
   agent:
     profiles: ["container-agent"]
     build: .

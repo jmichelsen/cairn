@@ -11,6 +11,7 @@ sanoid.conf with sudo, after saving a backup copy.
       production  sanoid's example: hourly kept 36h, daily 30 days, monthly 3 months
       custom      the same, with your own counts
       ignore      no snapshots
+      skip        decide later (nothing written)
   COPY (a dataset a pull writes into: the vault's replicas). Optional: a pull never deletes
   anything, so with no entry a copy keeps every snapshot it receives (the default, "skip"):
       backup      sanoid's example: prune-only, keeps 30 hourly / 90 daily / 12 monthly arrivals

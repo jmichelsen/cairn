@@ -1,10 +1,12 @@
 # cairn vault pull config - copy to ~/.config/cairn/replication.conf and edit.
-# Whitespace-separated; '#' starts a comment (on its own line only).
+# Whitespace-separated. '#' starts a comment line; don't put comments at the end of a SET line
+# (an extra word there would be read as the 'raw' flag).
 
 # How the vault reaches home (SSH). On the same LAN: user@home-lan-ip. Off-site: a VPN address
 # or a public hostname. The pull uses the dedicated restricted key below, NOT your login key.
 HOME_SSH  user@192.0.2.10
-PORT      22                     # optional: home's SSH port, if not 22
+# optional: home's SSH port, when it isn't 22
+PORT      22
 KEY       /home/user/.ssh/cairn-pull
 
 # One SET per replicated dataset:  SET <name> <source-on-home> <dest-on-vault> [raw]

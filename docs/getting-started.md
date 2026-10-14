@@ -45,7 +45,8 @@ point the app at the new path, start it, and check it before deleting the old co
 
 ## 2. Install cairn on the main box
 
-Run as your normal user (not root); it asks for sudo once:
+Run as your normal user (not root). It asks for sudo for the system parts (packages, read access,
+lingering), and again later for any ZFS permissions or sanoid entries you say yes to:
 
 ```bash
 git clone https://github.com/jmichelsen/cairn && cd cairn
@@ -53,8 +54,15 @@ git clone https://github.com/jmichelsen/cairn && cd cairn
 ```
 
 It installs what's missing (docker or podman, python3-yaml, sanoid, ...), starts the dashboard at
-`http://<main box>:8929/` and starts the agent. It may ask to add a vault right away; you can say no
-and do step 5 later.
+`http://<main box>:8929/` and starts the agent. Two answers matter later:
+
+- **a name for this box's agent** (default: its hostname). The vault refers to this box by it
+  (`source_agent`); change it later with `./install.sh --rename-agent NEW`, never by hand.
+- **the URL a vault uses to reach this home**: blank means this box's LAN address
+  (`http://<LAN ip>:8929`), fine when the vault shares the LAN; an off-site vault needs a URL it
+  can reach (a proxy hostname or VPN address).
+
+It may ask to add a vault right away; you can say no and do step 5 later.
 
 ## 3. Tell cairn what to watch: `config/targets.yaml`
 
@@ -85,7 +93,8 @@ systemctl --user restart cairn-agent
 ## 4. Snapshot on a schedule (sanoid)
 
 ```bash
-phase1/sanoid-setup.py
+phase1/sanoid-setup.py              # this box
+phase1/sanoid-setup.py --vault      # then the vault too, over ssh (after step 5)
 ```
 
 It lists the datasets your targets use that sanoid.conf doesn't cover yet and asks what each should
@@ -102,27 +111,33 @@ cairn reads sanoid.conf too: each card's "too old" alarm follows that dataset's 
 
 ## 5. Add the vault
 
-The vault needs ZFS with a pool (e.g. `tank`), SSH, and a user you can log in as. From the main box:
+The vault needs ZFS with a pool (e.g. `tank`), SSH, and a user you can log in as (with sudo for
+the one-time setup). The installer adds the rest there (sanoid/syncoid, python3-yaml). From the main
+box:
 
 ```bash
 ./install.sh home --add-vault                                  # installs cairn's agent on the vault
 ./install.sh home --replication --vault-ssh you@vault:2222     # the nightly pull (port optional)
 ```
 
-`--add-vault` asks for the vault's name (use the `dest_agent` from step 3) and for the vault target
-`user@host` or `user@host:port`, can copy your SSH key there, then installs the agent over SSH.
+`--add-vault` asks for the vault's name (use the `dest_agent` from step 3), the URL it uses to reach
+the dashboard, then (answer yes) the vault target `user@host` or `user@host:port`. It can copy your
+SSH key there, then installs the agent over SSH, able to run the vault's dashboard actions
+(Replicate now, scrub).
 
 `--replication` sets up the pull and asks for the address and SSH port the **vault** uses to reach
 the **main box** (a port forward if the vault is elsewhere). It installs a dedicated pull key that
 can only run `zfs send`, gives both sides their ZFS permissions (one sudo each, never destroy),
-teaches the vault the main box's SSH host key, installs the nightly timer, offers to run sanoid-setup
-on both boxes, and offers the first pull. On the vault the sanoid step is **optional**: a pull never
+teaches the vault the main box's SSH host key, creates the parent of each destination on the vault
+(never the destination itself: the first pull makes that, so don't create it), adds a `zfs-local`
+for each copy to the vault's `targets.yaml` (named like the main box's target, with `source_agent`),
+installs the nightly timer, offers to run sanoid-setup on both boxes, and offers the first pull. On the vault the sanoid step is **optional**: a pull never
 deletes anything, so by default the vault keeps every snapshot it receives; choose **backup** to
 prune old ones (sanoid's example: 30 hourly, 90 daily, 12 monthly). The first pull copies the whole
 dataset; later ones send only changes.
 
-Then tell the vault's cairn about the copy, in the **vault's** `~/cairn/config/targets.yaml`, using
-the same name as the main box's target, and restart its agent:
+The entry it adds to the **vault's** `~/cairn/config/targets.yaml` looks like this (add it by hand,
+same name as the main box's target, if that file is laid out so it can't append safely; it says so):
 
 ```yaml
   - name: wiki_offsite
@@ -136,6 +151,7 @@ the same name as the main box's target, and restart its agent:
 
 ```bash
 phase1/doctor.py --vault you@vault:2222
+phase1/doctor.py --problems              # later: just the things to fix
 ```
 
 On the main box this checks the agent, settings, targets, ZFS permissions, sanoid, then logs in to
@@ -153,10 +169,10 @@ Run `phase1/doctor.py` first. The common ones:
 | `cannot create snapshots: permission denied` (or send/receive) | Your user lacks a ZFS delegation | `phase1/zfs-perms.py --apply` on that box |
 | Pull: `Host key verification failed` (exit 4) | The vault doesn't know the main box's SSH key | Re-run `./install.sh home --replication` |
 | Pull: `cannot reach ... Connection timed out` (exit 3) | The vault can't reach the main box on that address/port | Check the port forward / VPN; the `PORT` line in the vault's `~/.config/cairn/replication.conf` |
-| Pull: `target exists but has no snapshots matching` | Someone created the dest dataset on the vault by hand | The pull prints the commands: check it's empty, `sudo zfs destroy` it, pull again |
+| Pull: `<dest> already exists on this vault ... but has no snapshots` | Someone created the dest dataset on the vault by hand | The pull prints the commands: check it's empty, `sudo zfs destroy` it, pull again |
 | The copy stops moving, source shows old snapshots | Nothing snapshots the source | `phase1/sanoid-setup.py` on the main box |
-| Two separate cards instead of one pair | `dest` on the main box ≠ `source` on the vault, or the names differ | The dashboard's "configuration problems" banner names the mismatch |
-| No **Replicate now** on the vault's card | Its target has no `source_agent` | Add it, restart the vault's agent |
+| Two separate cards instead of one pair | `dest` on the main box ≠ `source` on the vault (names don't affect joining; different names break Replicate now) | The dashboard's "configuration problems" banner names the mismatch |
+| No **Replicate now** on the vault's side | The vault's agent is report-only (vaults installed before 0.44 default to that) | On the vault: `Environment=CAIRN_CAN_EXECUTE=1` in `~/.config/systemd/user/cairn-agent.service`, then `systemctl --user daemon-reload && systemctl --user restart cairn-agent`. An unpaired card also needs `source_agent` |
 | A change to `targets.yaml` doesn't show | The agent reads it at start | `systemctl --user restart cairn-agent` |
 
 More: [README](../README.md) (dashboard, alerts, accounts), [AGENT.md](../AGENT.md) (the agent and its

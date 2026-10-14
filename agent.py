@@ -38,7 +38,7 @@ API      = _e("CAIRN_API_URL", "http://localhost:8929").rstrip("/")
 #  - CAIRN_API_TOKEN (simple/legacy): a static access token, no rotation.
 ENROLL_SECRET = _e("CAIRN_ENROLL_SECRET", "")
 _access = {"token": _e("CAIRN_API_TOKEN", "")}
-NAME     = _e("CAIRN_AGENT_NAME", "local")
+NAME     = _e("CAIRN_AGENT_NAME") or "local"   # empty counts as unset
 TARGETS  = _e("CAIRN_TARGETS", str(HERE / "targets.yaml"))
 CAN_EXEC = _e("CAIRN_CAN_EXECUTE", "0") == "1"
 INTERVAL = int(_e("CAIRN_INTERVAL", "900"))
@@ -364,7 +364,7 @@ def do_execute(cfg):
                 api_call("POST", "/api/v1/backup/agent/removable-links",
                          {"agent": NAME, "removable": target, "op": "verify", "dataset": ds,
                           "method": tier, "result": res, "verified": res["clean"]})
-                note = "" if res["clean"] else " — NOT counted fresh"
+                note = "" if res["clean"] else " - NOT counted fresh"
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                          {"ok": True, "output": f"{tier}-verify {ds}: {res['pct']:.0%} content-matched "
                                                 f"({detail}){note}"})
