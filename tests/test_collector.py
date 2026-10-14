@@ -947,11 +947,13 @@ def test_aide_accept_command():
 
 
 # ---- httm isolation / opt-out ----
-def _fake_proc(tmp_path, pid, comm, cgroup):
+def _fake_proc(tmp_path, pid, comm, cgroup, state=None, ppid=1):
     d = tmp_path / str(pid)
     d.mkdir()
     (d / "comm").write_text(comm + "\n")
     (d / "cgroup").write_text(cgroup + "\n")
+    if state:
+        (d / "stat").write_text(f"{pid} ({comm}) {state} {ppid} 0 0\n")
 
 
 def test_stuck_httm_finds_only_cairn_owned_httm(tmp_path):
@@ -962,6 +964,50 @@ def test_stuck_httm_finds_only_cairn_owned_httm(tmp_path):
     _fake_proc(tmp_path, 104, "python3", base + "cairn-agent.service")    # not httm
     (tmp_path / "self").mkdir()
     assert collector.stuck_httm(str(tmp_path)) == [101, 102]
+
+
+def test_httm_an_agent_is_waiting_on_is_not_stuck(tmp_path):
+    base = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+    _fake_proc(tmp_path, 200, "python3", base + "cairn-agent.service", "S", 1)       # the agent
+    _fake_proc(tmp_path, 201, "httm", base + "cairn-httm-200-1.scope", "R", 200)     # its scan, in flight
+    _fake_proc(tmp_path, 202, "httm", base + "cairn-httm-9-1.scope", "S", 1500)      # orphan (agent gone)
+    _fake_proc(tmp_path, 203, "httm", base + "cairn-httm-9-2.scope", "D", 1500)      # hung in the kernel
+    _fake_proc(tmp_path, 204, "httm", base + "cairn-httm-9-3.scope", "Z", 1500)      # dead, unreaped
+    assert collector.stuck_httm(str(tmp_path)) == [202, 203]
+
+
+def test_reap_kills_orphans_but_not_inflight_or_hung(tmp_path, monkeypatch):
+    base = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+    _fake_proc(tmp_path, 200, "python3", base + "cairn-agent.service", "S", 1)
+    _fake_proc(tmp_path, 201, "httm", base + "cairn-httm-200-1.scope", "R", 200)
+    _fake_proc(tmp_path, 202, "httm", base + "cairn-httm-9-1.scope", "S", 1500)
+    _fake_proc(tmp_path, 203, "httm", base + "cairn-httm-9-2.scope", "D", 1500)
+    sent = []
+    monkeypatch.setattr(collector.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    assert collector.reap_orphan_httm(str(tmp_path), wait=0) == [202]
+    assert sent == [(202, collector.signal.SIGKILL)]
+
+
+def test_run_httm_kills_its_child_when_interrupted(monkeypatch):
+    monkeypatch.setenv("CAIRN_HTTM_SCOPE", "0")
+    monkeypatch.setattr(collector, "httm_unavailable", lambda: None)
+    procs = []
+    real = collector.subprocess.Popen
+
+    class P(real):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            procs.append(self)
+
+        def communicate(self, *a, **k):
+            raise SystemExit(0)          # what the agent's SIGTERM handler raises mid-wait
+    monkeypatch.setattr(collector.subprocess, "Popen", P)
+    try:
+        collector.run_httm(["sleep", "30"], timeout=60)
+    except SystemExit:
+        pass
+    procs[0].wait(timeout=5)
+    assert procs[0].returncode == -9
 
 
 def test_httm_opt_out_skips_without_running(monkeypatch):

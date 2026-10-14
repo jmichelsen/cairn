@@ -499,10 +499,18 @@ def check_zfs(r, targets, pools):
         elif not shutil.which("httm"):
             r.warn("httm isn't installed: the Versions and Deleted buttons won't work",
                    "install httm (github.com/kimono-koans/httm), or set CAIRN_HTTM=0 in cairn.env to opt out")
-        stuck = C.stuck_httm()
-        if stuck:
-            r.warn(f"httm processes stuck from an earlier scan: {stuck} (they block agent restarts)",
-                   f"kill -9 {' '.join(map(str, stuck))}; if they won't die they're in D state (a hung dataset)")
+        procs = [x for x in C.httm_procs() if not x["inflight"]]
+        hung = [x["pid"] for x in procs if x["state"] == "D"]
+        left = [x["pid"] for x in procs if x["state"] != "D"]
+        if hung:
+            r.warn(f"httm hung in the kernel (D state): {hung}. While it's there the agent skips Versions, "
+                   "Deleted and the nightly walk",
+                   "only a reboot clears it; it's usually a .zfs/snapshot automount that wedged. If it comes "
+                   f"back after every reboot, send `cat /proc/{hung[0]}/stack` (as root) and "
+                   f"`ps -o pid,stat,etime,wchan:32,args -p {hung[0]}`")
+        if left:
+            r.warn(f"httm left running by an earlier agent: {left}. The agent kills these before its next "
+                   "httm run", f"or now: kill -9 {' '.join(map(str, left))}")
 
 
 # ---------------------------------------------------------------- sanoid (snapshot schedule)
