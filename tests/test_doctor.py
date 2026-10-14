@@ -401,3 +401,10 @@ def test_missing_tool_names_its_package(monkeypatch):
     doctor.check_tools(r, [{"name": "disk", "type": "smart"}])
     fixes = [fix for lvl, m, fix in r.items if lvl == "FAIL" and "smartctl" in m]
     assert fixes and "smartmontools" in fixes[0]
+
+
+def test_version_drift_is_tagged_so_the_banner_skips_it():
+    _agent("dr-behind", version="0.0.1")
+    f = _fleet("dr-behind")
+    assert [x["kind"] for x in f if "runs 0.0.1" in x["problem"]] == ["version"]
+    assert all(x["kind"] == "config" for x in f if "runs 0.0.1" not in x["problem"])
