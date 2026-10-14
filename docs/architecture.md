@@ -190,6 +190,15 @@ off-site half.
 *A pair card: the two halves (source + off-site copy), the source dataset size for capacity
 planning, and a tier badge - severity defers to the off-site half.*
 
+When the halves don't join (a dest that differs from the vault's source by one path segment, a
+`dest_agent` typo, a vault target named differently from its pull SET), nothing on either card says
+why. The API's **fleet check** (`fleet_doctor`, served at `GET /api/v1/backup/doctor` and as the
+dashboard's "configuration problems" banner) compares every agent's latest report against the others
+and names the mismatch and its fix. It also flags two processes reporting under one agent name: the
+report ingest records a hostname flip while the previous host is still reporting (a one-off move to
+a new box, with the old host long silent, isn't flagged). `phase1/doctor.py` on a host fetches the
+findings about that agent via `GET /api/v1/backup/agent/doctor` with the agent's own credential.
+
 ## Removable 2nd-leg drive
 
 An external drive is modeled as a `removable` target - the "2nd media" of 3-2-1. It is recognized

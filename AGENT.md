@@ -281,6 +281,12 @@ isn't in `sanoid.conf`, so the real fix is to add it there.)
 
 ## Troubleshooting
 
+**Start with the doctor.** `phase1/doctor.py` on the affected box checks the service, settings, API
+access, `targets.yaml`, ZFS datasets and delegations, the vault pull and what the agent would report
+now, and prints a fix for each problem; the dashboard's "configuration problems" banner covers what
+spans agents. See [README: Checking a setup](README.md#checking-a-setup-doctor). The entries below
+explain the common ones in more depth.
+
 **Borg repos show UNKNOWN / "Restore points: 0".** The nightly borg runs as **root**; with root's
 default umask it writes new repo segment files mode `0600`, unreadable by the non-root agent, so
 every borg repo degrades to UNKNOWN and the restore-point count drops to 0 (the card's reason says

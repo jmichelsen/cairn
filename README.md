@@ -89,6 +89,7 @@ Prompts read from your terminal even under `curl ... | bash`. The bootstrap clon
 | `./install.sh --smart-detail` | Also install the scoped `smartctl` wrapper for SMART attribute tables |
 | `./install.sh --check` | Preflight only, changes nothing |
 | `phase1/zfs-perms.py [--apply]` | Show (and grant) the ZFS permissions this host's targets need, see [ZFS permissions](#zfs-permissions) |
+| `phase1/doctor.py` | Check this host's whole setup and list every problem with its fix, see [Checking a setup](#checking-a-setup-doctor) |
 | `./install.sh home --configure` | Re-run configuration. **Destructive:** regenerates every token, so every agent must be re-enrolled |
 | `--yes` / `-y` | Accept defaults, no prompts |
 
@@ -176,6 +177,43 @@ It never grants `destroy`, `rollback` or anything else that can delete data, and
 Snapshot on a vault replica (a local snapshot there breaks the next pull). Run it as the agent's
 user, not from a root shell. Linux only lets root mount filesystems, so a dataset a non-root user
 receives may stay unmounted; the data and snapshots are still there.
+
+## Checking a setup (doctor)
+
+Something not working, or a new box just installed? Run the doctor on **every** box that runs an
+agent (main box and vault), as the agent's user, from the cairn checkout:
+
+```bash
+phase1/doctor.py               # everything
+phase1/doctor.py --offline     # skip the API and ssh checks
+phase1/doctor.py --no-collect  # skip the dry collection (the slowest part)
+```
+
+It reads the settings the agent really uses (the unit's `Environment=` lines win over `cairn.env`)
+and prints each check as `ok`, `info`, `WARN` or `FAIL`, every problem with a `fix:` line:
+
+| Section | What it checks |
+| --- | --- |
+| agent | The unit is installed, running and enabled; lingering is on (else the agent stops at logout); not crash-looping; **only one agent process** runs (a container agent next to the systemd one is the classic duplicate); the agent started after the last code update and the last `targets.yaml` edit (else: restart it) |
+| settings | API url and where it came from, a credential is set, agent name, dry-run left on, report-only mode, `cairn.env` not readable by others, `cairn.env` values the unit overrides |
+| api | The API answers, its version matches this checkout (which side to update if not), this agent's credential is accepted, plus the **fleet findings about this agent** (below) |
+| targets | `targets.yaml` parses; every target has a unique name and a known type; required keys present; unknown keys flagged with a suggestion (`dest-agent` → `dest_agent`); `dest` is a dataset, not a path or `user@host`; complete `scrub_cadence` entries |
+| zfs | Sources exist; a `zfs-repl` dest on another box has `dest_agent` (and a local one doesn't); a vault-pulled source has snapshots to pull; every required ZFS delegation is held (same rules as `zfs-perms.py`); httm installed or opted out; stuck httm processes |
+| tools | The programs each configured target type needs (`borg`, `restic`, `smartctl`, `rsync`, `syncoid`...) |
+| pull | Vault only: `replication.conf` complete, pull key present and private, `syncoid` installed, **each SET named like the target that watches its dest** (the "Replicate now" join), receivers have `source_agent`, ssh to home with the pull key (on its port), the timer is enabled, the last pull's result |
+| status | A dry collection: what the agent would report right now, every non-OK target with its reason |
+
+Exit code 0 means nothing FAILed. The output holds no secrets, so paste all of it when asking for help.
+
+**Fleet check.** Some problems only show when you look at two agents together, so the API checks
+those across all agents and lists them in a "configuration problems" banner at the top of the
+dashboard (and at `GET /api/v1/backup/doctor`): a `dest_agent` that names no known agent, a
+home → vault replication whose dest no vault target watches (with the near-miss dataset if there is
+one), a pair whose two names differ (the vault's Replicate now pulls by name), a receiver missing
+`source_agent` or naming the wrong one, a receiver nothing sends to, two replications writing into one
+dataset, missing ZFS delegations, agents silent or on another version, and **two agents reporting
+under one name** (they overwrite each other's cards). The doctor on a host shows the ones about that
+host.
 
 ## Replication targets (`zfs-repl`)
 
@@ -488,6 +526,7 @@ phase1/   api.py                control plane: report ingest, intent routing, vi
           schema.sql            SQLite schema
           cairn-token.py  cairn-user.py   token and account admin
           zfs-perms.py          works out and grants the ZFS delegations a host needs
+          doctor.py             checks a host's whole setup, every problem with its fix
           grant-access.sh  smart-probe.sh  zpool-scrub.sh   one-time read grants + opt-in sudo wrappers
           notify_selftest.py    delivery self-test behind the Kuma heartbeat
 replication/                    the vault's nightly pull (runner, forced-command wrapper, units)
