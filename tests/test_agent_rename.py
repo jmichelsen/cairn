@@ -76,3 +76,10 @@ def test_refuses_while_the_old_agent_is_still_reporting(tmp_path):
     assert r.returncode != 0 and "stop it first" in r.stderr and "--force" in r.stderr
     assert sqlite3.connect(p).execute("SELECT 1 FROM agents WHERE name='local'").fetchone()
     assert _run(p, "local", "mclife", "--no-backup", "--force").returncode == 0
+
+
+def test_unit_template_leaves_the_agent_name_to_cairn_env():
+    # the unit's Environment= wins over cairn.env, so a hardcoded name there would override the
+    # hostname install.sh writes for a fresh main box
+    unit = open(os.path.join(os.path.dirname(__file__), "..", "cairn-agent.service")).read()
+    assert not any(ln.startswith("Environment=CAIRN_AGENT_NAME=") for ln in unit.splitlines())
