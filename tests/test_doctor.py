@@ -393,3 +393,11 @@ def test_wizard_print_previews_the_copy_policy_but_yes_leaves_copies():
     todo = [("rpool/a", "original", "a"), ("tank/c", "copy", "c")]
     assert wizard.choose(todo, assume_yes=True) == {"rpool/a": ("production", {})}
     assert wizard.choose(todo, assume_yes=True, preview=True) == {"rpool/a": ("production", {}), "tank/c": ("backup", {})}
+
+
+def test_missing_tool_names_its_package(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda tool: None)
+    r = doctor.Report(quiet=True)
+    doctor.check_tools(r, [{"name": "disk", "type": "smart"}])
+    fixes = [fix for lvl, m, fix in r.items if lvl == "FAIL" and "smartctl" in m]
+    assert fixes and "smartmontools" in fixes[0]

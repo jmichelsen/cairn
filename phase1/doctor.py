@@ -85,6 +85,9 @@ TOOLS = {"zfs-local": ["zfs", "zpool"], "zfs-repl": ["zfs", "zpool"], "borg-repo
          "restic": ["restic"], "rclone": ["rclone"], "snapper": ["snapper"],
          "removable": ["rsync", "findmnt"], "smart": ["smartctl"], "reachability": ["ssh"],
          "schedules": ["systemctl"], "zfs-events": ["journalctl"], "kernel-errors": ["journalctl"]}
+# the Debian/Ubuntu package for each tool, where it isn't named after it
+PACKAGES = {"zfs": "zfsutils-linux", "zpool": "zfsutils-linux", "borg": "borgbackup", "smartctl": "smartmontools",
+            "findmnt": "util-linux", "ssh": "openssh-client"}
 
 
 class Report:
@@ -588,7 +591,8 @@ def check_tools(r, targets):
             need.setdefault(tool, set()).add(t["type"])
     missing = [(tool, types) for tool, types in sorted(need.items()) if not shutil.which(tool)]
     for tool, types in missing:
-        r.fail(f"{tool} isn't installed, needed by {', '.join(sorted(types))}")
+        r.fail(f"{tool} isn't installed, needed by {', '.join(sorted(types))}",
+               f"sudo apt install {PACKAGES.get(tool, tool)} (or your distro's package), then restart the agent")
     if not missing:
         r.ok("every program the configured targets need is installed")
 
@@ -887,8 +891,9 @@ def check_vaults(r, specs, home_targets, offline):
         for lvl, msg, fix in compare_vault(home_targets, home_name, v):
             r.add(lvl, msg, fix)
         cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"] + (["-p", port] if port else [])
-        rc, out, err = _sh(cmd + [dest, "cd ~/cairn && test -f phase1/doctor.py && python3 phase1/doctor.py --no-collect"
-                                         " || echo @@NODOCTOR"], timeout=240)
+        # the remote doctor exits 1 when it finds a problem, so test for it separately, not with ||
+        rc, out, err = _sh(cmd + [dest, "cd ~/cairn && if test -f phase1/doctor.py; then python3 phase1/doctor.py"
+                                         " --no-collect; else echo @@NODOCTOR; fi"], timeout=240)
         if "@@NODOCTOR" in out:
             r.warn(f"the vault runs cairn {v['version'] or '?'}, which has no doctor of its own",
                    "update it (Update on the Agents card), then re-run this")
