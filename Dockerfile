@@ -22,6 +22,7 @@ WORKDIR /src
 COPY phase0 /src/phase0
 COPY phase1 /src/phase1
 COPY tools  /src/tools
+COPY replication /src/replication
 COPY tests  /src/tests
 COPY agent.py VERSION /src/
 RUN python3 -m py_compile phase1/*.py agent.py \

@@ -59,7 +59,7 @@ the vault's `zfs-local` target that same name. The vault agent must be execute-c
   control char; every other metacharacter is rejected, so eval can run a zfs-send pipeline and nothing
   else.
 
-## Setup: `./install.sh home --replication [--vault-ssh user@host]`
+## Setup: `./install.sh home --replication [--vault-ssh user@host[:port]] [--home-port N]`
 
 Run it on **home**. `./install.sh vault` does not set up the pull; it is offered at the end of
 `./install.sh home --add-vault`, or run `--replication` on its own any time (idempotent, re-run to
@@ -68,15 +68,25 @@ re-sync). It needs key-based SSH from home to the vault. It:
 1. detects home's `zfs-repl` targets from `config/targets.yaml` (one SET each, named after the
    target, `raw` when the target is `encrypted`);
 2. asks the address the vault uses to reach home, defaulting to home's LAN address (a VPN address or
-   hostname also works);
-3. **home:** `zfs allow send,snapshot,hold` on each source pool, only where `send` is missing;
+   hostname also works), and the SSH port it should use, defaulting to the `Port` in home's
+   `sshd_config` (22 if none);
+3. **home:** `zfs allow send,snapshot,hold` on each source pool, where any of them is missing;
 4. **vault:** generates the dedicated `~/.ssh/cairn-pull` key;
 5. **home:** authorizes it as `restrict,command="…/pull-command.sh" <pubkey>`;
-6. **vault:** `zfs allow create,mount,receive,mountpoint` on each dest pool, only where `receive`
-   is missing;
+6. **vault:** `zfs allow create,mount,receive,mountpoint` on each dest pool, where any of them is
+   missing;
 7. **vault:** pushes `vault-pull.sh` + the units, writes `~/.config/cairn/replication.conf`, enables
    the nightly timer;
 8. optionally runs the first pull.
+
+**Non-standard SSH ports.** Both directions are covered. Home reaches the vault on the port in the
+vault target (`--vault-ssh user@host:2222`, `--vault-port 2222`, or `user@host:2222` at the
+prompt). The vault reaches home on the port you give at the "SSH port" prompt (or `--home-port`),
+which is written to `replication.conf` as `PORT` and used for both the reachability probe and
+syncoid (`--sshport`). An alias in `~/.ssh/config` with a `Port` line works too.
+
+For the per-dataset permissions both sides need, `phase1/zfs-perms.py` on each host shows and
+grants them (see the main README's *ZFS permissions*).
 
 It does NOT: import the vault's data pool, `apt install sanoid` on the vault (the installer's optional
 toolchain step offers that), or add the replica datasets to the **vault's** `targets.yaml` as

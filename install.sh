@@ -5,7 +5,7 @@
 #   ./install.sh home            # this box = control plane + dashboard + local agent
 #   ./install.sh vault [--config vault-install.conf]   # this box = remote reporting agent
 #   ./install.sh home --add-vault  # add a remote vault to an ALREADY-set-up home (skips home setup)
-#   ./install.sh home --replication [--vault-ssh user@host]  # set up the nightly vault-pull replication
+#   ./install.sh home --replication [--vault-ssh user@host[:port]] [--home-port N]  # set up the nightly vault-pull replication
 #   ./install.sh home --configure  # re-run config on an existing install (DESTRUCTIVE: regenerates tokens)
 #   ./install.sh --check         # preflight only, change nothing
 #
@@ -44,6 +44,22 @@ PKG=""  # detected package manager
 detect_pkg() { for m in apt-get dnf yum pacman zypper; do command -v "$m" >/dev/null && { PKG="$m"; return; }; done; }
 _sudo_primed=0
 prime_sudo() { [ "$_sudo_primed" = 1 ] && return; sudo -v || die "sudo required to install packages / grant access"; _sudo_primed=1; }
+# SSH to the vault on a non-standard port: --vault-port N, or user@host:port wherever a vault ssh target
+# is asked for. Every home->vault ssh/scp/rsync/ssh-copy-id goes through these.
+split_vault_port() {  # VAULT_SSH="user@host:2222" -> VAULT_SSH=user@host, VAULT_PORT=2222
+  if [[ "$VAULT_SSH" =~ ^(.+):([0-9]+)$ ]]; then VAULT_SSH="${BASH_REMATCH[1]}"; VAULT_PORT="${BASH_REMATCH[2]}"; fi
+}
+vssh()    { ssh ${VAULT_PORT:+-p "$VAULT_PORT"} "$@"; }
+vscp()    { scp ${VAULT_PORT:+-P "$VAULT_PORT"} "$@"; }
+vrsync()  { rsync ${VAULT_PORT:+-e "ssh -p $VAULT_PORT"} "$@"; }
+vcopyid() { ssh-copy-id ${VAULT_PORT:+-p "$VAULT_PORT"} "$@"; }
+# the port THIS host's sshd listens on (for the vault's pull back to home); 22 if not configured
+local_sshd_port() {
+  local p; p="$(cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null \
+                | awk 'tolower($1)=="port"{print $2; exit}')"
+  printf '%s' "${p:-22}"
+}
+
 # ZFS delegation for the agent's user, derived from THIS host's targets.yaml by phase1/zfs-perms.py:
 # shows what each dataset needs and why, then (on a yes) grants only the missing REQUIRED ones.
 ensure_zfs_perms() {
@@ -172,13 +188,15 @@ ensure_docker_access() {
 }
 
 # ---------------- args ----------------
-ROLE=""; CONFIG_IN=""; YES=0; SMART_DETAIL=0; CHECK=0; API_URL=""; VAULT_SSH=""; ADD_VAULT=0; RECONFIGURE=0; REPLICATION=0; UPDATE=0
+ROLE=""; CONFIG_IN=""; YES=0; SMART_DETAIL=0; CHECK=0; API_URL=""; VAULT_SSH=""; VAULT_PORT=""; HOME_PORT=""; ADD_VAULT=0; RECONFIGURE=0; REPLICATION=0; UPDATE=0
 while [ $# -gt 0 ]; do case "$1" in
   home|vault) ROLE="$1";;
   --role) ROLE="$2"; shift;;
   --config) CONFIG_IN="$2"; shift;;
   --api-url) API_URL="$2"; shift;;
   --vault-ssh) VAULT_SSH="$2"; shift;;
+  --vault-port) VAULT_PORT="$2"; shift;;
+  --home-port) HOME_PORT="$2"; shift;;
   --add-vault) ADD_VAULT=1;;
   --replication) REPLICATION=1;;
   --configure|--reconfigure) RECONFIGURE=1;;
@@ -190,6 +208,7 @@ while [ $# -gt 0 ]; do case "$1" in
   *) die "unknown arg: $1 (try --help)";;
 esac; shift; done
 [ -n "$CONFIG_IN" ] && [ -z "$ROLE" ] && ROLE=vault
+split_vault_port
 { [ "$ADD_VAULT" = 1 ] || [ "$RECONFIGURE" = 1 ] || [ "$REPLICATION" = 1 ]; } && [ -z "$ROLE" ] && ROLE=home
 detect_pkg
 
@@ -473,20 +492,21 @@ EOF
   chmod 600 "$BUNDLE"; ok "wrote $BUNDLE"
 
   if askyn "configure the vault now over SSH from here?" n; then
-    ask VAULT_SSH "vault ssh target (user@host)" "$VAULT_SSH"
+    ask VAULT_SSH "vault ssh target (user@host, or user@host:port)" "$VAULT_SSH${VAULT_PORT:+:$VAULT_PORT}"
+    split_vault_port
     [ -n "$VAULT_SSH" ] || { warn "no ssh target - bundle is ready to copy manually instead"; return; }
-    # Test key auth FIRST; only offer ssh-copy-id if we actually need it (don't ship a key blindly).
-    if ssh -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new "$VAULT_SSH" true 2>/dev/null; then
+    # Test key auth FIRST; only offer vcopyid if we actually need it (don't ship a key blindly).
+    if vssh -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new "$VAULT_SSH" true 2>/dev/null; then
       ok "SSH key auth to $VAULT_SSH already works"
     else
       warn "SSH key auth to $VAULT_SSH isn't working yet"
-      if askyn "run ssh-copy-id (enter the vault password once, then home connects by key)?" y; then
-        ssh-copy-id "$VAULT_SSH" <"$TTY" || warn "ssh-copy-id failed"
+      if askyn "run vcopyid (enter the vault password once, then home connects by key)?" y; then
+        vcopyid "$VAULT_SSH" <"$TTY" || warn "vcopyid failed"
       fi
       # Confirm the vault is actually reachable before pushing anything.
-      if ssh -o BatchMode=yes -o ConnectTimeout=6 "$VAULT_SSH" true 2>/dev/null; then
+      if vssh -o BatchMode=yes -o ConnectTimeout=6 "$VAULT_SSH" true 2>/dev/null; then
         ok "reachable at $VAULT_SSH (key auth)"
-      elif ssh -o ConnectTimeout=6 "$VAULT_SSH" true <"$TTY" 2>/dev/null; then
+      elif vssh -o ConnectTimeout=6 "$VAULT_SSH" true <"$TTY" 2>/dev/null; then
         warn "reachable at $VAULT_SSH, but only with a password - each SSH step below will prompt you"
       else
         warn "cannot reach $VAULT_SSH over SSH - fix access, or copy $BUNDLE to the vault manually"; return
@@ -498,12 +518,12 @@ EOF
     # (the vault must monitor ITS pools/replicas, not home's - a copied home targets.yaml makes the
     # vault report home's fleet as UNKNOWN). The *.example.yaml files are still copied so the vault
     # can seed a starter targets.yaml.
-    rsync -a --delete --exclude '.git' --exclude 'config/cairn.env' --exclude 'config/targets.yaml' \
+    vrsync -a --delete --exclude '.git' --exclude 'config/cairn.env' --exclude 'config/targets.yaml' \
       --exclude '*.db*' --exclude 'vault-install.conf' --exclude '.cairn-pull.log' \
       "$HERE/" "$VAULT_SSH:cairn/" || die "rsync to $VAULT_SSH failed"
-    scp "$BUNDLE" "$VAULT_SSH:cairn/vault-install.conf" >/dev/null || die "copying the bundle failed"
+    vscp "$BUNDLE" "$VAULT_SSH:cairn/vault-install.conf" >/dev/null || die "copying the bundle failed"
     printf '\n   \033[1;35m>>> now running ON THE VAULT (%s) - a sudo prompt below is the VAULT asking for its password <<<\033[0m\n' "$VAULT_SSH"
-    if ssh -t "$VAULT_SSH" "cd cairn && ./install.sh vault --config vault-install.conf --yes" <"$TTY"; then
+    if vssh -t "$VAULT_SSH" "cd cairn && ./install.sh vault --config vault-install.conf --yes" <"$TTY"; then
       printf '   \033[1;35m>>> back on home (local) <<<\033[0m\n'
       ok "vault provisioned - it should appear in the Agents card shortly"
     else
@@ -539,9 +559,10 @@ provision_replication() {
   local sets; sets="$(_repl_sets)"
   [ -n "$sets" ] || { warn "no zfs-repl targets in config/targets.yaml - nothing to replicate"; return; }
   info "replication sets:"; while read -r n s d r; do [ -n "$n" ] && info "  $n: $s -> $d ${r:+(raw)}"; done <<<"$sets"
-  [ -n "$ssh_t" ] || ask ssh_t "vault ssh target (user@host)" "$VAULT_SSH"
+  [ -n "$ssh_t" ] || ask ssh_t "vault ssh target (user@host, or user@host:port)" "$VAULT_SSH${VAULT_PORT:+:$VAULT_PORT}"
   [ -n "$ssh_t" ] || { warn "no vault ssh target - skipping replication"; return; }
-  ssh -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new "$ssh_t" true 2>/dev/null \
+  VAULT_SSH="$ssh_t"; split_vault_port; ssh_t="$VAULT_SSH"
+  vssh -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new "$ssh_t" true 2>/dev/null \
     || { warn "cannot ssh to $ssh_t by key - run --add-vault first, or fix access"; return; }
   ensure_opt "command -v rsync >/dev/null" rsync "copying the runner to the vault"
 
@@ -550,7 +571,8 @@ provision_replication() {
   local home_addr; ask home_addr "address the VAULT uses to reach THIS home (LAN ip / VPN / host)" \
     "$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.)' | head -1)"
   [ -n "$home_addr" ] || { warn "no home address - skipping replication"; return; }
-  local HOME_SSH="$huser@$home_addr"
+  local HOME_SSH="$huser@$home_addr" home_port
+  ask home_port "SSH port the VAULT uses to reach THIS home" "${HOME_PORT:-$(local_sshd_port)}"
   local src_pools dst_pools p
   src_pools="$(echo "$sets" | awk 'NF{print $2}' | cut -d/ -f1 | sort -u)"
   dst_pools="$(echo "$sets" | awk 'NF{print $3}' | cut -d/ -f1 | sort -u)"
@@ -567,7 +589,7 @@ provision_replication() {
   chmod +x "$wrapper" 2>/dev/null || true
 
   # 2. VAULT: dedicated no-passphrase pull key (idempotent); fetch its pubkey
-  local pub; pub="$(ssh "$ssh_t" '[ -f ~/.ssh/cairn-pull ] || ssh-keygen -t ed25519 -f ~/.ssh/cairn-pull -N "" -C "cairn-pull -> home" >/dev/null 2>&1; chmod 600 ~/.ssh/cairn-pull; cat ~/.ssh/cairn-pull.pub' 2>/dev/null)"
+  local pub; pub="$(vssh "$ssh_t" '[ -f ~/.ssh/cairn-pull ] || ssh-keygen -t ed25519 -f ~/.ssh/cairn-pull -N "" -C "cairn-pull -> home" >/dev/null 2>&1; chmod 600 ~/.ssh/cairn-pull; cat ~/.ssh/cairn-pull.pub' 2>/dev/null)"
   [ -n "$pub" ] || { warn "could not create/read the vault pull key"; return; }
 
   # 3. HOME: authorize the pull key, locked to the forced-command wrapper (idempotent)
@@ -578,28 +600,29 @@ provision_replication() {
 
   # 4. VAULT: delegate receive on each DEST pool (skip if present)
   for p in $dst_pools; do
-    za="$(ssh "$ssh_t" "zfs allow $p" 2>/dev/null)"; have=1
+    za="$(vssh "$ssh_t" "zfs allow $p" 2>/dev/null)"; have=1
     for q in create mount receive mountpoint; do echo "$za" | grep -qE "user $vuser .*\b$q\b" || have=0; done
     if [ "$have" = 1 ]; then ok "vault: create,mount,receive,mountpoint already delegated on $p"
     else printf '   \033[1;35m>>> vault sudo (delegate receive on %s) <<<\033[0m\n' "$p"
-      ssh -t "$ssh_t" "sudo zfs allow $vuser create,mount,receive,mountpoint $p" <"$TTY" && ok "vault: delegated receive on $p" || warn "vault: could not delegate receive on $p"; fi
+      vssh -t "$ssh_t" "sudo zfs allow $vuser create,mount,receive,mountpoint $p" <"$TTY" && ok "vault: delegated receive on $p" || warn "vault: could not delegate receive on $p"; fi
   done
 
   # 5. VAULT: push the runner + units, write the conf, enable the nightly timer
-  ssh "$ssh_t" 'mkdir -p ~/cairn/replication ~/.config/cairn ~/.config/systemd/user' 2>/dev/null
-  rsync -a "$HERE/replication/vault-pull.sh" "$ssh_t:cairn/replication/vault-pull.sh" 2>/dev/null
-  rsync -a "$HERE/replication/cairn-pull.service" "$HERE/replication/cairn-pull.timer" "$ssh_t:.config/systemd/user/" 2>/dev/null
+  vssh "$ssh_t" 'mkdir -p ~/cairn/replication ~/.config/cairn ~/.config/systemd/user' 2>/dev/null
+  vrsync -a "$HERE/replication/vault-pull.sh" "$ssh_t:cairn/replication/vault-pull.sh" 2>/dev/null
+  vrsync -a "$HERE/replication/cairn-pull.service" "$HERE/replication/cairn-pull.timer" "$ssh_t:.config/systemd/user/" 2>/dev/null
   local cf; cf="$(mktemp)"
-  local vhome; vhome="$(ssh "$ssh_t" 'printf %s "$HOME"' 2>/dev/null)"; vhome="${vhome:-/home/$vuser}"
+  local vhome; vhome="$(vssh "$ssh_t" 'printf %s "$HOME"' 2>/dev/null)"; vhome="${vhome:-/home/$vuser}"
   { printf 'HOME_SSH  %s\nKEY  %s/.ssh/cairn-pull\n' "$HOME_SSH" "$vhome"
+    [ -n "$home_port" ] && [ "$home_port" != 22 ] && printf 'PORT  %s\n' "$home_port"
     while read -r n s d r; do [ -n "$n" ] && printf 'SET  %s  %s  %s  %s\n' "$n" "$s" "$d" "$r"; done <<<"$sets"; } > "$cf"
-  rsync -a "$cf" "$ssh_t:.config/cairn/replication.conf" 2>/dev/null; rm -f "$cf"
-  ssh "$ssh_t" 'chmod 600 ~/.config/cairn/replication.conf; chmod +x ~/cairn/replication/vault-pull.sh; systemctl --user daemon-reload && systemctl --user enable --now cairn-pull.timer' 2>&1 | sed 's/^/   /' \
+  vrsync -a "$cf" "$ssh_t:.config/cairn/replication.conf" 2>/dev/null; rm -f "$cf"
+  vssh "$ssh_t" 'chmod 600 ~/.config/cairn/replication.conf; chmod +x ~/cairn/replication/vault-pull.sh; systemctl --user daemon-reload && systemctl --user enable --now cairn-pull.timer' 2>&1 | sed 's/^/   /' \
     && ok "vault: nightly pull timer enabled" || warn "vault: timer setup returned non-zero"
 
   if askyn "run the first pull now?" y; then
     printf '   \033[1;35m>>> first pull on the vault <<<\033[0m\n'
-    ssh "$ssh_t" '~/cairn/replication/vault-pull.sh' 2>&1 | sed 's/^/   /' || warn "first pull returned non-zero (check on the vault)"
+    vssh "$ssh_t" '~/cairn/replication/vault-pull.sh' 2>&1 | sed 's/^/   /' || warn "first pull returned non-zero (check on the vault)"
   fi
   ok "Replication configured. Add the replica datasets to the VAULT's targets.yaml (zfs-local) to see their freshness on the dashboard."
 }
