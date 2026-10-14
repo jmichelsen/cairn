@@ -510,3 +510,12 @@ def test_vault_replica_card_offers_pull_not_snapshot():
     r["agent"] = "offsite-vault"
     h = api._acts(r, True, False)
     assert "replicateNow('t','offsite-vault')" in h and ">Snapshot<" not in h
+
+
+def test_outdated_agent_update_is_a_button_for_admin_and_plain_text_for_viewer():
+    a = {"name": "vault", "severity": "OK", "can_execute": True, "last_report_ts": int(time.time()),
+         "report_interval": 120, "version": "0.0.1", "outdated": True}
+    admin, viewer = api._agent_card(a, viewer=False), api._agent_card(a, viewer=True)
+    assert "updateAgent('vault')" in admin and "<button class=verbtn" in admin
+    assert "<button" not in viewer.split("data-ver>")[1].split("</span></div>")[0]
+    assert "admin only" in viewer and "read-only" in viewer

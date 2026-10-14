@@ -2558,7 +2558,7 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .robadge{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--mut);
   border:1px solid var(--line);border-radius:999px;padding:2px 9px;white-space:nowrap}
 .verold{display:inline-block;margin-left:6px;font-size:11px;font-weight:600;color:var(--warn);
-  border:1px solid var(--warn);border-radius:999px;padding:0 7px;white-space:nowrap}
+  white-space:nowrap;cursor:help}
 .verbtn{margin-left:6px;font-size:11px;font-weight:600;color:#fff;background:var(--warn);
   border:1px solid var(--warn);border-radius:999px;padding:1px 9px;white-space:nowrap;cursor:pointer}
 .verbtn:hover{filter:brightness(1.06)}
@@ -3680,7 +3680,8 @@ def _agent_card(a, viewer=False, tab=None, active=False):
     if ver and a.get("outdated"):
         # A read-only viewer sees the badge; an admin gets a button that queues the agent's self-update.
         # stopPropagation so pressing Update on a tab doesn't also switch tabs.
-        upd = (f'<span class=verold>update to {_esc(CAIRN_VERSION)}</span>' if viewer else
+        upd = (f'<span class=verold data-tip="this account is read-only: sign in as an admin to update agents">'
+               f'{_esc(CAIRN_VERSION)} available (admin only)</span>' if viewer else
                f'<button class=verbtn onclick="event.stopPropagation();updateAgent(\'{n}\')" '
                f'data-tip="fetch the latest code on this agent and restart it, keeping every setting">'
                f'update to {_esc(CAIRN_VERSION)}</button>')
