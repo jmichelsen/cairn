@@ -1,123 +1,146 @@
 # cairn targets - copy to config/targets.yaml and edit for YOUR system.
-# One entry per backup you want tracked. Thresholds are hours unless noted; capacity is percent.
+# Full reference for every type, key, threshold and action: docs/targets.md
+# One entry per thing you want tracked. Thresholds are hours unless noted; capacity is percent.
 
 defaults:
   repl_warn_h: 28        # replication lag: WARN (one nightly run missed + grace)
   repl_crit_h: 50        #                  CRIT (two missed)
   cap_warn_pct: 85       # pool capacity
   cap_crit_pct: 92
-  scrub_warn_d: 40       # scrub age (days) - overridden per pool below
+  scrub_warn_d: 40       # scrub age (days) for pools NOT listed in scrub_cadence below
   scrub_crit_d: 70
   resilver_warn_h: 48    # a resilver within N hours = WARN (a disk dropped/flaky, even if healed)
-  fresh_warn_h: 28       # borg/backupninja/snapshot freshness (daily cadence)
+  fresh_warn_h: 28       # snapshot/archive/run freshness (daily cadence)
   fresh_crit_h: 50
+  # removable_detach_warn_d: 45   # removable drives: days since last sync before the plug-me-in nudge
 
-# Per-pool scrub cadence -> scrub-age thresholds (days).
+# Per-pool scrub cadence -> scrub-age thresholds (days). Give both warn_d and crit_d per pool.
+# Scrub age only comes from here or defaults; scrub_*_d set on a target is ignored.
 scrub_cadence:
   tank:  { warn_d: 40, crit_d: 70 }   # monthly scrub
   fast:  { warn_d: 10, crit_d: 24 }   # weekly scrub
 
 targets:
+  # Keys any target may carry: tier, location, backs_up, schedule, note, source_agent,
+  # pre_cmd/post_cmd/hook_actions/hook_timeout_s (see README "Pre/post hooks").
+
   # --- Replicated ZFS datasets: monitors replication LAG (newest snapshot common to src+dst)
-  #     and (for encrypted off-site copies) that the destination key stays unavailable. ---
+  #     and (for encrypted copies) that the destination key stays unavailable. ---
   #     `tier: A` = irreplaceable data: counted in the 3-2-1 scorecard (see README). Other tiers are labels only.
   - { name: photos, type: zfs-repl, source: tank/photos, dest: backup/photos, tier: A }
   - { name: docs,   type: zfs-repl, source: tank/docs,   dest: backup/docs,   tier: A }
-  # Encrypted, zero-knowledge off-site copy: flags CRIT if the dest key ever loads.
+  # Encrypted, zero-knowledge copy: raw sends, and CRIT if the dest key ever loads.
+  # `location: offsite` counts it as the off-site copy in the scorecard.
   - { name: private, type: zfs-repl, source: tank/private, dest: offsite/private, tier: A,
       encrypted: true, vault_keystatus_expected: unavailable, location: offsite }
-  # DECLARED PAIR: when the dest lives on ANOTHER agent (a remote vault that pulls this dataset and
-  # reports it as its own zfs-local), add `dest_agent: <that agent's name>`. This half then can't see
-  # the dest locally, so instead of UNKNOWN it reports its own SOURCE-snapshot freshness and the
-  # dashboard shows "paired -> <agent>". The two halves auto-merge into one pair card; the pair's
-  # severity comes from the receiver (which sees the real off-site freshness). On the RECEIVER, tag the
-  # matching zfs-local with `source_agent: <this agent>` to document the reverse side.
+  # PAIR with another agent (a vault that pulls this dataset and reports it as its own zfs-local):
+  # the two halves merge into one pair card when this `dest` EXACTLY equals the vault target's
+  # `source` (and the scorecard counts it as off-site). `dest_agent` does not affect the merge; it
+  # only makes this half report its own SOURCE-snapshot freshness ("paired -> vault") instead of
+  # UNKNOWN. Pair severity = the vault's when this half is UNKNOWN, else the worse of both halves.
+  # Use the SAME name on both sides: the vault's "Replicate now" pulls the replication.conf SET
+  # named after its zfs-local target, and the installer names sets after the home target.
   - { name: offsite_photos, type: zfs-repl, source: tank/photos, dest: vault/photos, tier: A,
       dest_agent: vault }
+  # ...and in the VAULT's targets.yaml:
+  # - { name: offsite_photos, type: zfs-local, source: vault/photos, source_agent: home }
 
-  # --- Local pools: health, capacity, scrub age, snapshot freshness ---
-  # Snapshot-freshness thresholds auto-derive from sanoid.conf when present (see CAIRN_SANOID_DERIVE);
-  # datasets sanoid doesn't monitor are suppressed. To pin thresholds manually for a target, set BOTH
-  # fresh_warn_h and fresh_crit_h (that fully overrides the sanoid derivation for that target):
+  # --- Local pools/datasets: health, capacity, resilver, scrub age (pool roots only) and
+  #     snapshot freshness (any dataset). ---
+  # Snapshot-freshness thresholds auto-derive from sanoid.conf when present (CAIRN_SANOID_DERIVE);
+  # datasets sanoid doesn't monitor are suppressed. Setting EITHER fresh_warn_h or fresh_crit_h on a
+  # target opts it out of sanoid derivation; a key you leave unset falls back to `defaults`.
   - { name: tank,   type: zfs-local, source: tank }
   - { name: backup, type: zfs-local, source: backup, fresh_warn_h: 26, fresh_crit_h: 50 }
   # Pre/post hooks around cairn's own snapshot / sync / backup-now actions, e.g. quiesce a VM so its
   # snapshot is consistent. A failing pre_cmd skips the action; post_cmd always runs after it (with
   # CAIRN_RESULT=ok|fail|skipped) and its failure fails the action. Optional: hook_actions: [snapshot]
   # to wrap only some actions, hook_timeout_s (default 600). Scheduled sanoid snapshots don't go
-  # through cairn - use sanoid's own pre_snapshot_script / post_snapshot_script for those.
+  # through cairn: use sanoid's own pre_snapshot_script / post_snapshot_script for those.
   # - { name: vms, type: zfs-local, source: tank/vms,
   #     pre_cmd: "virsh domfsfreeze web", post_cmd: "virsh domfsthaw web" }
 
-  # --- borg repos (mount them read-only into the container). Encrypted repos need the
-  #     passphrase: set an env var and reference it with passphrase_env. ---
+  # --- borg repos (a local repo directory; mount it read-only into the container). Encrypted repos
+  #     need the passphrase: set an env var and reference it with passphrase_env. ---
   - { name: borg-home, type: borg-repo, source: /repos/home }
   # - { name: borg-sys, type: borg-repo, source: /repos/system, passphrase_env: BORG_PASSPHRASE_SYS }
 
   # --- restic repos (newest-snapshot freshness + count). source = repo (path or rest:/s3:/b2:/sftp:
-  #     URL); give the passphrase via passphrase_env (an env var name) or password_file. ---
+  #     URL); password via passphrase_env (an env var name, default RESTIC_PASSWORD) or password_file.
+  #     Host agent only (restic is not in the container image). ---
   # - { name: restic-laptop, type: restic, source: /repos/restic, passphrase_env: RESTIC_PW_LAPTOP }
 
-  # --- rclone remotes (the off-site copy). Confirms the remote is reachable; rclone stores no
-  #     backup time itself, so for freshness point `marker` at a file the sync job touches on success. ---
+  # --- rclone remotes. Confirms the remote is reachable; rclone stores no backup time itself, so for
+  #     freshness point `marker` at a file the sync job touches on success. Host agent only. ---
   # - { name: rclone-gdrive, type: rclone, source: "gdrive:backups", marker: /var/lib/cairn/rclone-gdrive.stamp }
 
   # --- snapper (btrfs) configs (newest-snapshot freshness + count). source = config name; the
-  #     collector needs read access (ALLOW_USERS in /etc/snapper/configs/<name>). ---
+  #     agent user needs read access (ALLOW_USERS in /etc/snapper/configs/<name>). Host agent only. ---
   # - { name: snapper-root, type: snapper, source: root }
 
   # --- REMOVABLE external drive as a 2nd-media leg (the "2" in 3-2-1). cairn recognizes it by a
   #     STABLE id (filesystem `uuid` or `by_id` under /dev/disk/by-id, never /dev/sdX), monitors
   #     presence + freshness, and backs up ON DEMAND ("Back up now") with an incremental rsync.
-  #     Absence is a NEUTRAL state ("detached"), never CRIT - an unplugged 2nd-leg is expected.
+  #     It is never CRIT: an unplugged 2nd leg is expected, and freshness is capped at WARN.
   #     No privilege needed (monitoring reads only symlinks + the mount table; rsync runs as you).
   #       uuid / by_id : how to recognize the drive (one of them). `blkid` / `ls /dev/disk/by-*`.
   #       mount        : where it is mounted when present (fstab: UUID + `nofail` so boot survives absence).
-  #       source       : what to back up (the live tree).
-  #       dest_subpath : path UNDER the mount to sync into (created if absent).
+  #       source       : what to back up (single-source mode; ignored once the drive has dashboard-
+  #                      confirmed dataset links, which back up each linked dataset to cairn/<host>/<slug>).
+  #       dest_subpath : path UNDER the mount to sync into (single-source mode).
   #       exclude      : optional rsync --exclude patterns.
   #       mirror       : true => rsync --delete (mirror). DEFAULT false = additive (never clobbers a
   #                      stale/diverged drive; surface + let a human decide, don't auto-delete).
+  #       fresh_warn_h : age of the last backup (while attached) that turns the card WARN. The 28h
+  #                      default suits a daily job; raise it for a drive you sync monthly.
   #       detach_warn_d: days since the last sync before cairn nudges you to plug it in + refresh
-  #                      (default 45). The nudge is a WARN that PUSHES to Gotify (not just email) and
-  #                      re-fires every `remind_every_d` days; when you plug in + sync, a one-shot
-  #                      "2nd copy refreshed" push+email confirms it took.
+  #                      (default defaults.removable_detach_warn_d, else 45). The nudge is a WARN that
+  #                      PUSHES to Gotify (not just email) and re-fires every `remind_every_d` days.
   #       remind_every_d: how often the plug-me-in nudge re-fires while overdue (default 7). ---
   # - { name: ext-photos, type: removable, tool: rsync,
   #     uuid: 1234abcd-....,  mount: /mnt/ext-backup,
   #     source: /tank/photos, dest_subpath: photos, tier: B, location: removable,
-  #     exclude: ["*.tmp"], backs_up: "photos -> external drive (2nd media)" }
+  #     exclude: ["*.tmp"], fresh_warn_h: 720, fresh_crit_h: 1440,
+  #     backs_up: "photos -> external drive (2nd media)" }
 
-  # --- SMART health of physical disks (needs device access - see docker-compose.yml) ---
-  - { name: smart, type: smart }
+  # --- SMART health of physical disks. Sudoless by default (smartctl --scan + smartd's journal);
+  #     the full attribute table is opt-in (CAIRN_SMART_DETAIL=1 + grant-access.sh --smart-detail). ---
+  - { name: smart, type: smart, smartd_window_h: 72 }
 
   # --- recent kernel disk/link errors: catches transient drops/resilver storms that ZFS
-  #     self-heals (0B resilver, cleared counters). Needs journal read access. ---
+  #     self-heals (0B resilver, cleared counters). Reads `journalctl -k`, else `log_file`,
+  #     /var/log/kern.log, /var/log/syslog (mount one read-only in the container). ---
   - { name: kernel-disk-errors, type: kernel-errors, window_h: 24, crit_count: 10, rescan_storm: 20 }
 
   # --- ZFS event timeline from zed's journal (the all-syslog.sh zedlet, standard on OpenZFS).
   #     Lists scrub/resilver + vdev state changes + checksum/io errors; warns only on a currently
   #     bad vdev or recent checksum/io/data errors (a resolved flap stays in the log as history). ---
   - { name: zfs-events, type: zfs-events, window_h: 168, alert_h: 48 }
+
   # --- AIDE file integrity: changes nobody has reviewed yet, each with an Accept button. Reads the
   #     pending list via `sudo -n <check_cmd> --list` and accepts via `--accept [path]`, so it needs
   #     a NOPASSWD sudoers rule for that one script. See README "File integrity (AIDE)". ---
-  # - { name: aide, type: aide, check_cmd: /usr/local/sbin/aide-check.sh, severity: WARN }
+  # - { name: aide, type: aide, check_cmd: /usr/local/sbin/aide-check.sh, severity: WARN,
+  #     label: "File integrity (AIDE)" }
 
   # --- reachability: SSH-probe a remote host and alert if it can't be reached. Intended for an
-  #     OFF-SITE agent to prove it can still reach HOME over the VPN - it reports to cairn over the
+  #     OFF-SITE agent to prove it can still reach HOME over the VPN: it reports to cairn over the
   #     public HTTPS control plane (independent of the VPN it is probing), so a VPN outage between
   #     the two is still deliverable as an alert. Retries absorb a lazy-VPN cold-start; CRIT only
-  #     when every try fails. `probe: true` works through a restricted forced-command send key. ---
-  # - { name: home-link, type: reachability, host: user@home, key: /home/user/.ssh/pull-key,
+  #     when every try fails. `probe: true` works through a restricted forced-command pull key.
+  #     Host agent only (no ssh client in the container). `ssh:` is accepted as an alias for host. ---
+  # - { name: home-link, type: reachability, host: user@home, port: 22, key: /home/user/.ssh/pull-key,
   #     tries: 3, retry_wait_s: 5, connect_timeout_s: 10 }
 
-  # --- scheduled ZFS jobs from systemd timers (syncoid replication, sanoid snapshots): surfaces
-  #     what each backs up, its schedule, and next/last run. Read via systemctl, no root. ---
+  # --- scheduled jobs from systemd timers (default: syncoid replication + sanoid snapshots):
+  #     what each backs up, its schedule, and next/last run. Read via systemctl, no root.
+  #     Override with `units:` (kind, timer, label required; service optional). ---
   - { name: schedules, type: schedules }
+  # - { name: schedules, type: schedules,
+  #     units: [ { kind: syncoid, timer: syncoid.timer, service: syncoid.service, label: "ZFS replication" } ] }
 
   # --- backupninja: one status per handler, parsed from the log + reports (mount them ro). Schedule
   #     is auto-derived from the log; `jobs` optionally labels what each handler backs up. ---
   - { name: backupninja, type: backupninja-handler, source: /etc/backup.d,
       log: /var/log/backupninja.log, reports: /var/lib/backupninja/reports,
-      jobs: { "90.borg": { backs_up: "/var/lib/docker_data → borg" } } }
+      jobs: { "90.borg": { backs_up: "/srv/data -> borg" } } }

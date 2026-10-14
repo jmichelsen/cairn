@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Container entrypoint. Dispatches by first arg:
 #   api        - serve the dashboard + API (default)
-#   collect    - run the collector on a loop every $CAIRN_INTERVAL seconds
-#   collect-1  - run the collector once and exit (for cron/testing)
-#   runner     - process queued action intents once (usually the HOST runs this, not the container)
+#   agent      - run the agent (agent.py) on a loop every $CAIRN_INTERVAL seconds
+#   agent-1    - run one agent pass and exit (agent.py --once)
+#   collect-1  - legacy: run the collector once, writing SQLite directly (no API); for debugging
 #   <other>    - exec it verbatim
 set -euo pipefail
 

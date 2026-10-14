@@ -4,23 +4,32 @@
 
 *A cairn marks the safe path and endures the weather - so you always know your way back to your data.*
 
-One dashboard for the health of every backup on a ZFS host - **ZFS replication lag, pool
-health/capacity/scrub, borg / restic repos, rclone remotes, snapper (btrfs) snapshots,
-backupninja handlers, and SMART** - with email + Gotify
-alerts and **push-button on-demand actions** (snapshot / replicate / scrub). Self-hosted,
-single small container + SQLite. No agent phone-home, no cloud.
+One dashboard for the health of every backup on a ZFS host, with email + Gotify alerts and
+**push-button actions**. Self-hosted: one small API container + SQLite, plus a small agent on each
+host. No phone-home, no cloud.
 
-Why it's different from a generic uptime monitor: it understands *backups specifically* - it
-computes real **replication lag** (newest snapshot common to source and destination), a
-**3-2-1 compliance scorecard**, a **coverage-gap** view ("what is backed up by nothing"), and
-respects zero-knowledge encrypted replicas (flags a destination whose key unexpectedly loads).
+What it watches:
 
-It also **watches its own alerting.** The alerter can be the thing that's broken - a
-placeholder SMTP host or a stale push token delivers *nothing* while the dashboard still looks fine.
-So cairn periodically **self-tests the delivery path** (recipient + SMTP host reachable and
-non-placeholder, Gotify reachable if configured) and pushes the verdict to an independent
-[uptime-kuma](https://github.com/louislam/uptime-kuma) Push monitor. If cairn can't reach you, Kuma
-can. See [Notify self-test heartbeat](#notify-self-test-heartbeat).
+- **ZFS**: pool health, capacity and scrub age, snapshot freshness (derived from `sanoid.conf`),
+  **replication lag** (newest snapshot common to source and destination), resilvers and vdev
+  errors, and zed's event timeline.
+- **Other backup tools**: borg and restic repos, rclone remotes, snapper (btrfs), backupninja
+  handlers, systemd backup timers (syncoid/sanoid).
+- **Hardware and host**: SMART, kernel disk/link errors, AIDE file-integrity changes, SSH
+  reachability of a remote site.
+- **Removable drives**: an external "2nd leg" drive, with dataset matching, size/fit census,
+  content verify and a one-click incremental **Back up now**.
+
+Why it's different from a generic uptime monitor: it understands *backups*. It pairs a dataset
+with its off-site copy into one end-to-end card, grades a **3-2-1 scorecard**, shows a
+**coverage-gap** view ("what is backed up by nothing"), respects zero-knowledge encrypted replicas
+(CRIT if a destination's key unexpectedly loads), and has a **recovery browser** (snapshots,
+deleted files, file versions, copy-only restore).
+
+It also **watches its own alerting.** A placeholder SMTP host or a stale push token delivers
+*nothing* while the dashboard still looks fine, so cairn self-tests its delivery path and reports
+the verdict to an independent [uptime-kuma](https://github.com/louislam/uptime-kuma) monitor. If
+cairn can't reach you, Kuma can. See [Notify self-test heartbeat](#notify-self-test-heartbeat).
 
 ## Screenshots
 
@@ -35,40 +44,62 @@ and replication **pair cards** that merge a source and its off-site copy into on
 | --- | --- | --- |
 | [<img src="docs/img/pair-card.png" width="260">](docs/img/pair-card.png) | [<img src="docs/img/removable-card.png" width="260">](docs/img/removable-card.png) | [<img src="docs/img/viewer-readonly.png" width="260">](docs/img/viewer-readonly.png) |
 
-See [docs/architecture.md](docs/architecture.md) for how it all fits together.
+## Documentation map
+
+| Doc | What's in it |
+| --- | --- |
+| This README | Install, concepts, the dashboard, accounts, alerts, updating |
+| [docs/targets.md](docs/targets.md) | **Every target type and key** you can put in `targets.yaml` |
+| [AGENT.md](AGENT.md) | The agent: tokens, settings, actions, dry-run, recovery, troubleshooting |
+| [docs/architecture.md](docs/architecture.md) | How the pieces fit: control plane, intents, auth, pairing, the off-site pull |
+| [replication/README.md](replication/README.md) | The vault's nightly pull and how its SSH key is locked down |
+| [config/cairn.env.example](config/cairn.env.example) | Every API / alerting setting |
 
 ## Quick start (`./install.sh`)
 
-One entry point. It **installs any missing prerequisites** (docker, compose, python3-yaml, …),
-asks a few questions, elevates **once** (a single sudo for prerequisites + borg/backupninja read
-access + linger), then builds, configures, and starts everything - control plane, dashboard, and
-the execute-capable local agent. Re-running is idempotent (your tokens/config are kept).
-Run it as your normal user, not root: the agent is a systemd user service.
-
-**Podman works too.** If the host has Podman (native `podman`, or its `docker` emulation from
-`podman-docker`), the installer uses it instead of Docker: it enables `podman.socket` (needed by
-compose) and `podman-restart.service` (restarts the container after a reboot) as rootless user
-units, with linger. Compose comes from `podman compose` with either docker-compose or
-podman-compose as its provider.
+One entry point. It **installs missing prerequisites** (docker or podman, compose, python3-yaml,
+...), asks a few questions, elevates **once** (a single sudo for prerequisites, borg/backupninja
+read access and linger), then builds, configures and starts the API container and the
+execute-capable host agent. Re-running is idempotent (tokens and config are kept). Run it as
+your normal user, not root: the agent is a systemd user service.
 
 ```bash
-# one-liner - self-clones, then installs:
-curl -fsSL https://raw.githubusercontent.com/youruser/cairn/main/install.sh | bash
+# one-liner - self-clones to ~/cairn, then installs:
+curl -fsSL https://raw.githubusercontent.com/jmichelsen/cairn/main/install.sh | bash
 ```
 or clone first:
 ```bash
 git clone https://github.com/jmichelsen/cairn && cd cairn
 ./install.sh            # answer: role=home, alert email, (optional) Gotify, (optional) add a vault
 ```
-Open `http://<host>:8929/` and log in with the `CAIRN_ADMIN_TOKEN` it prints. `./install.sh --check`
-runs preflight only (changes nothing). Prompts read from your terminal even under `curl … | bash`.
-The bootstrap clones to `~/cairn` (override with `CAIRN_DIR=` / `CAIRN_REPO=`).
+
+Open `http://<host>:8929/` and sign in with the `CAIRN_ADMIN_TOKEN` it prints (under "Sign in with
+a token"), then create a password account (see [Accounts and sharing](#accounts-and-sharing)).
+Prompts read from your terminal even under `curl ... | bash`. The bootstrap clones to `~/cairn`
+(override with `CAIRN_DIR=` / `CAIRN_REPO=`).
+
+| Command | What it does |
+| --- | --- |
+| `./install.sh` | Interactive: asks for the role (`home` or `vault`) |
+| `./install.sh home` | This box = API + dashboard + local agent |
+| `./install.sh vault --config vault-install.conf` | This box = a remote agent, from the bundle home wrote |
+| `./install.sh home --add-vault` | Add a remote vault to an existing home |
+| `./install.sh home --replication [--vault-ssh user@host]` | Set up (or re-sync) the vault's nightly pull, see [replication/README.md](replication/README.md) |
+| `./install.sh --update` | Refresh the code (git pull, or a tarball that keeps `config/`) and restart the agent. The dashboard's **Update** button runs this |
+| `./install.sh --smart-detail` | Also install the scoped `smartctl` wrapper for SMART attribute tables |
+| `./install.sh --check` | Preflight only, changes nothing |
+| `./install.sh home --configure` | Re-run configuration. **Destructive:** regenerates every token, so every agent must be re-enrolled |
+| `--yes` / `-y` | Accept defaults, no prompts |
+
+**Podman works too.** If the host has Podman (native `podman`, or its `docker` emulation from
+`podman-docker`), the installer uses it: it enables `podman.socket` (needed by compose) and
+`podman-restart.service` (restarts the container after a reboot) as rootless user units, with
+linger. Compose comes from `podman compose` with docker-compose or podman-compose as its provider.
 
 **Remote off-site vault.** When `install.sh` (on home) asks *"add a remote vault?"*, it mints a
-per-vault enrollment secret and either writes a `vault-install.conf` bundle to copy over, **or** -
-if the vault is reachable by SSH - offers `ssh-copy-id` (so home always connects by key) and then
-pushes + runs the vault install for you. On the vault, the same script consumes the bundle:
-`./install.sh vault --config vault-install.conf`.
+per-vault enrollment secret and either writes a `vault-install.conf` bundle to copy over, **or**,
+if the vault is reachable by SSH, offers `ssh-copy-id` and then pushes and runs the vault install
+for you. It then offers to set up the nightly replication pull.
 
 <details><summary>Manual Docker setup (what install.sh automates)</summary>
 
@@ -84,96 +115,84 @@ so it can never run alongside the host agent: both report as `local` and would f
 targets. Same commands with `podman-compose` (1.0.6+ for profiles).
 </details>
 
-**Read-only first (recommended).** The `container-agent` profile runs an **unprivileged, report-only**
-container agent - great for kicking the tires. What you get vs. what needs the host agent:
+### Report-only container mode
 
-| Works in the default RO container | Needs the host/execute agent |
+The `container-agent` profile runs an **unprivileged, report-only** agent in a container, handy
+for kicking the tires. Its image carries only the ZFS, borg, smartmontools and mail tools, so:
+
+| Works in the container | Needs the host agent |
 | --- | --- |
-| ZFS pool health, capacity, scrub age, **replication lag**, **resilver / vdev-error detection** | **action buttons** (replicate/scrub/snapshot/restore) - `CAIRN_CAN_EXECUTE=1` + ZFS write |
-| borg repos, backupninja handlers, 3-2-1 scorecard, coverage-gap, timeline | **SMART** (needs disk passthrough) and **kernel-error watch** (needs journald access) |
+| ZFS pool health, capacity, scrub age, snapshot freshness, **replication lag**, resilver / vdev errors | **All action buttons** (snapshot, replicate, scrub, restore, recovery browser, removable backups) |
+| borg repos and backupninja handlers (mount them read-only into the container) | restic, rclone, snapper (their tools aren't in the image) |
+| kernel disk errors (from a mounted `/var/log/kern.log`) | zed event timeline, systemd timers, smartd alerts (need the host's journal / systemd) |
+| 3-2-1 scorecard, coverage gaps, timeline | AIDE, pre/post hooks |
 
 Targets owned by a report-only agent show **"report-only"** instead of action buttons, and the
-API refuses to queue actions for them - so nothing hangs. When you're ready for actions/SMART/
-kernel-watch, run the agent on the host (see `AGENT.md`). The **`api`** service is a pure control plane (stores state, serves
-the dashboard, dispatches alerts - it never touches ZFS). The **`agent`** service reads *this*
-host's ZFS (via mounted `/dev/zfs`, unprivileged) + borg/backupninja and reports to the API every
-`CAIRN_INTERVAL` seconds. **Monitoring needs no root.**
-
-**One agent, any distance.** The same `agent.py` runs on a remote **off-site vault** pointed at
-the API's public URL + a token - outbound HTTPS only, no separate design. See `AGENT.md`.
-
-**On-demand actions** (Replicate/Snapshot/Scrub buttons) are executed by an agent running with
-`CAIRN_CAN_EXECUTE=1` (needs ZFS write privilege - run it on the host as root, or grant the container
-`SYS_ADMIN`). Commands are built from the agent's trusted local config, never from the wire.
+API refuses to queue actions for them, so nothing hangs. Switching to the host agent is covered in
+[AGENT.md](AGENT.md#upgrading-past-read-only-container-to-host-agent).
 
 ## What runs where
 
 | Piece | Component | Privilege |
 | --- | --- | --- |
 | API + dashboard, SQLite, alert dispatch (**no host access**) | **api** (container) | unprivileged; holds the SMTP/Gotify creds |
-| ZFS/borg/backupninja **reads** → report to API | **agent** (container or host) | `/dev/zfs` mounted; matching ZFS major (or mount host binaries) |
-| SMART | **agent** | disk device passthrough + `SYS_RAWIO` (optional) |
-| On-demand **actions** (`syncoid`/`zfs snapshot`/`zpool scrub`) | **agent** with `CAIRN_CAN_EXECUTE=1` | ZFS write → host root or container `SYS_ADMIN` |
-| Off-site **vault** reporting + pulls | **same agent**, remote | outbound HTTPS + token; no inbound, no creds |
+| Status reads (ZFS, borg, SMART, logs, ...) and reporting | **agent** on the host (systemd user service) | your normal user + read grants from `grant-access.sh` |
+| On-demand **actions** (snapshot, syncoid, scrub, rsync, restore) | the same agent with `CAIRN_CAN_EXECUTE=1` | `zfs allow` delegation; scrub via an opt-in sudo wrapper |
+| Off-site **vault** reporting + pulls | **same agent**, remote | outbound HTTPS + token; no inbound, no alert creds |
 
-**One uniform agent** does all host work - locally and remotely - talking only HTTP to the API.
-The API never touches ZFS. A ZFS *action* tool can't avoid *some* write privilege where actions
-run, but it lives only in an agent you opt into (`CAIRN_CAN_EXECUTE`); monitoring-only agents and the
-API are unprivileged.
+**One uniform agent** does all host work, locally and remotely, talking only HTTP to the API. The
+API never touches ZFS. Commands are built from the agent's trusted local `targets.yaml`, never
+from the wire. See [docs/architecture.md](docs/architecture.md) for the intent queue, detached
+jobs, auth and pairing (with diagrams).
 
-For a fuller picture - the intent/action queue, detached long jobs, zero-trust auth, adapters,
-replication pairing, and the off-site pull - see [docs/architecture.md](docs/architecture.md)
-(with topology, intent-lifecycle, and pairing diagrams).
+## Replication targets (`zfs-repl`)
 
-## Status
+A `zfs-repl` target **watches** a replication you already run; it does not schedule one. Each check
+compares the newest snapshot on `source` with the newest on `dest` and alerts when the copy falls
+behind (`repl_warn_h` / `repl_crit_h`). The card's **Replicate** button runs a one-off
+`syncoid --no-privilege-elevation --no-stream <source> <dest>` on demand (raw `--sendoptions=w`
+when `encrypted: true`); the regular schedule is yours, e.g. a syncoid timer, or the vault's
+nightly pull below.
 
-| Phase | What | State |
-| --- | --- | --- |
-| 0 | Alerting now, no app: sanoid/pool/scrub checks → email + Gotify, hourly timer | **built + tested** (deploy: `phase0/INSTALL.md`) |
-| 1 | Collector → SQLite → JSON API + derived views (badge, 3-2-1, coverage-gap, timeline) | **built + tested vs live data** (deploy: `phase1/DEPLOY.md`) |
-| 2 | Fuller dashboard - fleet heatmap, capacity gauge, coverage-gap rail, per-kind target cards, per-drive SMART cards, `zed` event timeline, scheduled jobs + job log, acknowledgements, theme-aware. A `/health` badge endpoint feeds a Homepage/status widget | **built + tested** |
-| 3 | **Actions** (snapshot / replicate / scrub) - buttons → intent → owning agent executes | **built + tested** - execute-capable agent runs them live; dry-run is opt-in, per-action or agent-wide (`AGENT.md`) |
-| ✔ | **Control-plane + uniform agent** - one HTTP agent, local or remote vault; API touches no host | **built + end-to-end tested** |
-| ✔ | **Zero-trust auth** - every endpoint; hash-at-rest; two-tier enroll+access with rotation/revoke | **built + tested** |
-| 4 | **Recovery-point catalog via `httm`** - points / deleted-file / version search + guarded restore, as agent actions | **built + tested** |
+`source` and `dest` are **dataset names** exactly as `zfs list` prints them (`pool/dataset`),
+never mountpoints. Pick the form by where the copy lives:
 
-## Layout
+**1. On the same machine** (a second pool, a USB pool):
 
-```
-Dockerfile  docker-compose.yml  entrypoint.sh   container build (api + agent)
-agent.py                        the ONE uniform agent (report + execute over HTTP)
-AGENT.md                        how to run it: local, vault, execute mode
-config/  *.example              generic env + targets templates (copy to real, edit)
-phase0/  notify.sh              notifier: per-severity email routing (immediate/digest/off) + daily digest, Gotify on CRIT, per-key cooldown
-         check_backups.sh + units    standalone host alerting (Phase 0, optional)
-phase1/  schema.sql             SQLite schema (targets, status, intents)
-         collector.py           adapter library (zfs/borg/restic/rclone/snapper/backupninja/smart) + collect_all()
-         api.py                 control plane: report ingest, intent routing, views, dashboard
+```yaml
+- { name: photos, type: zfs-repl, source: tank/photos, dest: backup/photos, tier: A }
 ```
 
-## Notes
+The agent reads both sides and reports the real lag. Until the first replication has run, the card
+shows UNKNOWN "dest has no snapshots".
 
-- **Runs as `youruser` (least-privilege, default).** `grant-access.sh` opens *read* access to
-  the root-owned bits: `backup` group for the borg repos (backups keep running as root;
-  `encryption=none`), `adm` for backupninja log/reports, and a **scoped `smartctl` sudoers**
-  wrapper for SMART. Backups themselves are unchanged. (The grant script adds you to `backup`+`adm`
-  if needed.) Root mode is a documented fallback.
-- **Do NOT add your user to the `disk` group** for SMART - it grants raw read/write to every
-  block device (read any FS bypassing perms, wipe pools). The scoped `smartctl` wrapper is the
-  safe equivalent.
-- **Mail via a local SMTP relay** (e.g. an `msmtpd` sidecar on `127.0.0.1:2500`, `MAIL_MODE=relay`)
-  - no creds, no root, no widening `/etc/msmtprc`. With a plain relay, `NOTIFY_EMAIL` must be a real
-  address (the relay ignores `/etc/aliases`).
-- **Read-only against all backups.** No prune/scrub/restore here; those are Phase-3 actions
-  behind the intent queue. Your source pool stays read-only. Every unreadable signal degrades to
-  `UNKNOWN`, never crashes.
-- Phase 1 reuses phase0's `notify.sh` + env file - nothing in Phase 0 is throwaway.
-- **Snapshot freshness follows sanoid.** When `sanoid.conf` is present, each ZFS dataset's
-  freshness thresholds are derived from its effective sanoid policy (the finest active snapshot
-  granularity -> that type's `*_warn`/`*_crit`), and the verdict is suppressed for datasets sanoid
-  doesn't monitor (`use_template = ignore`, `process_children_only`). No hand-tuning, and it tracks
-  edits to `sanoid.conf`. Pin a target manually by setting both `fresh_warn_h` and `fresh_crit_h`
-  (see `CAIRN_SANOID_DERIVE`).
+**2. On another machine (a vault):** that machine runs its own cairn agent (`./install.sh vault`).
+The nightly pull is set up **from home**: `./install.sh home --replication` (also offered when you
+add a vault) turns each home `zfs-repl` target into a pull set and installs the vault's nightly
+`cairn-pull` timer; see [replication/README.md](replication/README.md). An agent only sees its own
+pools, so declare the pair on both sides, **using the same `name`**:
+
+```yaml
+# home targets.yaml: the sending half (dest = the dataset name ON THE VAULT)
+- { name: photos_offsite, type: zfs-repl, source: tank/photos, dest: vault/photos, tier: A,
+    dest_agent: vault }
+# vault targets.yaml: the receiving half (source_agent = the home agent's CAIRN_AGENT_NAME)
+- { name: photos_offsite, type: zfs-local, source: vault/photos, source_agent: local }
+```
+
+The halves merge into one pair card because home's `dest` is exactly the vault target's `source`.
+The shared `name` matters for the button: the installer names each pull set after the home target,
+and the vault card's **Replicate now** pulls the set whose name matches its own.
+
+With `dest_agent` set, home reports its own source-snapshot freshness ("paired -> vault") instead
+of an UNKNOWN for a dest it can't see. The vault reports how fresh the off-site copy really is. The
+pair card shows the worse of the two halves (or the vault's alone if home can't tell). A remote
+`user@host:pool/dataset` dest is not supported: the agent can't see snapshots on a host it doesn't
+run on.
+
+Encrypted copies: `encrypted: true` makes Replicate send raw, and raises CRIT if the destination's
+key is ever loaded (a zero-knowledge copy should never be readable there). The expected state is
+`unavailable`; override it with `vault_keystatus_expected:` if your design differs.
 
 ## Tier A and the 3-2-1 scorecard
 
@@ -195,14 +214,99 @@ For each tier A **source dataset** (all of its replication targets are grouped t
 scorecard counts:
 
 - **copies** and **media**: the distinct pools holding it (source + every destination), plus one
-  of each for a confirmed removable-drive copy that has synced within `CAIRN_REMOVABLE_STALE_D`
-  days (default 90).
-- **off-site**: a destination marked `location: offsite`, or one reported by another agent
-  (`dest_agent:`, e.g. a remote vault).
+  of each for a confirmed removable-drive copy that has synced or been content-verified within
+  `CAIRN_REMOVABLE_STALE_D` days (default 90).
+- **off-site**: a destination marked `location: offsite`, or a destination another agent holds
+  (a vault whose `zfs-local` source is exactly this target's `dest`, i.e. a merged pair).
 
 A dataset passes with **3+ copies, 2+ media and 1+ off-site**; the overall badge passes only when
-every tier A dataset does. Each failing card says what's missing (no off-site copy, a stale
-removable drive, or a missing 3rd copy).
+every tier A dataset does (and fails if there are none). Each failing card says what's missing (no
+off-site copy, a stale removable drive, or a missing 3rd copy).
+
+## Using the dashboard
+
+- **Cards** are grouped per agent (the agent tiles double as tabs). Click a severity count in the
+  header to filter the whole fleet to it. Cards refresh every 20 seconds.
+- **Actions** (per card, execute-capable agents only): Snapshot, Replicate (or no-snap: send
+  existing snapshots only), Replicate now (vault pull), Scrub (pool roots, when the scrub wrapper is
+  installed), Back up now (removable), AIDE Accept. Every click shows the exact command first; the
+  **Dry-run** box in the top bar turns clicks into dry-runs. Results and live progress land in the
+  **Activity** pane.
+- **Acknowledge** a WARN/CRIT to take it out of the header count until its reason changes or
+  `CAIRN_ACK_TTL` (14 days) passes. It does not stop the alert emails; those repeat per the
+  cooldowns in [Alerts](#alerts).
+- **Hide** a card you don't want (it stays hidden even while the agent reports it; unhide it
+  from the Hidden pane). A target you remove from an agent's `targets.yaml` disappears on its own
+  at the agent's next report. If two agents report the same dataset under the same name, a
+  **reconcile** banner offers to retire one or keep both.
+- **Recovery browser** (dataset cards): **Points** lists snapshots instantly; **Deleted** and
+  **Versions** browse files that are gone or changed, from a nightly scan plus on-demand folder
+  scans (needs `httm`, optional); **Restore** copies a version into the dataset's
+  `.cairn-restores/` folder and never touches live files. Details in
+  [AGENT.md](AGENT.md#recovery-httm).
+- **Removable drives**: plug the drive in, press **Detect matching datasets** and confirm the
+  suggestions (or add a link by hand). Each link gets a size/fit census, a diff, a content verify,
+  optional mirror mode (deletes on the drive what's gone from the source) and per-link excludes.
+  **Back up now** runs a detached incremental rsync into `cairn/<host>/<dataset>/` on the drive
+  that survives agent restarts. Keys are in [docs/targets.md](docs/targets.md#removable).
+- **Coverage gaps** lists what's backed up by nothing, not snapshotted, or has no off-site copy;
+  **busiest pool** and the **14-day fleet** heatmap sit in the summary.
+
+## Accounts and sharing
+
+Sign in with a **password account** or a **token**. Accounts are managed with `cairn-user.py`
+inside the API container (run from `~/cairn`; `podman compose` works the same):
+
+```bash
+docker compose exec api python3 /app/phase1/cairn-user.py add alice --role admin    # prompts for a password
+docker compose exec api python3 /app/phase1/cairn-user.py add demo  --role viewer   # read-only
+docker compose exec api python3 /app/phase1/cairn-user.py passwd alice
+docker compose exec api python3 /app/phase1/cairn-user.py list
+```
+
+`role`, `disable`, `enable` and `remove` work the same way. Changing a password or role signs that
+user out everywhere. Sessions last `CAIRN_SESSION_TTL` (7 days). The audit trail records which
+account clicked each action.
+
+**Read-only share link:** mint a viewer token and send `https://<your-cairn>/login?token=<token>`.
+It signs the browser in read-only for 30 days and works for anyone you send it to, as often as they
+open it, until you revoke it:
+
+```bash
+docker compose exec api python3 /app/phase1/cairn-token.py mint --role viewer --label demo
+docker compose exec api python3 /app/phase1/cairn-token.py list
+docker compose exec api python3 /app/phase1/cairn-token.py revoke --label demo
+```
+
+Agent, admin and phone tokens use the same tool (and the same `/api/v1/backup/tokens` API), see
+[AGENT.md](AGENT.md#auth-zero-trust).
+
+## Alerts
+
+The API sends every alert; agents hold no mail or push credentials. Settings live in
+`config/cairn.env` ([example](config/cairn.env.example)).
+
+- **Email** via SMTP (`MAIL_MODE=smtp`, `relay` is an alias) or local `sendmail`, to
+  `NOTIFY_EMAIL`. A local relay such as an `msmtpd` sidecar keeps credentials off the host; with a
+  plain relay, `NOTIFY_EMAIL` must be a real address (the relay ignores `/etc/aliases`).
+- **Per-severity routing:** `EMAIL_CRIT`, `EMAIL_WARN`, `EMAIL_INFO` = `immediate`, `digest` or
+  `off` (defaults: CRIT and WARN immediate, INFO off). Digest items go out once a day at
+  `CAIRN_DIGEST_HOUR` (default 8, `off` disables).
+- **Gotify** push for CRIT (add WARN with `NOTIFY_GOTIFY_WARN=1`).
+- **Cooldowns:** the same finding re-alerts at most every `COOLDOWN_CRIT` (6 h) / `COOLDOWN_WARN`
+  (24 h) while it lasts.
+- **Silent agents:** an agent that stops reporting raises WARN after 3 missed intervals (at least
+  10 minutes) and CRIT after 8 (at least 20 minutes). Tune with `CAIRN_AGENT_STALE_FACTOR`,
+  `CAIRN_AGENT_MISS_FACTOR` and `CAIRN_AGENT_STALE_FLOOR`.
+- **Action results:** a failed action alerts as CRIT; a finished one is an INFO notice.
+
+## Updating
+
+- **Agents:** press **Update** on an outdated agent's tile (the dashboard flags agents older than
+  the API), or run `./install.sh --update` on that host. It pulls the code (keeping `config/`) and
+  restarts the agent.
+- **The API container:** re-running `install.sh` leaves a running API alone, so rebuild it
+  yourself after pulling: `cd ~/cairn && git pull && docker compose up -d --build api`.
 
 ## Pre/post hooks (e.g. consistent VM snapshots)
 
@@ -237,7 +341,7 @@ path, each with an **Accept** button (plus **Accept all**). Read-only viewers se
 the buttons. cairn stores which account clicked with each accept (the intent's `requested_by`).
 
 ```yaml
-- { name: aide, type: aide }        # optional: check_cmd (default /usr/local/sbin/aide-check.sh), severity (WARN)
+- { name: aide, type: aide }        # optional: check_cmd (default /usr/local/sbin/aide-check.sh), severity (WARN), label
 ```
 
 cairn doesn't run AIDE itself. It expects a root-owned checker script that keeps a pending list
@@ -295,10 +399,64 @@ Leave `CAIRN_KUMA_PUSH_URL` blank and the feature is simply off.
 An Android client (`cairn-android`) can pair by QR code instead of a pasted token. Signed in as
 admin, open **pair phone** in the dashboard's top bar (`/pair`), choose read-only or admin, and scan
 the code from the app. Each code mints a fresh token labelled `phone-<timestamp>` (shown once; revoke
-it like any other with `DELETE /api/v1/backup/tokens/<label>`). The code lists every address the phone
-should try, most-local first:
+it like any other token). The code lists every address the phone should try, most-local first:
 
 ```
-CAIRN_LAN_URL=http://192.168.1.5:8929      # optional: added first, so the phone prefers the LAN
+CAIRN_LAN_URL=http://192.0.2.10:8929       # optional: added first, so the phone prefers the LAN
 CAIRN_PUBLIC_URL=https://cairn.example.com # optional: added last; the page's own address is always included
+```
+
+**LAN discovery:** the app finds cairn on the local network through `GET /api/v1/identify` (public,
+no secrets) and a subnet scan. For a faster mDNS (`_cairn._tcp`) advert, set `CAIRN_MDNS=1` on the
+agent that runs next to the API (only that one) and install `python3-zeroconf` there.
+
+## CI badge
+
+The API can serve a public status badge for your CI (the one at the top of this page). A CI job
+posts its result to `POST /api/v1/ci/status` with `CAIRN_CI_TOKEN`, and `/badge/<name>.svg` serves
+it publicly for names listed in `CAIRN_PUBLIC_BADGES` (default `tests`). Leave `CAIRN_CI_TOKEN`
+blank to keep the route closed.
+
+## Notes
+
+- **Least privilege by default.** The agent runs as your normal user. `grant-access.sh` (run once
+  by the installer) opens *read* access to root-owned bits: the `backup` group for borg repos
+  (backups keep running as root; it also sets borg's `--umask 0027` so new segments stay
+  readable), `adm` for the kernel log and backupninja logs/reports. Two opt-in flags add narrow
+  sudo wrappers: `--smart-detail` (read-only `smartctl` for the SMART attribute table) and
+  `--scrub` (a pool-scrub wrapper that enables the **Scrub** button). Default SMART needs no sudo
+  (`smartctl --scan` plus smartd's journal).
+- **Do NOT add your user to the `disk` group** for SMART: it grants raw read/write to every
+  block device. The scoped wrapper is the safe equivalent.
+- **Writes are limited to the actions you click:** snapshots, replication, scrub, removable
+  backups, and restores (copied into `.cairn-restores/` inside the dataset, never over a live
+  file). Monitoring itself never writes, and an unreadable signal shows as `UNKNOWN`, not OK.
+- **Snapshot freshness follows sanoid.** When `sanoid.conf` is present, each ZFS dataset's
+  freshness thresholds come from its effective sanoid policy (the finest snapshot type with
+  warn/crit set), and the verdict is suppressed for datasets sanoid doesn't snapshot or monitor
+  (`use_template = ignore`, `process_children_only`, all counts 0). It tracks edits to
+  `sanoid.conf`. Setting `fresh_warn_h` or `fresh_crit_h` on a target pins it manually; turn
+  derivation off with `CAIRN_SANOID_DERIVE=0`.
+
+## Layout
+
+```
+Dockerfile  docker-compose.yml  entrypoint.sh   container build (api; optional report-only agent)
+install.sh                      single-entry installer (home, vault, update, replication)
+agent.py  cairn-agent.service   the ONE uniform agent (report + execute over HTTP) and its unit
+run-local-agent.sh              run the agent by hand (report / dry / live), for testing
+AGENT.md                        the agent: auth, settings, actions, recovery, troubleshooting
+config/   *.example             env + targets templates (copy to real, edit)
+docs/     architecture.md  targets.md  img/
+phase0/   notify.sh             email/Gotify sender: per-severity routing, digest, cooldowns
+          check_backups.sh      legacy standalone hourly alerter (optional, see phase0/INSTALL.md)
+phase1/   api.py                control plane: report ingest, intent routing, views, dashboard
+          collector.py          target adapters + action command builders
+          sanoid_parser.py      freshness thresholds from sanoid.conf
+          schema.sql            SQLite schema
+          cairn-token.py  cairn-user.py   token and account admin
+          grant-access.sh  smart-probe.sh  zpool-scrub.sh   one-time read grants + opt-in sudo wrappers
+          notify_selftest.py    delivery self-test behind the Kuma heartbeat
+replication/                    the vault's nightly pull (runner, forced-command wrapper, units)
+tests/  tools/                  pytest suite, CI helpers
 ```
