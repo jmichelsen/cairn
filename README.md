@@ -88,6 +88,7 @@ Prompts read from your terminal even under `curl ... | bash`. The bootstrap clon
 | `./install.sh --update` | Refresh the code (git pull, or a tarball that keeps `config/`) and restart the agent. The dashboard's **Update** button runs this |
 | `./install.sh --smart-detail` | Also install the scoped `smartctl` wrapper for SMART attribute tables |
 | `./install.sh --check` | Preflight only, changes nothing |
+| `phase1/zfs-perms.py [--apply]` | Show (and grant) the ZFS permissions this host's targets need, see [ZFS permissions](#zfs-permissions) |
 | `./install.sh home --configure` | Re-run configuration. **Destructive:** regenerates every token, so every agent must be re-enrolled |
 | `--yes` / `-y` | Accept defaults, no prompts |
 
@@ -144,6 +145,31 @@ API refuses to queue actions for them, so nothing hangs. Switching to the host a
 API never touches ZFS. Commands are built from the agent's trusted local `targets.yaml`, never
 from the wire. See [docs/architecture.md](docs/architecture.md) for the intent queue, detached
 jobs, auth and pairing (with diagrams).
+
+## ZFS permissions
+
+The agent runs as your normal user, so ZFS has to be told what that user may do (`zfs allow`
+delegation). You don't need to work this out by hand: `phase1/zfs-perms.py` reads this host's
+`targets.yaml`, lists every dataset that needs a grant, why, and what you already hold. The
+installer runs it on home and vault and offers to grant what's missing; run it again any time you
+change `targets.yaml`:
+
+```bash
+phase1/zfs-perms.py               # show the plan
+phase1/zfs-perms.py --apply       # grant the missing required ones (one sudo per dataset), then verify
+phase1/zfs-perms.py --apply --all # also the optional Snapshot-button grants
+```
+
+| On this host | Grant | On |
+| --- | --- | --- |
+| Source of a replication (local Replicate, or a vault pulling it) | `snapshot,send,hold` | the source dataset |
+| Destination of a local replication, or a vault's replica (`source_agent:`) | `create,mount,receive,mountpoint` | the destination's pool |
+| Snapshot button on a `zfs-local` dataset (optional) | `snapshot` | that dataset |
+
+It never grants `destroy`, `rollback` or anything else that can delete data, and never grants
+Snapshot on a vault replica (a local snapshot there breaks the next pull). Run it as the agent's
+user, not from a root shell. Linux only lets root mount filesystems, so a dataset a non-root user
+receives may stay unmounted; the data and snapshots are still there.
 
 ## Replication targets (`zfs-repl`)
 
@@ -455,6 +481,7 @@ phase1/   api.py                control plane: report ingest, intent routing, vi
           sanoid_parser.py      freshness thresholds from sanoid.conf
           schema.sql            SQLite schema
           cairn-token.py  cairn-user.py   token and account admin
+          zfs-perms.py          works out and grants the ZFS delegations a host needs
           grant-access.sh  smart-probe.sh  zpool-scrub.sh   one-time read grants + opt-in sudo wrappers
           notify_selftest.py    delivery self-test behind the Kuma heartbeat
 replication/                    the vault's nightly pull (runner, forced-command wrapper, units)
