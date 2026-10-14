@@ -8,6 +8,7 @@
 #
 # Config (default ~/.config/cairn/replication.conf), whitespace-separated, '#' comments ok:
 #   HOME_SSH  user@home-host-or-vpn-addr
+#   PORT      2222                                             # optional: home's SSH port (default 22)
 #   KEY       /path/to/the/pull/private/key
 #   SET       <name> <source-dataset> <dest-dataset> [raw]     # 'raw' => encrypted raw send (-w)
 set -u
@@ -22,15 +23,17 @@ while [ $# -gt 0 ]; do case "$1" in
 esac; shift; done
 [ -f "$CONF" ] || { echo "cairn-pull: no config at $CONF" >&2; exit 2; }
 
-HOME_SSH=""; KEY=""; SETS=()
+HOME_SSH=""; KEY=""; PORT=""; SETS=()
 while read -r kw a b c d _; do
   case "$kw" in
     HOME_SSH) HOME_SSH="$a" ;;
     KEY)      KEY="$a" ;;
+    PORT)     PORT="$a" ;;
     SET)      SETS+=("$a|$b|$c|${d:-}") ;;
     ""|\#*)   : ;;
   esac
 done < "$CONF"
+[ -z "$PORT" ] || [[ "$PORT" =~ ^[0-9]+$ ]] || { echo "cairn-pull: PORT must be a number" >&2; exit 2; }
 [ -n "$HOME_SSH" ] && [ -n "$KEY" ] && [ "${#SETS[@]}" -gt 0 ] \
   || { echo "cairn-pull: config incomplete (need HOME_SSH, KEY, and at least one SET)" >&2; exit 2; }
 command -v syncoid >/dev/null || { echo "cairn-pull: syncoid not installed (apt install sanoid)" >&2; exit 2; }
@@ -45,7 +48,7 @@ command -v syncoid >/dev/null || { echo "cairn-pull: syncoid not installed (apt 
 probe_home() {
   local tries="${PULL_PROBE_TRIES:-4}" wait="${PULL_PROBE_WAIT:-5}" i=1
   while [ "$i" -le "$tries" ]; do
-    if ssh -o BatchMode=yes -o ConnectTimeout=10 -i "$KEY" "$HOME_SSH" true 2>/dev/null; then
+    if ssh -o BatchMode=yes -o ConnectTimeout=10 ${PORT:+-p "$PORT"} -i "$KEY" "$HOME_SSH" true 2>/dev/null; then
       [ "$i" -gt 1 ] && echo "cairn-pull: reached $HOME_SSH on attempt $i/$tries"
       return 0
     fi
@@ -60,6 +63,7 @@ if ! probe_home; then
 fi
 
 COMMON=(--no-privilege-elevation --no-sync-snap --no-stream --sshkey "$KEY")
+[ -n "$PORT" ] && COMMON+=(--sshport "$PORT")
 rc=0; ran=0
 for s in "${SETS[@]}"; do
   IFS='|' read -r name src dst raw <<<"$s"

@@ -83,8 +83,8 @@ Prompts read from your terminal even under `curl ... | bash`. The bootstrap clon
 | `./install.sh` | Interactive: asks for the role (`home` or `vault`) |
 | `./install.sh home` | This box = API + dashboard + local agent |
 | `./install.sh vault --config vault-install.conf` | This box = a remote agent, from the bundle home wrote |
-| `./install.sh home --add-vault` | Add a remote vault to an existing home |
-| `./install.sh home --replication [--vault-ssh user@host]` | Set up (or re-sync) the vault's nightly pull, see [replication/README.md](replication/README.md) |
+| `./install.sh home --add-vault` | Add a remote vault to an existing home (a vault on another SSH port: `user@host:2222` at the prompt, or `--vault-port`) |
+| `./install.sh home --replication [--vault-ssh user@host[:port]] [--home-port N]` | Set up (or re-sync) the vault's nightly pull, see [replication/README.md](replication/README.md). Non-standard SSH ports work both ways |
 | `./install.sh --update` | Refresh the code (git pull, or a tarball that keeps `config/`) and restart the agent. The dashboard's **Update** button runs this |
 | `./install.sh --smart-detail` | Also install the scoped `smartctl` wrapper for SMART attribute tables |
 | `./install.sh --check` | Preflight only, changes nothing |
