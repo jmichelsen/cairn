@@ -1081,8 +1081,9 @@ def fleet_doctor(conn, now=None):
     agents behind the server version. Each finding: {severity, agent, target, problem, fix}."""
     now = now or int(time.time())
     out = []
-    def add(sev, agent, target, problem, fix):
-        out.append({"severity": sev, "agent": agent, "target": target, "problem": problem, "fix": fix})
+    def add(sev, agent, target, problem, fix, kind="config"):
+        out.append({"severity": sev, "agent": agent, "target": target, "problem": problem, "fix": fix,
+                    "kind": kind})
     states = {a["name"]: a for a in agent_states(conn, now)}
     known = sorted(states)
     for a in conn.execute("SELECT name,host_conflict,host_conflict_ts FROM agents").fetchall():
@@ -1100,10 +1101,10 @@ def fleet_doctor(conn, now=None):
             vt = lambda x: tuple(int(p) for p in x.split(".") if p.isdigit())
             if vt(v) < vt(sv):
                 add("WARN", st["name"], None, f"agent '{st['name']}' runs {v}, the server runs {sv}",
-                    "press Update on its Agents row, or git pull + restart the agent on that host")
+                    "press Update on its Agents row, or git pull + restart the agent on that host", "version")
             else:
                 add("WARN", st["name"], None, f"agent '{st['name']}' runs {v}, newer than the server ({sv})",
-                    "rebuild the API on its host: git pull, then `podman compose up -d --build api`")
+                    "rebuild the API on its host: git pull, then `podman compose up -d --build api`", "version")
     rows = latest_status(conn)
     repl = [r for r in rows if r["type"] == "zfs-repl"]
     local = [r for r in rows if r["type"] == "zfs-local"]
@@ -4410,7 +4411,8 @@ def index(request: Request):
             'within a poll interval; if it persists, check the Agents section for a stale agent.</div>')
 
     with db() as conn:
-        cfg_problems = [f for f in fleet_doctor(conn) if f["severity"] != "INFO"]
+        # version drift has its own update pill on the Agents row; the banner is for configuration
+        cfg_problems = [f for f in fleet_doctor(conn) if f["severity"] != "INFO" and f["kind"] != "version"]
     cfg_banner = ""
     if cfg_problems:
         n = len(cfg_problems)
