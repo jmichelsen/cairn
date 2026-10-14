@@ -650,7 +650,7 @@ CAIRN_ENROLL_SECRET=$SECRET
 EOF
   chmod 600 "$BUNDLE"; ok "wrote $BUNDLE"
 
-  if askyn "configure the vault now over SSH from here?" n; then
+  if askyn "configure the vault now over SSH from here? (no = copy the bundle there yourself)" y; then
     ask VAULT_SSH "vault ssh target (user@host, or user@host:port)" "$VAULT_SSH${VAULT_PORT:+:$VAULT_PORT}"
     split_vault_port
     [ -n "$VAULT_SSH" ] || { warn "no ssh target - bundle is ready to copy manually instead"; return; }
@@ -784,6 +784,15 @@ provision_replication() {
     if [ "$have" = 1 ]; then ok "vault: create,mount,receive,mountpoint already delegated on $p"
     else printf '   \033[1;35m>>> vault sudo (delegate receive on %s) <<<\033[0m\n' "$p"
       vssh -t "$ssh_t" "sudo zfs allow $vuser create,mount,receive,mountpoint $p" <"$TTY" && ok "vault: delegated receive on $p" || warn "vault: could not delegate receive on $p"; fi
+  done
+
+  # 4b. VAULT: create each dest's PARENT (zfs receive won't create missing parents), never the dest
+  # itself: the first pull creates that. -u: don't mount (a non-root user can't).
+  local par d
+  for d in $(echo "$sets" | awk 'NF{print $3}'); do
+    par="${d%/*}"; [ "$par" = "$d" ] && continue
+    vssh "$ssh_t" "zfs list -H -o name '$par' >/dev/null 2>&1 || zfs create -p -u '$par'" 2>/dev/null \
+      && ok "vault: parent $par ready" || warn "vault: couldn't create $par - create it there: sudo zfs create -p $par"
   done
 
   # 5. VAULT: push the runner + units, write the conf, enable the nightly timer

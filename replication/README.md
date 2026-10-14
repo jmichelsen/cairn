@@ -33,8 +33,9 @@ home's existing snapshots (e.g. sanoid's) and creates none of its own.
 **Reachability probe.** Before any syncoid run it SSHes to home with the pull key and runs `true`
 (permitted by the forced command), so it tests the whole path: route, sshd, key auth, forced command.
 It retries `PULL_PROBE_TRIES` times (default 4), `PULL_PROBE_WAIT` seconds apart (default 5), to
-absorb a cold VPN tunnel that drops the first packet. If every try fails it exits **3** (home
-unreachable), distinct from exit 1 (a set failed) and exit 2 (config or usage error).
+absorb a cold VPN tunnel that drops the first packet, printing ssh's own error each time. If every
+try fails it exits **3** (home unreachable). A host-key or login failure stops at once with exit
+**4** (retrying can't help). Exit 1 means a set failed, exit 2 a config or usage error.
 
 ## Dashboard pull ("Replicate now")
 
@@ -51,7 +52,7 @@ the vault's `zfs-local` target that same name. The vault agent must be execute-c
   wrapper, which allows only read-only zfs/zpool + probes. This forced command is the real limit on
   what the key can do.
 - **Delegation:** the installer gives home's login user `zfs allow send,snapshot,hold` on each
-  source pool, only if `send` isn't delegated already. That user is your normal login, so
+  source pool, where any of them is missing. That user is your normal login, so
   delegation is not a hard backstop; the forced command is. The vault user gets
   `create,mount,receive,mountpoint` on each dest pool. No sudo at run time.
 - **Pipeline, not plain send:** the wrapper is pipeline-aware - it permits syncoid's normal
@@ -81,9 +82,15 @@ is dropped, with a warning naming it. It:
 5. **home:** authorizes it as `restrict,command="…/pull-command.sh" <pubkey>`;
 6. **vault:** `zfs allow create,mount,receive,mountpoint` on each dest pool, where any of them is
    missing;
-7. **vault:** pushes `vault-pull.sh` + the units, writes `~/.config/cairn/replication.conf`, enables
-   the nightly timer;
-8. optionally runs the first pull.
+7. **vault:** creates each dest's parent dataset (never the dest itself), pushes `vault-pull.sh` +
+   the units, writes `~/.config/cairn/replication.conf`, enables the nightly timer;
+8. **vault:** writes home's SSH host key into `~/.ssh/known_hosts`;
+9. **vault:** adds a `zfs-local` for each pulled dataset its `targets.yaml` doesn't watch yet (named
+   like the SET, with `source_agent`), after a backup, and restarts its agent;
+10. offers `phase1/sanoid-setup.py` on home (snapshots for each source) and on the vault (optional
+    pruning of the copies);
+11. records the vault in home's `cairn.env` (`CAIRN_VAULT_SSH`, for the doctor and later re-runs);
+12. optionally runs the first pull.
 
 **Non-standard SSH ports.** Both directions are covered. Home reaches the vault on the port in the
 vault target (`--vault-ssh user@host:2222`, `--vault-port 2222`, or `user@host:2222` at the
@@ -94,8 +101,8 @@ syncoid (`--sshport`). An alias in `~/.ssh/config` with a `Port` line works too.
 **Home's host key.** The pull runs unattended (`BatchMode`), so the vault must already trust home's
 SSH host key for the exact address and port it dials, or every pull fails with "Host key
 verification failed". `install.sh home --replication` writes home's own host keys (from
-`/etc/ssh/ssh_host_*_key.pub`, not a network scan) into the vault's `~/.ssh/known_hosts` as
-`[address]:port`. Change the address or port later and re-run it. The pull exits **3** when home
+`/etc/ssh/ssh_host_*_key.pub`, not a network scan) into the vault's `~/.ssh/known_hosts` for that
+address (as `[address]:port` when the port isn't 22). Change the address or port later and re-run it. The pull exits **3** when home
 can't be reached (it retries first) and **4** when it reached home but couldn't log in (host key or
 key refused; no retry), printing ssh's own error either way.
 
@@ -105,7 +112,8 @@ receives unless its own sanoid prunes them (prune-only: `autosnap = no`, never s
 copy). `--replication` offers `phase1/sanoid-setup.py` on both boxes for this; the vault side is
 optional and defaults to keeping everything.
 
-**Don't create the dest dataset yourself.** The first pull creates it. If it already exists with no
+**Don't create the dest dataset yourself.** The first pull creates it (its parent must exist;
+`--replication` creates that). If it already exists with no
 snapshots (made by hand), syncoid refuses to overwrite it; the pull skips that SET with an
 explanation and the commands to check and remove it, and `phase1/doctor.py` on the vault flags it
 before the first pull. Neither ever destroys anything. An interrupted first pull (which resumes) is
@@ -114,7 +122,5 @@ not affected.
 For the per-dataset permissions both sides need, `phase1/zfs-perms.py` on each host shows and
 grants them (see the main README's *ZFS permissions*).
 
-It does NOT: import the vault's data pool, `apt install sanoid` on the vault (the installer's optional
-toolchain step offers that), or add the replica datasets to the **vault's** `targets.yaml` as
-`zfs-local`. Add them, named the same as their SETs, so the dashboard shows whether the off-site copy
-is current and can pull it on demand.
+It does NOT import the vault's data pool or install sanoid there: `./install.sh vault` (which
+`--add-vault` runs for you) installs sanoid, since the pull needs its syncoid.

@@ -30,7 +30,7 @@ flowchart LR
   subgraph home["Home host (execute-capable agent)"]
     direction TB
     api["Control plane<br/>FastAPI + SQLite<br/>dashboard + JSON API"]
-    la["Agent: local"]
+    la["Agent: home<br/>(its hostname)"]
     src[("Source pool<br/>datasets A / B / C")]
     ext[["Removable 2nd-leg<br/>(USB, non-ZFS)"]]
   end
@@ -118,7 +118,7 @@ Every other route needs a token with the right role:
 | --- | --- | --- |
 | **admin** | the bootstrap `CAIRN_ADMIN_TOKEN` (hashed at startup), an admin account, or a minted admin token | everything: views + queue actions + mint tokens |
 | **viewer** | a viewer account or a read-only token | GET the dashboard and API; no actions, no token routes |
-| **agent** | a static token from `CAIRN_AGENT_TOKENS`, a minted token, or a one-time enrollment secret it trades for a 24h access token | report status, poll/claim intents, post results - nothing else |
+| **agent** | a static token from `CAIRN_AGENT_TOKENS`, a minted token, or a long-lived enrollment secret it trades for 24h access tokens (re-enrolling whenever one is refused) | report status, poll/claim intents, post results - nothing else |
 
 Per-agent tokens are individual rows, so any one token can be revoked without touching the others.
 A dedicated, single-purpose **CI token** may push pipeline status to one route and nothing else, so
@@ -175,24 +175,25 @@ flowchart LR
   subgraph vault["Vault agent"]
     l["zfs-local<br/>replica-dataset"]
   end
-  r -. "dest lives on the other host<br/>(can't compute lag locally → UNKNOWN)" .-> l
-  l --> pair["Pair card severity<br/>defers to the off-site copy"]
+  r -. "dest lives on the other host<br/>(dest_agent: reports source freshness)" .-> l
+  l --> pair["Pair card severity<br/>worse of the two halves"]
 ```
 
-The sending host can't measure replication lag once the destination lives on a different agent, so
-its half reports **UNKNOWN** by design. The pair's severity therefore **defers to the off-site
-copy** - the meaningful end-to-end 3-2-1 signal (it goes stale if the source stops snapshotting
-*or* the pull stalls). The hero counters are pair-aware, so a merged pair is counted once, at its
-off-site half.
+The sending host can't measure replication lag once the destination lives on a different agent.
+With `dest_agent` set, its half reports its own **source-snapshot freshness** instead ("paired →
+vault"), and the pair shows the **worse of the two halves**. Without `dest_agent` it can only say
+UNKNOWN, and the pair then takes the off-site copy's severity, the end-to-end 3-2-1 signal (it goes
+stale if the source stops snapshotting *or* the pull stalls). The hero counters are pair-aware, so
+a merged pair is counted once.
 
 <img src="img/pair-card.png" width="380" alt="A replication pair card: source and off-site half, dataset size, tier badge">
 
 *A pair card: the two halves (source + off-site copy), the source dataset size for capacity
-planning, and a tier badge - severity defers to the off-site half.*
+planning, and a tier badge.*
 
-When the halves don't join (a dest that differs from the vault's source by one path segment, a
-`dest_agent` typo, a vault target named differently from its pull SET), nothing on either card says
-why. The API's **fleet check** (`fleet_doctor`, served at `GET /api/v1/backup/doctor` and as the
+When the halves don't join (a dest that differs from the vault's source by one path segment), or
+join but don't work (a `dest_agent` typo, a vault target named differently from its pull SET, so its
+Replicate now finds nothing), nothing on either card says why. The API's **fleet check** (`fleet_doctor`, served at `GET /api/v1/backup/doctor` and as the
 dashboard's "configuration problems" banner) compares every agent's latest report against the others
 and names the mismatch and its fix. It also flags two processes reporting under one agent name: the
 report ingest records a hostname flip while the previous host is still reporting (a one-off move to
@@ -284,8 +285,9 @@ This was decided early and deliberately. The reasons, in order of how much they 
   Update makes the vault fetch cairn from its git remote, or GitHub for a copied install, not from
   home.
 
-Hosts do not need a mesh VPN. The installer defaults to home's LAN address for both the API URL and
-the pull's SSH address. A VPN is optional, useful when the vault lives off-site.
+Hosts do not need a mesh VPN. When you add a vault, a blank dashboard URL means home's LAN address
+(`http://<LAN ip>:8929`), and the pull's SSH address defaults to home's LAN address too; a VPN address
+or a public hostname with a port forward works for a vault that lives off-site.
 
 ## CI status without public pipelines
 

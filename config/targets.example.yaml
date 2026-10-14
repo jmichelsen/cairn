@@ -21,8 +21,9 @@ scrub_cadence:
   fast:  { warn_d: 10, crit_d: 24 }   # weekly scrub
 
 targets:
-  # Keys any target may carry: tier, location, backs_up, schedule, note, source_agent,
-  # pre_cmd/post_cmd/hook_actions/hook_timeout_s (see README "Pre/post hooks").
+  # Keys any target may carry: tier, location, backs_up, schedule, note,
+  # pre_cmd/post_cmd/hook_actions/hook_timeout_s (see README "Pre/post hooks"). source_agent goes only
+  # on a vault's receiving zfs-local; dest_agent only on a zfs-repl (see docs/targets.md).
 
   # --- Replicated ZFS datasets: monitors replication LAG (newest snapshot common to src+dst)
   #     and (for encrypted copies) that the destination key stays unavailable. ---
@@ -43,7 +44,9 @@ targets:
   - { name: offsite_photos, type: zfs-repl, source: tank/photos, dest: vault/photos, tier: A,
       dest_agent: vault }
   # ...and in the VAULT's targets.yaml:
-  # - { name: offsite_photos, type: zfs-local, source: vault/photos, source_agent: home }
+  # - { name: offsite_photos, type: zfs-local, source: vault/photos, source_agent: homebox }
+  #   (source_agent = this box's CAIRN_AGENT_NAME: its hostname on a fresh install, "local" on older
+  #   ones; ./install.sh home --replication adds this vault entry for you)
 
   # --- Local pools/datasets: health, capacity, resilver, scrub age (pool roots only) and
   #     snapshot freshness (any dataset). ---

@@ -20,7 +20,7 @@ The full list of target types and keys is in [docs/targets.md](docs/targets.md).
 ## Auth (zero-trust)
 
 Every API request needs a credential except a few public routes (`/login`, `/api/v1/identify`,
-`/badge/*`, and `/enroll` / `/api/v1/ci/status`, which check their own secret). Agents send
+`/badge/*`, and `/api/v1/backup/enroll` / `/api/v1/ci/status`, which check their own secret). Agents send
 `X-Backup-Token`; browsers use a session cookie from `/login`. Roles:
 
 - **agent** (`CAIRN_API_TOKEN` or an enrollment secret on the agent): report, poll and claim
@@ -101,7 +101,7 @@ editing the unit: `systemctl --user daemon-reload && systemctl --user restart ca
 | `CAIRN_SMART_TTL` / `CAIRN_SMART_CACHE` | `86400` / `~/.cache/cairn` | SMART detail cache |
 | `CAIRN_ZPOOL_WRAPPER` | `/opt/cairn/phase1/zpool-scrub.sh` | root-owned scrub wrapper |
 | `CAIRN_SANOID_DERIVE` | `1` | `0` = don't derive freshness from sanoid.conf |
-| `CAIRN_SANOID_CONF` / `_DEFAULTS` | `/etc/sanoid/sanoid.conf` / `sanoid.defaults.conf` | where to read sanoid policy |
+| `CAIRN_SANOID_CONF` / `_DEFAULTS` | `/etc/sanoid/sanoid.conf` / `sanoid.defaults.conf` (in `/etc/sanoid`, else Debian's `/usr/share/sanoid`) | where to read sanoid policy |
 | `CAIRN_MDNS` | `0` | `1` = advertise `_cairn._tcp` for the phone app (only on the agent next to the API; needs `python3-zeroconf`) |
 | `CAIRN_MDNS_ADDR` / `_PORT` | auto / `8929` | address and port to advertise |
 | `CAIRN_USER_AGENT` | `cairn-agent/1.0` | HTTP User-Agent (some proxies block Python's default) |
@@ -130,9 +130,9 @@ Privilege comes from grants, not root:
 
 If you started with the report-only container agent (`docker compose --profile container-agent
 up`), replace it with the host agent to unlock actions, SMART alerts, the zed timeline and the
-recovery browser. **Stop the container agent first:** both report as `local`, so running both
-makes the agent flip between report-only and execute-capable, and clicks intermittently fail with
-"report-only".
+recovery browser. **Stop the container agent first:** both report this host's targets. With the
+same name (`local`) they overwrite each other (actions intermittently fail "report-only"); with
+different names (a fresh host install is named after the hostname) every dataset shows up twice.
 
 The simplest switch is `docker compose --profile container-agent rm -sf agent`, then
 `./install.sh home`. To do it by hand:
@@ -160,9 +160,12 @@ Then click a **safe real action** (e.g. Snapshot on one dataset) and watch it re
 Same `agent.py` on the vault box, pointed at the API's public URL. On home, `./install.sh home
 --add-vault` (or the "add a remote vault?" prompt) mints an enrollment secret and writes a
 `vault-install.conf` bundle; on the vault, `./install.sh vault --config vault-install.conf`
-installs the agent as a user service with its own `config/targets.yaml` (default interval 300 s),
-and an execute-capable vault also gets the scrub wrapper. Replication itself is set up from home,
-see [replication/README.md](replication/README.md).
+installs the agent as a user service with its own `config/targets.yaml` (default interval 300 s).
+`--add-vault` can do the vault side for you over SSH (it runs that install non-interactively). The
+vault install always installs sanoid (the pull needs its syncoid) and makes the agent
+execute-capable by default, so the vault's **Replicate now** and **Scrub** work (answer no for a
+report-only vault); an execute-capable vault also gets the scrub wrapper. Replication itself is set
+up from home, see [replication/README.md](replication/README.md).
 
 - Only **outbound HTTPS** from the vault, nothing inbound at the remote site.
 - The vault agent carries **no SMTP/Gotify creds**; the API does all alerting centrally.
@@ -180,15 +183,15 @@ click will run.
 
 | Action | Button | What the agent runs | Targets |
 | --- | --- | --- | --- |
-| `snapshot` | Snapshot | `zfs snapshot <src>@cairn-manual-<ts>` | any with a dataset `source` |
-| `sync` | Replicate / no-snap | `syncoid --no-privilege-elevation --no-stream [--sendoptions=w] [--no-sync-snap] <src> <dst>` | `zfs-repl` |
+| `snapshot` | Snapshot | `zfs snapshot <src>@cairn-manual-<ts>` | any with a dataset `source`, except a `zfs-local` with `source_agent` (a received copy: refused) |
+| `sync` | Replicate / no-snap | `syncoid --no-privilege-elevation --no-stream [--sendoptions=w] [--no-sync-snap] <src> <dst>` | `zfs-repl` without `dest_agent` (with it, refused: the vault pulls it) |
 | `pull` | Replicate now (vault) | `replication/vault-pull.sh --only <target name>` | vault `zfs-local` |
 | `scrub` | Scrub | `sudo -n /opt/cairn/phase1/zpool-scrub.sh <pool>` | `zfs-local` on a pool root |
 | `backup-now` | Back up now | detached incremental `rsync -aHXh` per confirmed dataset link | `removable` |
 | `removable-scan` | Detect matching datasets | read-only match + `rsync -n` census, pushed as suggestions | `removable` |
 | `removable-verify` | Verify content | read-only census / xattr / hash / content comparison | `removable` |
 | `removable-relocate` | Move under cairn/ | renames a tree on the drive into `cairn/<host>/<dataset>` | `removable` |
-| `recover-points` | Points | `zfs list -Hp -t snapshot -o name,creation -s creation -d 1 <src>` | dataset targets |
+| `recover-points` | Snapshots | `zfs list -Hp -t snapshot -o name,creation -s creation -d 1 <src>` | dataset targets |
 | `recover-search` / `recover-deleted` | Versions / Deleted | `httm ...` (see Recovery) | dataset targets |
 | `recover-versions` / `recover-dirtree` / `recover-walk` | Scan here / browse / Refresh | httm scans and folder-tree builds stored on the API | dataset targets |
 | `restore` | Restore | copy a snapshot version into `.cairn-restores/` (see Recovery) | dataset targets |
@@ -228,7 +231,7 @@ Pre/post hooks are listed, not run. Self-update ignores dry-run.
 ## Recovery (httm)
 
 Recovery is exposed as agent actions (same intent/allowlist path, so it inherits auth + routing).
-Buttons per dataset target: **Points / Deleted / Versions**, plus **Restore**.
+Buttons per dataset target: **Snapshots / Deleted / Versions**, plus **Restore**.
 
 | Action | Command the agent runs | Notes |
 | --- | --- | --- |
@@ -252,12 +255,12 @@ fills in Versions on demand. The API also caches listing results for `CAIRN_RECO
 (600 s) and merges duplicate clicks.
 
 **Perf caveat:** httm browses `.zfs/snapshot`, which **auto-mounts every snapshot**: slow on
-datasets with many snapshots (tens of seconds to minutes the first time). Use **Points** for the
+datasets with many snapshots (tens of seconds to minutes the first time). Use **Snapshots** for the
 common "when can I recover from" question. The vault contributes recovery-point *timestamps* only
 (ciphertext at rest; file-level recovery from it means pulling a snapshot home).
 
 **httm is optional.** Without it (not installed, or `CAIRN_HTTM=0`) everything else works:
-monitoring, actions, **Points**, restore and the folder tree. Only **Deleted** / **Versions** /
+monitoring, actions, **Snapshots**, restore and the folder tree. Only **Deleted** / **Versions** /
 version search need it; they report "httm is disabled/not installed" instead of running, and the
 nightly deleted-files scan records that and moves on. To opt out on the host agent, add
 `CAIRN_HTTM=0` to `config/cairn.env` (or `Environment=CAIRN_HTTM=0` in the unit), then restart the
@@ -277,7 +280,7 @@ usually shows a "blocked for more than 120 seconds" trace naming the ZFS call.
 2. Turn Dry-run off and click again: syncoid takes a fresh snapshot, sends it, and the lag resets.
 
 (A common cause of "lag" is a dataset that replicates fine but stopped being snapshotted, i.e. it
-isn't in `sanoid.conf`, so the real fix is to add it there.)
+isn't in `sanoid.conf`, so the real fix is to add it there: `phase1/sanoid-setup.py` writes the entry.)
 
 ## Renaming an agent
 
