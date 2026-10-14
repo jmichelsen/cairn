@@ -91,6 +91,7 @@ Prompts read from your terminal even under `curl ... | bash`. The bootstrap clon
 | `./install.sh --check` | Preflight only, changes nothing |
 | `phase1/zfs-perms.py [--apply]` | Show (and grant) the ZFS permissions this host's targets need, see [ZFS permissions](#zfs-permissions) |
 | `phase1/sanoid-setup.py [--print]` | Wizard: asks what snapshot schedule each dataset cairn watches should get (sanoid's example policies) and writes the sanoid.conf entries, see [docs/getting-started.md](docs/getting-started.md#4-snapshot-on-a-schedule-sanoid) |
+| `phase1/cairn-agent-rename.py OLD NEW` | Rename an agent without losing its history (run in the API container, agent stopped), see [AGENT.md](AGENT.md#renaming-an-agent) |
 | `phase1/doctor.py` | Check this host's whole setup and list every problem with its fix, see [Checking a setup](#checking-a-setup-doctor) |
 | `./install.sh home --configure` | Re-run configuration. **Destructive:** regenerates every token, so every agent must be re-enrolled |
 | `--yes` / `-y` | Accept defaults, no prompts |
@@ -543,6 +544,7 @@ phase1/   api.py                control plane: report ingest, intent routing, vi
           cairn-token.py  cairn-user.py   token and account admin
           zfs-perms.py          works out and grants the ZFS delegations a host needs
           doctor.py             checks a host's whole setup, every problem with its fix
+          cairn-agent-rename.py renames an agent in the API database, keeping its history
           sanoid-setup.py       wizard that writes sanoid.conf entries for the datasets cairn watches
           grant-access.sh  smart-probe.sh  zpool-scrub.sh   one-time read grants + opt-in sudo wrappers
           notify_selftest.py    delivery self-test behind the Kuma heartbeat

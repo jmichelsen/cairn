@@ -80,7 +80,7 @@ editing the unit: `systemctl --user daemon-reload && systemctl --user restart ca
 | `CAIRN_API_URL` | `http://localhost:8929` | base URL of the API, e.g. `https://backups.example.com` |
 | `CAIRN_API_TOKEN` | | static agent token (option B) |
 | `CAIRN_ENROLL_SECRET` | | enrollment secret (option A) |
-| `CAIRN_AGENT_NAME` | `local` | unique per agent (`local`, `vault`, ...): the ownership key |
+| `CAIRN_AGENT_NAME` | `local` | unique per agent: the key everything it reports is filed under. `./install.sh home` writes the box's short hostname for a fresh install (older installs and an unset value: `local`); the vault defaults to `vault`. To change it later without losing history, use `phase1/cairn-agent-rename.py` (below) |
 | `CAIRN_TARGETS` | `targets.yaml` beside `agent.py` | the targets this agent manages (the unit points at `config/targets.yaml`) |
 | `CAIRN_CAN_EXECUTE` | `0` | `1` = run actions, `0` = report-only |
 | `CAIRN_INTERVAL` | `900` | seconds between cycles (the shipped home unit uses 120, a vault 300) |
@@ -278,6 +278,26 @@ usually shows a "blocked for more than 120 seconds" trace naming the ZFS call.
 
 (A common cause of "lag" is a dataset that replicates fine but stopped being snapshotted, i.e. it
 isn't in `sanoid.conf`, so the real fix is to add it there.)
+
+## Renaming an agent
+
+An agent's history (targets, status, retired targets, removable links, past actions) is filed under
+its `CAIRN_AGENT_NAME`, so changing only that setting starts its cards over and leaves the old name
+behind as a silent agent that alerts. Rename it in the API's database instead, with the agent stopped:
+
+```bash
+systemctl --user stop cairn-agent                                     # on the agent's host
+docker compose exec api python3 /app/phase1/cairn-agent-rename.py local mclife --dry-run   # API host
+docker compose exec api python3 /app/phase1/cairn-agent-rename.py local mclife             # backs up first
+# on the agent's host: set CAIRN_AGENT_NAME=mclife where the agent reads it (the unit's
+# Environment= line wins over cairn.env), then:
+systemctl --user start cairn-agent
+```
+
+(`podman compose exec ...` with Podman.) It refuses a name already in use, and refuses while the old
+agent is still reporting (it would re-create the old name). Then change any `dest_agent` /
+`source_agent` naming the old agent in other agents' `targets.yaml`; the dashboard's configuration
+banner lists any that are left.
 
 ## Troubleshooting
 

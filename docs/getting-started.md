@@ -128,7 +128,8 @@ the same name as the main box's target, and restart its agent:
   - name: wiki_offsite
     type: zfs-local
     source: tank/homebox/apps/wiki
-    source_agent: local          # the main box agent's name (default "local")
+    source_agent: homebox        # the main box agent's name (its hostname on a fresh install;
+                                 # older installs: "local"). It's CAIRN_AGENT_NAME in its cairn.env
 ```
 
 ## 6. Check everything
