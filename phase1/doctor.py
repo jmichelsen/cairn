@@ -272,8 +272,8 @@ def check_settings(r, uenv):
     if not (os.environ.get("CAIRN_ENROLL_SECRET") or os.environ.get("CAIRN_API_TOKEN")):
         r.fail("no credential: neither CAIRN_ENROLL_SECRET nor CAIRN_API_TOKEN is set",
                "mint one on the API host (phase1/cairn-token.py) and put it in cairn.env")
-    name = os.environ.get("CAIRN_AGENT_NAME", "local")
-    r.info(f"agent name '{name}'" + ("" if "CAIRN_AGENT_NAME" in os.environ else " (default)"))
+    name = (os.environ.get("CAIRN_AGENT_NAME") or "local")
+    r.info(f"agent name '{name}'" + ("" if os.environ.get("CAIRN_AGENT_NAME") else " (default)"))
     if os.environ.get("CAIRN_DRYRUN", "0") == "1":
         r.warn("CAIRN_DRYRUN=1: every dashboard action only logs what it would do",
                "set Environment=CAIRN_DRYRUN=0 in the unit, then restart the agent")
@@ -336,7 +336,7 @@ def check_api(r):
             token = _http("POST", f"{api}/api/v1/backup/enroll", {"X-Backup-Enroll": secret}, b"{}")["access_token"]
         if not token:
             return
-        name = os.environ.get("CAIRN_AGENT_NAME", "local")
+        name = (os.environ.get("CAIRN_AGENT_NAME") or "local")
         who = _http("GET", f"{api}/api/v1/backup/agent/doctor?name={urllib.request.quote(name)}",
                     {"X-Backup-Token": token})
     except urllib.error.HTTPError as e:
@@ -638,7 +638,7 @@ def pull_set_findings(conf, targets, pools):
             out.append(("FAIL", f"target '{name}' watches {t.get('source')} but its SET pulls into {dst}",
                         "make them the same dataset"))
         if not t.get("source_agent"):
-            out.append(("WARN", f"target '{name}' has no source_agent, so its card has no Replicate now button",
+            out.append(("WARN", f"target '{name}' has no source_agent, so cairn doesn't treat it as a pulled copy (its Snapshot isn't refused, and an unpaired card has no Replicate now)",
                         f"add `source_agent: <home agent name>` to '{name}'"))
     for t in locs:
         if t.get("source_agent") and t["name"] not in set_names:
@@ -871,7 +871,7 @@ def compare_vault(home_targets, home_name, v):
 def check_vaults(r, specs, home_targets, offline):
     if offline or not specs:
         return
-    home_name = os.environ.get("CAIRN_AGENT_NAME", "local")
+    home_name = (os.environ.get("CAIRN_AGENT_NAME") or "local")
     for spec in specs:
         dest, port = split_hostport(spec.strip())
         if not dest:

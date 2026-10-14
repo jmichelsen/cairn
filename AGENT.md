@@ -287,7 +287,7 @@ behind as a silent agent that alerts. To rename the main box's agent, run on tha
 the dashboard):
 
 ```bash
-./install.sh --rename-agent mclife
+./install.sh --rename-agent homebox
 ```
 
 It finds the current name (the unit's `Environment=` line, else `cairn.env`, else `local`), shows

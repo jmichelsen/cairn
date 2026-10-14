@@ -24,6 +24,9 @@ import argparse, os, subprocess, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+# Debian keeps zfs/zpool in /usr/sbin, which a normal user's PATH lacks
+os.environ["PATH"] = os.pathsep.join([os.environ.get("PATH", "")] + [d for d in ("/usr/local/sbin", "/usr/sbin", "/sbin")
+                                                                     if d not in os.environ.get("PATH", "").split(os.pathsep)])
 sys.path.insert(0, str(HERE))
 import collector as C  # noqa: E402  (zfs_delegated, run)
 

@@ -11,10 +11,10 @@ Run it ON THE API HOST, inside the API container, with the agent STOPPED:
   # 1. on the agent's host
   systemctl --user stop cairn-agent
   # 2. on the API host (backs up the database first, then renames)
-  docker compose exec api python3 /app/phase1/cairn-agent-rename.py local mclife --force
+  docker compose exec api python3 /app/phase1/cairn-agent-rename.py local homebox --force
   #    (podman: podman compose exec ...; --dry-run first to see what changes; --force because the
   #    agent was only just stopped)
-  # 3. on the agent's host: set CAIRN_AGENT_NAME=mclife where the agent reads it (the unit's
+  # 3. on the agent's host: set CAIRN_AGENT_NAME=homebox where the agent reads it (the unit's
   #    Environment= line wins over cairn.env), then
   systemctl --user start cairn-agent
   # 4. in OTHER agents' targets.yaml: any dest_agent / source_agent naming the old name
