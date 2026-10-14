@@ -374,3 +374,22 @@ def test_local_second_copy_dest_is_a_copy():
           {"name": "v", "type": "zfs-repl", "source": "mcz/v", "dest": "iwolf/v", "dest_agent": "vault"}]
     assert SP.classify(tg, [], {"mcz", "mediaz"}) == [("mcz/m", "original", "m"), ("mcz/v", "original", "v"),
                                                      ("mediaz/m", "copy", None)]
+
+
+def test_wizard_vault_specs_and_remote_command(monkeypatch):
+    monkeypatch.setenv("CAIRN_VAULT_SSH", "a@v1:2222, b@v2")
+    assert wizard.vault_specs(None) == []
+    assert wizard.vault_specs([""]) == ["a@v1:2222", "b@v2"]
+    assert wizard.vault_specs(["c@v3"]) == ["c@v3"]
+    assert wizard.split_hostport("a@v1:2222") == ("a@v1", "2222")
+
+    class A: yes = True; print_only = False
+    cmd = wizard.remote_command("/tmp/cairn-sanoid-setup.x", A)
+    assert "python3 /tmp/cairn-sanoid-setup.x/sanoid-setup.py --targets" in cmd and " --yes" in cmd
+    assert cmd.rstrip().endswith("rm -rf /tmp/cairn-sanoid-setup.x; exit $rc")     # temp copy always removed
+
+
+def test_wizard_print_previews_the_copy_policy_but_yes_leaves_copies():
+    todo = [("rpool/a", "original", "a"), ("tank/c", "copy", "c")]
+    assert wizard.choose(todo, assume_yes=True) == {"rpool/a": ("production", {})}
+    assert wizard.choose(todo, assume_yes=True, preview=True) == {"rpool/a": ("production", {}), "tank/c": ("backup", {})}

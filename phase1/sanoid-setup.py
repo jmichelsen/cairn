@@ -23,6 +23,8 @@ sanoid.conf with sudo, after saving a backup copy.
   phase1/sanoid-setup.py --yes        # the defaults without asking (production; copies left as they are)
   phase1/sanoid-setup.py --print      # only print the entries, change nothing
   phase1/sanoid-setup.py --dataset tank/x   # also offer a dataset no target names
+  phase1/sanoid-setup.py --vault             # then the same on the vault, over ssh (CAIRN_VAULT_SSH)
+  phase1/sanoid-setup.py --vault user@vault:2222 --vault-only   # only the vault
 
 Datasets sanoid.conf already covers (by name, or by a parent with recursive = yes) are left alone.
 The templates are added as template_cairn_<policy> so they never clash with templates you edited.
@@ -95,14 +97,15 @@ def _custom(kind):
     return over
 
 
-def choose(todo, assume_yes):
+def choose(todo, assume_yes, preview=False):
     """{dataset: (policy, overrides)} from the user's answers (or the defaults with --yes)."""
     picks = {}
     for ds, kind, name in todo:
         opts = CHOICES[kind]
         if assume_yes:
-            if opts[0] != "skip":
-                picks[ds] = (opts[0], {})
+            pol = next(o for o in opts if o != "skip") if preview else opts[0]
+            if pol != "skip":
+                picks[ds] = (pol, {})
             continue
         print(f"\n  {ds}" + (f"  (target '{name}')" if name else "") +
               ("  - a COPY that pulls write into" if kind == "copy" else "  - data that lives on this box"))
@@ -151,14 +154,88 @@ def write(conf, text):
 
 
 def main():
+    sys.stdout.reconfigure(line_buffering=True)
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--targets", default=os.environ.get("CAIRN_TARGETS") or str(HERE.parent / "config" / "targets.yaml"))
     ap.add_argument("--conf", default=os.environ.get("CAIRN_SANOID_CONF", "/etc/sanoid/sanoid.conf"))
     ap.add_argument("--yes", action="store_true", help="use the defaults without asking (still writes)")
     ap.add_argument("--print", dest="print_only", action="store_true", help="print the entries, change nothing")
     ap.add_argument("--dataset", action="append", default=[], help="also offer this dataset (an original)")
+    ap.add_argument("--vault", nargs="?", const="", action="append", default=None, metavar="USER@HOST[:PORT]",
+                    help="afterwards, run this wizard on the vault too, over ssh (repeatable; bare --vault uses "
+                         "CAIRN_VAULT_SSH from cairn.env)")
+    ap.add_argument("--vault-only", action="store_true", help="with --vault: skip this box, do only the vault(s)")
     a = ap.parse_args()
+    rc = 0 if a.vault_only else setup_here(a)
+    for spec in vault_specs(a.vault):
+        rc = run_on_vault(spec, a) or rc
+    return rc
 
+
+def vault_specs(given):
+    """The vaults to visit: the --vault values, a bare --vault meaning CAIRN_VAULT_SSH (comma-separated)."""
+    if given is None:
+        return []
+    out = []
+    for g in given:
+        if g:
+            out.append(g)
+        else:
+            env = os.environ.get("CAIRN_VAULT_SSH") or _env_file_value("CAIRN_VAULT_SSH")
+            if not env:
+                sys.exit("--vault given without a host and no CAIRN_VAULT_SSH in cairn.env: pass --vault user@host[:port]")
+            out += [x.strip() for x in env.split(",") if x.strip()]
+    return out
+
+
+def _env_file_value(key):
+    p = Path(os.environ.get("CAIRN_ENV") or HERE.parent / "config" / "cairn.env")
+    try:
+        for ln in p.read_text().splitlines():
+            if ln.startswith(key + "="):
+                return ln.split("=", 1)[1].split(" #")[0].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def split_hostport(spec):
+    import re
+    m = re.match(r"^(.+):(\d+)$", spec or "")
+    return (m.group(1), m.group(2)) if m else (spec, "")
+
+
+def remote_command(tmpdir, a):
+    """The shell command run on the vault: the copied wizard against the vault's own targets.yaml
+    (from its agent unit, else ~/cairn/config/targets.yaml), then the temp copy is removed."""
+    flags = " --yes" * a.yes + " --print" * a.print_only
+    return (f'T=$(systemctl --user show cairn-agent.service -p Environment --value 2>/dev/null | tr " " "\\n" '
+            f'| sed -n "s/^CAIRN_TARGETS=//p"); python3 {tmpdir}/sanoid-setup.py --targets "${{T:-$HOME/cairn/config/targets.yaml}}"'
+            f'{flags}; rc=$?; rm -rf {tmpdir}; exit $rc')
+
+
+def run_on_vault(spec, a):
+    """Copy this wizard (+ sanoid_parser) to a temp dir on the vault and run it there with a terminal,
+    so its questions and sudo prompts work. The vault's own cairn checkout is left alone."""
+    dest, port = split_hostport(spec)
+    ssh = ["ssh", "-o", "ConnectTimeout=10"] + (["-p", port] if port else [])
+    print(f"\n>>> sanoid setup on the vault {dest}{' port ' + port if port else ''} "
+          "(a sudo prompt below is the VAULT asking) <<<", flush=True)
+    p = subprocess.run(ssh + ["-o", "BatchMode=yes", dest, "mktemp -d /tmp/cairn-sanoid-setup.XXXXXX"],
+                       capture_output=True, text=True)
+    tmpdir = p.stdout.strip()
+    if p.returncode != 0 or not tmpdir.startswith("/tmp/cairn-sanoid-setup."):
+        print(f"  can't reach {dest} by ssh key: {(p.stderr.strip().splitlines() or ['?'])[-1]}")
+        return 1
+    scp = ["scp", "-q", "-o", "BatchMode=yes"] + (["-P", port] if port else [])
+    if subprocess.run(scp + [str(HERE / "sanoid-setup.py"), str(HERE / "sanoid_parser.py"), f"{dest}:{tmpdir}/"]).returncode:
+        subprocess.run(ssh + [dest, f"rm -rf {tmpdir}"])
+        print(f"  copying the wizard to {dest} failed")
+        return 1
+    return subprocess.run(ssh + ["-t", dest, remote_command(tmpdir, a)]).returncode
+
+
+def setup_here(a):
     targets = []
     try:
         import yaml
@@ -185,12 +262,14 @@ def main():
         print("  sanoid isn't installed: sudo apt install sanoid (then re-run this)")
         if not a.print_only:
             return 1
-    picks = choose(todo, a.yes or a.print_only)
+    picks = choose(todo, a.yes or a.print_only, preview=a.print_only)
     if not picks:
         print("\n  nothing chosen, nothing written.")
         return 0
     text = SP.render(picks, parsed, header=f"\n# --- added by cairn sanoid-setup {time.strftime('%Y-%m-%d')} ---")
-    print("\n  These entries go at the end of " + str(conf) + ":\n")
+    print("\n  These entries go at the end of " + str(conf) + ":\n" if not a.print_only else
+          "\n  With the suggested policies (originals: production; copies: backup, which you'd have to "
+          "choose: by default copies are left alone), these entries would go at the end of " + str(conf) + ":\n")
     print("\n".join("    " + ln for ln in text.strip("\n").splitlines()))
     if a.print_only:
         return 0
