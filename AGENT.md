@@ -170,6 +170,21 @@ timeout; use **Points** (instant) for the common browse and reserve search/delet
 actually need file-level history. The vault contributes recovery-point *timestamps* only
 (ciphertext at rest; file-level recovery from it means pulling a snapshot home).
 
+**httm is optional.** Without it (not installed, or `CAIRN_HTTM=0` in the agent's environment)
+everything else works: monitoring, actions, **Points**, restore and the folder tree. Only
+**Deleted** / **Versions** / version search need it; they report "httm is disabled/not installed"
+instead of running, and the nightly deleted-files walk records that and moves on. To opt out on
+the host agent, add `Environment=CAIRN_HTTM=0` under `[Service]` in
+`~/.config/systemd/user/cairn-agent.service`, then
+`systemctl --user daemon-reload && systemctl --user restart cairn-agent`.
+
+**Stuck httm.** If a `.zfs/snapshot` automount wedges in the kernel, httm can't be killed (not even
+SIGKILL) until a reboot. The agent runs each httm in its own transient `systemd-run --user --scope`
+(`cairn-httm-*.scope`), so a stuck one no longer delays agent restarts, and while one is stuck the
+agent skips new httm runs and says so instead of piling up more. Find them with
+`ps -o pid,stat,etime,wchan:32,args -C httm` (state `D` = stuck in the kernel); the kernel log
+usually shows a "blocked for more than 120 seconds" trace naming the ZFS call.
+
 ## Testing safely - dry-run first
 
 To exercise an action button end to end without touching data:
