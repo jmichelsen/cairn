@@ -2,8 +2,9 @@
 #
 # Architecture: the API is a pure control plane - it stores state, serves the dashboard, routes
 # intents, and dispatches alerts. It NEVER touches ZFS/borg/disks. All host work is done by
-# AGENTS that talk to it over HTTP. This compose runs the API + the LOCAL agent. A remote vault
-# runs the SAME agent (agent.py) pointed at this API's public URL + a token - no separate design.
+# AGENTS that talk to it over HTTP. By default this compose runs the API only; an optional
+# report-only container agent sits behind the `container-agent` profile. A remote vault runs the
+# SAME agent (agent.py) pointed at this API's URL + a token - no separate design.
 #
 # Setup (all config lives in ONE file - no hidden .env):
 #   cp config/cairn.env.example config/cairn.env   # set the 3 tokens + SMTP/Gotify
@@ -58,9 +59,8 @@ services:
       CAIRN_AGENT_NAME: local
       CAIRN_TARGETS: /config/targets.yaml
       CAIRN_INTERVAL: "900"
-      # Report-only by default. To let this agent EXECUTE actions (syncoid/scrub/snapshot) it needs
-      # ZFS WRITE privilege - set CAIRN_CAN_EXECUTE=1 AND add cap_add: [SYS_ADMIN] below (or, safer,
-      # run agent.py directly on the host as root instead of in this container).
+      # Report-only. Leave this at 0: the image has no syncoid, rsync, sudo, httm or journalctl, so
+      # actions cannot run in this container. To run actions, use the host agent (AGENT.md).
       CAIRN_CAN_EXECUTE: "0"
     devices:
       - /dev/zfs:/dev/zfs                       # ZFS reads (unprivileged)
@@ -75,8 +75,6 @@ services:
       # + /etc/machine-id:ro instead and add journalctl to the image, or use the host agent.
       - /var/log/kern.log:/var/log/kern.log:ro
       # SMART (optional): cap_add: [SYS_RAWIO] + devices: [/dev/sda, ...]
-    # To enable local actions in-container (instead of a host agent):
-    # cap_add: [SYS_ADMIN]
     restart: unless-stopped
     depends_on: [api]
 

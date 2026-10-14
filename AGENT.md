@@ -5,205 +5,287 @@ vault - and talks to the API over HTTP. There is no separate local vs remote des
 file-based path.
 
 Two capabilities:
-- **report** (always): collect this host's backup status and POST it to the API.
+- **report** (always): collect this host's backup status every `CAIRN_INTERVAL` seconds and POST
+  it to the API.
 - **execute** (opt-in, `CAIRN_CAN_EXECUTE=1`): poll the API for intents assigned to this agent, run
   them, POST results. Commands are built from **this agent's trusted local `targets.yaml`**,
   never from the wire.
 
-Intent routing is self-organizing: whatever an agent reports, it owns - the API routes that
-target's action intents back to it (`targets.agent`).
+Intent routing is self-organizing: whatever an agent reports, it owns, and the API routes that
+target's action intents back to it. A target removed from an agent's `targets.yaml` disappears from
+the dashboard at that agent's next report.
+
+The full list of target types and keys is in [docs/targets.md](docs/targets.md).
 
 ## Auth (zero-trust)
 
-Every API request needs a token - no request is trusted for being local. Two roles:
-- **agent token** (`CAIRN_API_TOKEN` on the agent) - may only `report` / poll `intents` / post
-  `results`. A leaked agent token (e.g. from the remote vault) **cannot** read the dashboard or
-  queue actions.
-- **admin token** (`CAIRN_ADMIN_TOKEN` on the API) - dashboard login + read views + queueing actions.
+Every API request needs a credential except a few public routes (`/login`, `/api/v1/identify`,
+`/badge/*`, and `/enroll` / `/api/v1/ci/status`, which check their own secret). Agents send
+`X-Backup-Token`; browsers use a session cookie from `/login`. Roles:
 
-Everything is **hash-at-rest** (the API stores only `sha256(secret)`) and **per-agent** (one
-credential per box, individually revocable). Two ways an agent authenticates:
+- **agent** (`CAIRN_API_TOKEN` or an enrollment secret on the agent): report, poll and claim
+  intents, post results and live progress, and use the agent-side helper routes (removable links,
+  recovery manifests). It **cannot** read the dashboard or queue actions.
+- **viewer**: read-only dashboard and views (share links, read-only phones).
+- **admin** (`CAIRN_ADMIN_TOKEN`, password accounts with role admin): everything, including
+  queueing actions and managing tokens.
 
-**A. Enrollment (recommended - supports rotation).** Each agent holds a long-lived **enrollment
+**Current limitation:** agent tokens are not bound to an agent name. The API trusts the `agent`
+name a report declares, and any agent token can claim another agent's queued intents. Those
+intents still only run if the claiming agent's own `targets.yaml` has a target by that name, but
+treat every agent token as able to speak for every agent, and revoke a leaked one promptly.
+
+Everything is **hash-at-rest** (the API stores only `sha256(secret)`) and **per-credential** (one
+per box, individually revocable). Two ways an agent authenticates:
+
+**A. Enrollment (recommended, supports rotation).** Each agent holds a long-lived **enrollment
 secret** and trades it for a **short-lived access token** via `/enroll`; it re-enrolls
-automatically on any `401`. Mint the secret per box:
+automatically on any `401`. `install.sh vault` sets this up for you. Mint one by hand:
 ```
 # admin API (from anywhere with the admin token):
 curl -X POST -H "X-Backup-Token: $ADMIN" -H 'Content-Type: application/json' \
      -d '{"role":"agent","label":"vault"}' https://backups.example.com/api/v1/backup/tokens
-# or offline on the API host:
-CAIRN_DB=/data/cairn.db phase1/cairn-token.py mint --role agent --label vault
+# or on the API host:
+docker compose exec api python3 /app/phase1/cairn-token.py mint --role agent --label vault
 ```
 Put the secret in the agent's **`CAIRN_ENROLL_SECRET`**. The access token lives only in memory and
-expires (`CAIRN_ACCESS_TTL`, default 24h) - the agent refreshes it silently.
+expires (`CAIRN_ACCESS_TTL`, default 24h); the agent refreshes it silently.
 
-**B. Static token (simplest).** Put a fixed access token in `CAIRN_API_TOKEN` (add it to the API's
-`CAIRN_AGENT_TOKENS`). No rotation. Fine for a trusted local agent.
+**B. Static token (simplest).** Put a fixed token in `CAIRN_API_TOKEN` and list it in the API's
+`CAIRN_AGENT_TOKENS`. No rotation. `install.sh home` uses this for the local agent.
 
-### The three admin operations
+### Managing tokens
 
 | Operation | Command | Effect |
 | --- | --- | --- |
 | **Scheduled rotation** | (automatic) | access tokens expire; the agent re-enrolls. Nothing to do. |
-| **Forced rotation** (a token *leaked*, box is fine) | `POST /api/v1/backup/tokens/<label>/rotate` | kills the current access token now; the leaked copy is dead; the box re-enrolls with its (non-leaked) enrollment secret and resumes. An attacker holding the leaked token is locked out. |
-| **Revoke** (box *compromised* / decommissioned) | `DELETE /api/v1/backup/tokens/<label>` | kills the enrollment secret **and** its access tokens - terminal; the box cannot self-heal. Provision a new credential out-of-band. |
+| **Forced rotation** (a token *leaked*, box is fine) | `POST /api/v1/backup/tokens/<label>/rotate` | kills the current access token now; the box re-enrolls with its (non-leaked) enrollment secret and resumes. |
+| **Revoke** (box *compromised* / decommissioned) | `DELETE /api/v1/backup/tokens/<label>` or `cairn-token.py revoke --label <label>` | kills the secret **and** its access tokens - terminal; provision a new credential out-of-band. |
+| **List** | `GET /api/v1/backup/tokens` or `cairn-token.py list` | labels, roles, kind, last used (never the secret) |
 
-`GET /api/v1/backup/tokens` lists labels/roles/kind/last-used (never the secret). A lockout guard
-refuses to revoke the last active admin. The bootstrap admin comes from `CAIRN_ADMIN_TOKEN` (hashed
-at startup); mint more admins via `POST /tokens {role:"admin", label:"…"}`.
+`cairn-token.py mint --role admin|agent|viewer --label <name>` mints any role (a viewer token never
+expires and can be shared as `/login?token=<token>`). A lockout guard refuses to revoke the last
+active admin. Password accounts are managed with `cairn-user.py`, see the
+[README](README.md#accounts-and-sharing).
 
-## Config (env)
+## Settings (env)
 
-| var | meaning |
-| --- | --- |
-| `CAIRN_API_URL` | base URL of the API (`http://api:8929` locally, `https://host/api/v1/backup`… no - the base, e.g. `https://backups.example.com`) |
-| `CAIRN_API_TOKEN` | bearer token this agent presents (`X-Backup-Token`) |
-| `CAIRN_AGENT_NAME` | unique name (`local`, `vault`, …) - this is the ownership key |
-| `CAIRN_TARGETS` | path to the targets.yaml this agent manages |
-| `CAIRN_CAN_EXECUTE` | `1` to run actions (needs privilege), `0` = report-only |
-| `CAIRN_INTERVAL` | seconds between report+poll cycles |
-| `CAIRN_DRYRUN` | `1` = log the action command instead of running it |
+The host agent's unit (`~/.config/systemd/user/cairn-agent.service`) sets its main settings with
+`Environment=` lines, and the agent also reads `config/cairn.env` (path from `CAIRN_ENV`) for its
+token and anything else. A value set in the unit **wins** over the same name in `cairn.env`. After
+editing the unit: `systemctl --user daemon-reload && systemctl --user restart cairn-agent`.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CAIRN_API_URL` | `http://localhost:8929` | base URL of the API, e.g. `https://backups.example.com` |
+| `CAIRN_API_TOKEN` | | static agent token (option B) |
+| `CAIRN_ENROLL_SECRET` | | enrollment secret (option A) |
+| `CAIRN_AGENT_NAME` | `local` | unique per agent (`local`, `vault`, ...): the ownership key |
+| `CAIRN_TARGETS` | `targets.yaml` beside `agent.py` | the targets this agent manages (the unit points at `config/targets.yaml`) |
+| `CAIRN_CAN_EXECUTE` | `0` | `1` = run actions, `0` = report-only |
+| `CAIRN_INTERVAL` | `900` | seconds between cycles (the shipped home unit uses 120, a vault 300) |
+| `CAIRN_DRYRUN` | `0` | `1` = every action becomes a dry-run (see below) |
+| `CAIRN_ACTION_TIMEOUT` | `7200` | seconds before a running action is killed |
+| `CAIRN_ENV` | `/etc/cairn/cairn.env` | env file to load (the unit points at `config/cairn.env`) |
+| `CAIRN_STATE_DIR` | `~/.local/state/cairn` | detached-job registry and removable rsync logs |
+| `CAIRN_HTTM` | `1` | `0` turns off everything that needs httm (see Recovery) |
+| `CAIRN_HTTM_SCOPE` | `1` | `0` runs httm without its own systemd scope |
+| `CAIRN_RECOVER_WALK_HOURS` | `1-6` | local hours the nightly recovery scan may run (`22-6` wraps) |
+| `CAIRN_RECOVER_WALK_MAX` | `1` | datasets scanned per cycle (`0` = no nightly scan) |
+| `CAIRN_RECOVER_WALK_TIMEOUT` | `900` | seconds per httm scan |
+| `CAIRN_DIRTREE_CAP` | `20000` | folders kept in a dataset's browse tree |
+| `CAIRN_VERS_SCAN_CAP` / `_SHOW_CAP` / `_BUDGET` | `6000` / `1200` / `300` | files scanned, files shown, seconds per Versions scan |
+| `CAIRN_SNAP_CACHE_TTL` | `1800` | seconds a dataset's snapshot list is cached |
+| `CAIRN_SMART_DETAIL` | off (on as root) | `1` = read SMART attribute tables through the sudo wrapper |
+| `CAIRN_SMART_WRAPPER` | `/opt/cairn/phase1/smart-probe.sh` | root-owned smartctl wrapper |
+| `CAIRN_SMART_TTL` / `CAIRN_SMART_CACHE` | `86400` / `~/.cache/cairn` | SMART detail cache |
+| `CAIRN_ZPOOL_WRAPPER` | `/opt/cairn/phase1/zpool-scrub.sh` | root-owned scrub wrapper |
+| `CAIRN_SANOID_DERIVE` | `1` | `0` = don't derive freshness from sanoid.conf |
+| `CAIRN_SANOID_CONF` / `_DEFAULTS` | `/etc/sanoid/sanoid.conf` / `sanoid.defaults.conf` | where to read sanoid policy |
+| `CAIRN_MDNS` | `0` | `1` = advertise `_cairn._tcp` for the phone app (only on the agent next to the API; needs `python3-zeroconf`) |
+| `CAIRN_MDNS_ADDR` / `_PORT` | auto / `8929` | address and port to advertise |
+| `CAIRN_USER_AGENT` | `cairn-agent/1.0` | HTTP User-Agent (some proxies block Python's default) |
+| `BORG_BASE_DIR` / `BORG_CACHE_DIR` | `/tmp/borg-base` / `/tmp/borg-cache` | borg's state while reading repos |
 
 ## Local agent (main host)
 
-The default `docker-compose.yml` runs it (`agent` service, report-only, ZFS reads via
-`/dev/zfs`). To let the **local** agent execute actions you need ZFS write privilege:
-- **Recommended:** run `agent.py` on the host as root (or with `zfs allow` delegation) instead of
-  in the container - `CAIRN_CAN_EXECUTE=1 CAIRN_API_URL=http://localhost:8929 … python3 agent.py`.
-- **Or** add `cap_add: [SYS_ADMIN]` to the agent container and set `CAIRN_CAN_EXECUTE=1` (a heavier
-  trust grant on a container).
+`./install.sh home` installs and starts the host agent as a systemd **user** service
+(`cairn-agent.service`, with linger so it runs at boot), execute-capable, with the API at
+`http://localhost:8929`. That is the recommended setup.
 
-Read-only monitoring needs neither - the container agent reports fine unprivileged.
+Privilege comes from grants, not root:
+- **ZFS actions** use `zfs allow` delegation. For Snapshot and Replicate your user needs
+  `snapshot,send,hold` on source pools and `create,mount,receive,mountpoint` on destination
+  pools (check with `zfs allow <pool>`; grant once as root with `zfs allow -u <you> <perms> <pool>`).
+- **Scrub** isn't delegatable, so it needs `sudo phase1/grant-access.sh --scrub`, which installs a
+  root-owned wrapper (`/opt/cairn/phase1/zpool-scrub.sh`) and a sudoers rule for exactly that. The
+  Scrub button only appears on a pool's root dataset once `sudo -n` can run the wrapper.
+- **Reads** (borg repos, backupninja logs, the kernel log) come from `grant-access.sh`, which the
+  installer runs once. SMART health needs no sudo; the attribute table is opt-in with
+  `--smart-detail`.
 
-## Upgrading past read-only (RO container → host agent)
+## Upgrading past read-only (container to host agent)
 
-The default stack runs the agent as an unprivileged **container** - great for monitoring, but its
-action buttons are hidden, SMART is `UNKNOWN`, and kernel-watch needs a log mount. To unlock
-actions / SMART / native journald, replace it with the agent running **on the host**.
+If you started with the report-only container agent (`docker compose --profile container-agent
+up`), replace it with the host agent to unlock actions, SMART alerts, the zed timeline and the
+recovery browser. **Stop the container agent first:** both report as `local`, so running both
+makes the agent flip between report-only and execute-capable, and clicks intermittently fail with
+"report-only".
 
-**Two things the RO→host switch turns on that aren't obvious:**
-
-1. **Stop the container agent first.** Both report under the same `CAIRN_AGENT_NAME` (`local`). If you
-   run *both*, each report flips the target's `can_execute` and ownership on every poll - buttons
-   flicker and intents route unpredictably. The host agent must *replace* the container one, not
-   run alongside it. (The `api` container keeps running - only `agent` stops.)
-2. **`zpool scrub` needs real root; everything else doesn't.** `zfs allow` can delegate
-   snapshot / send / receive / mount, but pool operations (`zpool scrub`) are not delegatable. So a
-   **non-root host agent running as your normal user** already unlocks snapshot, replicate,
-   recovery, and (via the `smart-probe.sh` sudoers wrapper) SMART + kernel-watch - the *only* thing
-   that still needs root is the Scrub button. Prefer the user agent; reach for root only if you want
-   Scrub under the app (or add a single `NOPASSWD: /usr/sbin/zpool scrub *` sudoers line and have
-   `build_command` prefix `sudo`).
-
-**Least-privilege check (do this once):** confirm your user holds the delegations the actions need -
-`zfs allow <srcpool>` should list `send,snapshot,mount`; `zfs allow <dstpool>` should list
-`receive,create,mount`. Missing pieces are granted with `zfs allow -u <you> <perms> <pool>` (needs
-root once).
-
-**The switch (user agent - recommended):**
+The simplest switch is `docker compose --profile container-agent rm -sf agent`, then
+`./install.sh home`. To do it by hand:
 
 ```
 cd ~/cairn
-docker compose --profile container-agent rm -sf agent   # 1. drop the RO container agent (api stays up)
+docker compose --profile container-agent rm -sf agent   # 1. drop the container agent (api stays up)
 ./run-local-agent.sh report             # 2. report once, report-only - proves clean takeover
-./run-local-agent.sh dry                # 3. execute+DRYRUN: buttons appear; a click only LOGS the command
-                                        #    (click one in the UI, verify the [DRYRUN] line, Ctrl-C)
-install -Dm644 cairn-agent.service ~/.config/systemd/user/cairn-agent.service
-systemctl --user daemon-reload          # 4. install the persistent unit (shipped: cairn-agent.service)
+./run-local-agent.sh dry                # 3. execute + dry-run: buttons appear, clicks only dry-run
+                                        #    (click one in the UI, read the [DRY-RUN] result, Ctrl-C)
+install -Dm644 cairn-agent.service ~/.config/systemd/user/cairn-agent.service   # assumes ~/cairn
+systemctl --user daemon-reload          # 4. install the persistent unit
 systemctl --user enable --now cairn-agent.service
 loginctl enable-linger "$USER"          #    keep it running across logout/reboot (may need root once)
 ```
 
-Then click a **safe real action** (e.g. Snapshot on one dataset) and watch it reach `done`. The
-unit reads the token from `config/cairn.env`; flip `CAIRN_DRYRUN=1` in it (then
-`systemctl --user restart`) any time you want a rehearsal. `systemctl --user status
-cairn-agent` / `journalctl --user -u cairn-agent -f` for logs.
+Then click a **safe real action** (e.g. Snapshot on one dataset) and watch it reach `done`.
+`systemctl --user status cairn-agent` / `journalctl --user -u cairn-agent -f` for logs.
 
-**Rolling back** is symmetric: `systemctl --user disable --now cairn-agent.service` then
-`docker compose --profile container-agent up -d agent` returns you to the RO container.
+**Rolling back:** `systemctl --user disable --now cairn-agent.service`, then
+`docker compose --profile container-agent up -d agent`.
 
 ## Remote agent (the off-site vault)
 
-Same `agent.py`, on the vault box, pointed at the API's public URL:
-```
-CAIRN_API_URL=https://backups.example.com \
-CAIRN_API_TOKEN=<vault-token> \
-CAIRN_AGENT_NAME=vault \
-CAIRN_TARGETS=/etc/cairn/vault-targets.yaml \
-CAIRN_CAN_EXECUTE=1 \
-python3 agent.py          # or run it under systemd; it loops on CAIRN_INTERVAL
-```
-- Only **outbound HTTPS** from the vault - nothing inbound at the remote site.
-- The vault agent carries **no SMTP/Gotify creds** - the API does all alerting centrally.
-- Its `vault-targets.yaml` defines what it manages (its local pool, its pull jobs) and the fixed
+Same `agent.py` on the vault box, pointed at the API's public URL. On home, `./install.sh home
+--add-vault` (or the "add a remote vault?" prompt) mints an enrollment secret and writes a
+`vault-install.conf` bundle; on the vault, `./install.sh vault --config vault-install.conf`
+installs the agent as a user service with its own `config/targets.yaml` (default interval 300 s),
+and an execute-capable vault also gets the scrub wrapper. Replication itself is set up from home,
+see [replication/README.md](replication/README.md).
+
+- Only **outbound HTTPS** from the vault, nothing inbound at the remote site.
+- The vault agent carries **no SMTP/Gotify creds**; the API does all alerting centrally.
+- Its `targets.yaml` defines what it manages (its local pool, its replicas) and the fixed
   commands it will run. A compromised API can only enqueue menu actions; it can't inject commands.
-- Encrypted zero-knowledge replicas stay ciphertext: the agent reports snapshot timestamps + pool
+- Encrypted zero-knowledge replicas stay ciphertext: the agent reports snapshot timestamps and pool
   health without the key; it never needs to unlock anything.
 
-## Buttons → agent
+## Actions
 
-Dashboard buttons (Snapshot / Replicate +snap / Replicate existing / Scrub) `POST
-/api/v1/backup/actions`. The API queues an intent routed to the target's owning agent; that agent
-picks it up on its next poll, runs it, and the outcome flows back (email on done, email+Gotify on
-fail). Latency to *start* = one poll interval; latency to *know the outcome* = the run itself
-(the agent posts the result immediately).
+Dashboard buttons `POST /api/v1/backup/actions`. The API queues an intent for the target's owning
+agent; that agent picks it up on its next poll, runs it, and posts the result (a failure alerts as
+CRIT, success is an INFO notice). Before you confirm, the dashboard shows the exact command the
+click will run.
 
-## Recovery (Phase 4 - httm)
+| Action | Button | What the agent runs | Targets |
+| --- | --- | --- | --- |
+| `snapshot` | Snapshot | `zfs snapshot <src>@cairn-manual-<ts>` | any with a dataset `source` |
+| `sync` | Replicate / no-snap | `syncoid --no-privilege-elevation --no-stream [--sendoptions=w] [--no-sync-snap] <src> <dst>` | `zfs-repl` |
+| `pull` | Replicate now (vault) | `replication/vault-pull.sh --only <target name>` | vault `zfs-local` |
+| `scrub` | Scrub | `sudo -n /opt/cairn/phase1/zpool-scrub.sh <pool>` | `zfs-local` on a pool root |
+| `backup-now` | Back up now | detached incremental `rsync -aHXh` per confirmed dataset link | `removable` |
+| `removable-scan` | Detect matching datasets | read-only match + `rsync -n` census, pushed as suggestions | `removable` |
+| `removable-verify` | Verify content | read-only census / xattr / hash / content comparison | `removable` |
+| `removable-relocate` | Move under cairn/ | renames a tree on the drive into `cairn/<host>/<dataset>` | `removable` |
+| `recover-points` | Points | `zfs list -Hp -t snapshot -o name,creation -s creation -d 1 <src>` | dataset targets |
+| `recover-search` / `recover-deleted` | Versions / Deleted | `httm ...` (see Recovery) | dataset targets |
+| `recover-versions` / `recover-dirtree` / `recover-walk` | Scan here / browse / Refresh | httm scans and folder-tree builds stored on the API | dataset targets |
+| `restore` | Restore | copy a snapshot version into `.cairn-restores/` (see Recovery) | dataset targets |
+| `aide-accept` | Accept / Accept all | `sudo -n <check_cmd> --accept [path]` | `aide` |
+
+Snapshot, sync and backup-now can be wrapped in [pre/post hooks](README.md#prepost-hooks-eg-consistent-vm-snapshots).
+
+**Detached jobs.** Back up now can take hours, so it runs as one script in a transient
+`systemd-run --user` unit (`cairn-job-*`, `setsid` if there's no user bus). It survives agent
+restarts and updates; the agent streams rsync progress to the Activity pane and posts the result
+when the job finishes (or gives up on it after 12 h with no result).
+
+**Self-update.** The **Update** button on an agent tile tells that agent, at its next report, to
+run `install.sh --update` in its own transient unit: pull the code, keep `config/`, restart.
+
+## Dry-run
+
+Two switches, same effect: the **Dry-run** box in the dashboard's top bar (per click), or
+`CAIRN_DRYRUN=1` (every action on that agent). For the host agent set it in the unit file
+(`Environment=CAIRN_DRYRUN=1`, then `daemon-reload` and restart): the unit's own
+`CAIRN_DRYRUN=0` line wins over `cairn.env`. `./run-local-agent.sh dry` runs a dry-run agent by
+hand.
+
+A dry-run never runs the mutating command. The result starts with
+`[DRY-RUN] would run: <command>`, followed by a real read-only probe where one exists:
+
+- `sync`: `zfs send -nvP` estimate of exactly what would be sent (or "already up to date" /
+  "diverged").
+- `scrub`: `zpool status <pool>`.
+- `backup-now`: `rsync -n` per dataset link.
+- `snapshot`, `pull`, `restore`, `aide-accept`, `removable-relocate`: a note describing what would
+  happen.
+- Recovery listings, removable scan and verify are read-only, so they run normally.
+
+Pre/post hooks are listed, not run. Self-update ignores dry-run.
+
+## Recovery (httm)
 
 Recovery is exposed as agent actions (same intent/allowlist path, so it inherits auth + routing).
-Buttons per dataset target: **Points / Deleted / Versions**, plus `restore` via the API.
+Buttons per dataset target: **Points / Deleted / Versions**, plus **Restore**.
 
 | Action | Command the agent runs | Notes |
 | --- | --- | --- |
-| `recover-points` | `zfs list -t snapshot` | **fast** - no snapshot automount; the quick "when can I recover from" browse |
+| `recover-points` | `zfs list -Hp -t snapshot -o name,creation -s creation -d 1 <src>` | **fast**, no snapshot automount |
 | `recover-search {path}` | `httm --json --recursive <mp>/<path>` | versions of a file/dir across snapshots |
-| `recover-deleted {path?}` | `httm --deleted=only --recursive --json …` | files gone from live but present in snapshots |
-| `restore {version, dest?}` | `cp -av --no-clobber` snapshot→staging | **copy-only**, never overwrites live; defaults to `<mp>/.cairn-restores/` |
+| `recover-deleted {path?}` | `httm --deleted=only --recursive --json <mp>/<path>` | files gone from live but present in snapshots |
+| `recover-versions {path}` | enumerates files itself, then `httm --json --omit-ditto` in batches of 400 | the Versions browser; merged into a stored manifest |
+| `restore {version}` | `mkdir -p <mp>/.cairn-restores` then `cp -av --no-clobber <version> <mp>/.cairn-restores/<name>.restored-<ts>` | **copy-only**, never overwrites a live file |
 
-Guardrails: user-supplied paths are joined onto the target's dataset mountpoint and **rejected if
-they escape it** (`../`, absolute paths outside the dataset); restore is copy-only to staging.
+httm and the folder walks run under `ionice -c3 nice -n19` when available.
 
-**Perf caveat:** `httm` (search/deleted) browses `.zfs/snapshot`, which **auto-mounts every
-snapshot** - slow on datasets with many sanoid snapshots (tens of seconds to minutes the first
-time). That's why recovery runs as async agent actions (never blocking the API) with a long
-timeout; use **Points** (instant) for the common browse and reserve search/deleted for when you
-actually need file-level history. The vault contributes recovery-point *timestamps* only
+Guardrails: user-supplied paths (the browse path, the version, an API-supplied restore `dest`) are
+resolved and **rejected if they leave the dataset's mountpoint**.
+
+**Nightly scan.** Between `CAIRN_RECOVER_WALK_HOURS` (default 1-6 local time), the agent refreshes
+each dataset whose scan is older than the API's `CAIRN_RECOVER_WALK_INTERVAL` (default daily),
+`CAIRN_RECOVER_WALK_MAX` per cycle: a deleted-files list (`httm --deleted=only --recursive
+--one-filesystem --no-live --json <mp>`, newest 2000 kept) and a folder tree for browsing. The
+dashboard reads those, so **Deleted** opens instantly; **Refresh** rescans now, and **Scan here**
+fills in Versions on demand. The API also caches listing results for `CAIRN_RECOVER_CACHE_TTL`
+(600 s) and merges duplicate clicks.
+
+**Perf caveat:** httm browses `.zfs/snapshot`, which **auto-mounts every snapshot**: slow on
+datasets with many snapshots (tens of seconds to minutes the first time). Use **Points** for the
+common "when can I recover from" question. The vault contributes recovery-point *timestamps* only
 (ciphertext at rest; file-level recovery from it means pulling a snapshot home).
 
-**httm is optional.** Without it (not installed, or `CAIRN_HTTM=0` in the agent's environment)
-everything else works: monitoring, actions, **Points**, restore and the folder tree. Only
-**Deleted** / **Versions** / version search need it; they report "httm is disabled/not installed"
-instead of running, and the nightly deleted-files walk records that and moves on. To opt out on
-the host agent, add `Environment=CAIRN_HTTM=0` under `[Service]` in
-`~/.config/systemd/user/cairn-agent.service`, then
-`systemctl --user daemon-reload && systemctl --user restart cairn-agent`.
+**httm is optional.** Without it (not installed, or `CAIRN_HTTM=0`) everything else works:
+monitoring, actions, **Points**, restore and the folder tree. Only **Deleted** / **Versions** /
+version search need it; they report "httm is disabled/not installed" instead of running, and the
+nightly deleted-files scan records that and moves on. To opt out on the host agent, add
+`CAIRN_HTTM=0` to `config/cairn.env` (or `Environment=CAIRN_HTTM=0` in the unit), then restart the
+agent.
 
 **Stuck httm.** If a `.zfs/snapshot` automount wedges in the kernel, httm can't be killed (not even
 SIGKILL) until a reboot. The agent runs each httm in its own transient `systemd-run --user --scope`
-(`cairn-httm-*.scope`), so a stuck one no longer delays agent restarts, and while one is stuck the
+(`cairn-httm-*.scope`), so a stuck one doesn't delay agent restarts, and while one is stuck the
 agent skips new httm runs and says so instead of piling up more. Find them with
 `ps -o pid,stat,etime,wchan:32,args -C httm` (state `D` = stuck in the kernel); the kernel log
 usually shows a "blocked for more than 120 seconds" trace naming the ZFS call.
 
-## Testing safely - dry-run first
+## Testing an action safely
 
-To exercise an action button end to end without touching data:
-1. Run the owning agent with `CAIRN_DRYRUN=1 CAIRN_CAN_EXECUTE=1` and click a dataset's
-   **Replicate +snap** - the result shows the exact command it *would* run, e.g.
-   `[DRYRUN] would run: syncoid --no-privilege-elevation --no-stream pool/dataset backup/dataset`.
-2. Drop `CAIRN_DRYRUN` and click again - syncoid takes a fresh snapshot, sends it, and the lag resets.
+1. Turn on **Dry-run** in the top bar and click a dataset's **Replicate**. The result shows
+   the exact command and a `zfs send -nvP` estimate of what it would send.
+2. Turn Dry-run off and click again: syncoid takes a fresh snapshot, sends it, and the lag resets.
 
-(A common cause of "lag" is a dataset that replicates fine but stopped being snapshotted - i.e. it
-isn't in `sanoid.conf` - so the real fix is to add it there and to `syncoid.service`.)
+(A common cause of "lag" is a dataset that replicates fine but stopped being snapshotted, i.e. it
+isn't in `sanoid.conf`, so the real fix is to add it there.)
 
 ## Troubleshooting
 
-**Borg repos show UNKNOWN / "Restore points: 0".** The nightly borg runs as **root** (via
-`/etc/cron.d/backupninja`); with root's default umask it writes new repo segment files mode `0600`,
-unreadable by the non-root agent - so every borg repo degrades to UNKNOWN and the restore-point
-count drops to 0 (the card's reason says so). **Fix: re-run `sudo phase1/grant-access.sh`** - it
-chmod's the existing files group-readable *and* sets `create_options = --umask 0027` in each borg handler so future
-segments stay readable. (Running the agent as root avoids this but gives up least privilege.)
+**Borg repos show UNKNOWN / "Restore points: 0".** The nightly borg runs as **root**; with root's
+default umask it writes new repo segment files mode `0600`, unreadable by the non-root agent, so
+every borg repo degrades to UNKNOWN and the restore-point count drops to 0 (the card's reason says
+so). **Fix: re-run `sudo phase1/grant-access.sh`.** It makes the existing files group-readable
+(`backup` group, setgid dirs) and adds `--umask 0027` to each backupninja borg handler's create,
+prune and compact options so future segments stay readable. (Running the agent as root avoids
+this but gives up least privilege.)
 
 **Borg still UNKNOWN after grant-access.sh, yet `borg info` works in your shell.** The
 `systemd --user` agent isn't carrying the `backup` group: a user manager started *before* you joined
@@ -212,27 +294,33 @@ around this by wrapping the agent in `sg backup` (re-reads the group list at exe
 alternative is to restart the user manager so it re-reads membership - `sudo systemctl restart
 user@$(id -u).service` (or reboot) - after which the `sg` wrapper is redundant.
 
+**Agent restarts take minutes.** Something in the agent's group won't exit, almost always a stuck
+httm on an agent older than 0.34.4 (see *Stuck httm*). Update the agent; a reboot clears the stuck
+process.
+
 **Replicate warns `cannot destroy snapshots: permission denied`.** The replication still succeeds;
 syncoid just can't prune its old sync-snapshots on the source because the agent user lacks `destroy`
-on that pool (e.g. you deliberately keep the source pool read-only). Either use **no-snap** replication (sends
-existing sanoid snapshots, creates none to prune), or delegate `destroy` *scoped to the replicated
-datasets only* (`zfs allow -u <user> destroy pool/dataset`), never pool-wide.
+on that pool (e.g. you deliberately keep the source pool read-only). Either use **no-snap**
+(sends existing snapshots, creates none to prune), or delegate `destroy` *scoped to the
+replicated datasets only* (`zfs allow -u <user> destroy pool/dataset`), never pool-wide.
 
-**SMART all UNKNOWN as a non-root agent.** SMART reads through a scoped sudoers wrapper - run
-`grant-access.sh`. The agent calls the root-owned `/opt/cairn/phase1/smart-probe.sh` (not
-the user-writable repo copy, which sudoers won't allow); set `CAIRN_SMART_WRAPPER` if you deployed it
-elsewhere.
+**SMART cards show no attribute table.** Default SMART health comes from `smartctl --scan` and
+smartd's journal, without sudo. The per-drive attribute table needs the opt-in wrapper:
+`sudo phase1/grant-access.sh --smart-detail` (or `./install.sh --smart-detail`), and
+`CAIRN_SMART_DETAIL=1` on the agent. The agent calls the root-owned
+`/opt/cairn/phase1/smart-probe.sh`, not the user-writable repo copy; set `CAIRN_SMART_WRAPPER` if
+you deployed it elsewhere.
 
-**A target is stuck at an old status, or a renamed target lingers as UNKNOWN.** A target an agent
-stops reporting (a rename like `smart` → `smart:sda`, a removed dataset) freezes at its last status
-forever. Retire it: `UPDATE targets SET enabled=0 WHERE name='<name>'` in the DB (report ingest
-never re-enables it).
+**A card I don't want, or a renamed target lingering.** Remove it from that agent's
+`targets.yaml` and it disappears at the next report. To keep a reported target off the board, use
+the card's **Hide** (unhide from the Hidden pane).
 
 **Encrypted replica fails: "cannot receive incremental stream: inherited key must be loaded".** The
 destination is a zero-knowledge copy (its key is deliberately unavailable). Flag the target
 `encrypted: true` so the agent sends **raw** (`--sendoptions=w`); a non-raw send needs the dest key
 loaded and would defeat the zero-knowledge property.
 
-**Action buttons hang / say "report-only".** The target is owned by a report-only agent
-(`CAIRN_CAN_EXECUTE=0`). Run an execute-capable agent on the owning host - see *Upgrading past
-read-only* above. `zpool scrub` additionally needs real root (pool ops aren't `zfs allow`-able).
+**Action buttons missing or "report-only".** The target is owned by a report-only agent
+(`CAIRN_CAN_EXECUTE=0`). Run an execute-capable agent on the owning host (see *Upgrading past
+read-only*). No **Scrub** button: install the scrub wrapper with `grant-access.sh --scrub`; it only
+appears on a pool's root dataset.
