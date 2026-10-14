@@ -191,6 +191,7 @@ agent (main box and vault), as the agent's user, from the cairn checkout:
 phase1/doctor.py               # everything
 phase1/doctor.py --offline     # skip the API and ssh checks
 phase1/doctor.py --no-collect  # skip the dry collection (the slowest part)
+phase1/doctor.py --problems    # only what needs fixing: WARN/FAIL lines and their fixes (or --warnings, -p)
 phase1/doctor.py --vault user@vault:2222   # main box: also check the vault over ssh
 ```
 
