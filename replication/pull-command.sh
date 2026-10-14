@@ -19,6 +19,8 @@
 #      data pipeline - no arbitrary command, no file access, no shell.
 #   5. The user's zfs delegation (send/snapshot/hold, no destroy/receive) is the backstop under it all.
 # Every attempt (allowed + denied) is logged to $CAIRN_PULL_LOG.
+# A fixed PATH (never the caller's): Debian's sshd gives a normal user no /usr/sbin, where zfs lives.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH
 set -u
 cmd="${SSH_ORIGINAL_COMMAND:-}"
 log="${CAIRN_PULL_LOG:-$HOME/.cairn-pull.log}"

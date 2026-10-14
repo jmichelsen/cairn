@@ -17,6 +17,8 @@
 # vault-install.conf bundle for you to copy, or - if the vault is reachable over SSH - it can
 # ssh-copy-id (so home always connects by key) and push+run the vault install for you.
 set -euo pipefail
+# Debian keeps sanoid/syncoid, backupninja and zfs in /usr/sbin, which a normal user's PATH lacks.
+case ":$PATH:" in *:/usr/sbin:*) ;; *) PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin" ;; esac
 HERE="$(cd "$(dirname "$0")" && pwd)"; cd "$HERE"
 
 # prompt source: the controlling terminal if we truly have one, else stdin (so pipes/CI don't error)
@@ -573,8 +575,17 @@ provision_replication() {
   [ -n "$ssh_t" ] || ask ssh_t "vault ssh target (user@host, or user@host:port)" "$VAULT_SSH${VAULT_PORT:+:$VAULT_PORT}"
   [ -n "$ssh_t" ] || { warn "no vault ssh target - skipping replication"; return; }
   VAULT_SSH="$ssh_t"; split_vault_port; ssh_t="$VAULT_SSH"
-  vssh -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new "$ssh_t" true 2>/dev/null \
-    || { warn "cannot ssh to $ssh_t by key - run --add-vault first, or fix access"; return; }
+  local sshp="${VAULT_PORT:+ port $VAULT_PORT}" err
+  if ! err="$(vssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new "$ssh_t" true 2>&1)"; then
+    warn "cannot ssh to $ssh_t$sshp by key: ${err:-no error text}"
+    info "this must be the VAULT (the box that stores the copies), reachable from here on its own SSH port"
+    if askyn "copy this box's ssh key to $ssh_t$sshp now (asks for its password once)?" y; then
+      vcopyid "$ssh_t" <"$TTY" || warn "ssh-copy-id failed"
+    fi
+    err="$(vssh -o BatchMode=yes -o ConnectTimeout=8 "$ssh_t" true 2>&1)" \
+      || { warn "still cannot ssh to $ssh_t$sshp by key: ${err:-no error text} - fix access and re-run"; return; }
+  fi
+  ok "SSH key auth to $ssh_t$sshp works"
   ensure_opt "command -v rsync >/dev/null" rsync "copying the runner to the vault"
 
   local vuser="${ssh_t%@*}"; [ "$vuser" = "$ssh_t" ] && vuser="$USER"
