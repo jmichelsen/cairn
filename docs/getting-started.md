@@ -14,7 +14,7 @@ check that it worked.
 | **Snapshot** | A frozen, read-only point in time of one dataset (`rpool/apps/wiki@autosnap_2026-10-14_00:00:01_daily`). Cheap, instant, and the unit everything else copies. | sanoid (step 4) |
 | **sanoid** | Takes snapshots on a schedule and deletes old ones, from `/etc/sanoid/sanoid.conf`. Runs every 15 minutes from `sanoid.timer`. **Nothing snapshots a dataset unless sanoid.conf says so.** | `phase1/sanoid-setup.py` (step 4) |
 | **syncoid** | Copies a dataset's snapshots to another pool or box, sending only what changed since the last copy. Comes in the `sanoid` package. | cairn's vault pull (step 5) |
-| **The vault** | A second box, ideally in another building, that **pulls** a copy of your datasets every night. Your main box holds no login to it, so if the main box is compromised the copies are out of its reach. | `./install.sh` (step 5) |
+| **The vault** | A second box, ideally in another building, that **pulls** a copy of your datasets every night. The vault starts every copy, and nothing on the main box can delete what it holds, so a compromised main box can't wipe the backups. [Why pull, and its limits](architecture.md#why-the-vault-pulls-instead-of-home-pushing) | `./install.sh` (step 5) |
 | **cairn** | A dashboard (the **API**, a container on the main box) plus an **agent** on every box that reports what it sees and runs the buttons you press. | `./install.sh` (step 2) |
 
 The flow: your data lives in datasets on the main box → sanoid snapshots them → each night the vault

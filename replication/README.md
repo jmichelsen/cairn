@@ -2,7 +2,9 @@
 
 The 3-2-1 off-site leg: a remote **vault** pulls ZFS datasets from **home** on a nightly timer, over a
 dedicated, strictly-restricted SSH key. Pull (not push) so the vault - typically behind a NAT at a
-friend's house - only makes outbound connections; home never needs an inbound path to the vault.
+friend's house - only makes outbound connections; home never needs an inbound path to the vault,
+and nothing on home can delete the vault's copies. The full reasoning and its limits:
+[docs/architecture.md: Why the vault pulls](../docs/architecture.md#why-the-vault-pulls-instead-of-home-pushing).
 
 ## Pieces
 
