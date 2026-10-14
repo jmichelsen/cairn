@@ -36,7 +36,9 @@ PROTECT_MARKER_FILTER = f"protect {LASTBACKUP_MARKER}"
 
 # ---------- small shell helpers ----------
 def run(cmd, timeout=60, env=None):
-    """Return (rc, stdout, stderr). Never raises on nonzero."""
+    """Return (rc, stdout, stderr). Never raises on nonzero. httm commands go through run_httm()."""
+    if "httm" in cmd:
+        return run_httm(cmd, timeout=timeout, env=env)
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                            env={**os.environ, **(env or {})})
@@ -45,6 +47,103 @@ def run(cmd, timeout=60, env=None):
         return 124, "", "timeout"
     except FileNotFoundError as e:
         return 127, "", str(e)
+
+# ---------- httm isolation ----------
+# httm reads snapshots through .zfs/snapshot, which makes ZFS automount each one. If an automount wedges
+# in the kernel, httm sits in uninterruptible sleep and survives SIGKILL. Inside cairn-agent.service's
+# cgroup that turned every agent stop/restart into a 3-minute wait (90s SIGTERM + 90s SIGKILL timeouts),
+# and each nightly walk could add another stuck process. So: run every httm in its own transient
+# `systemd-run --user --scope` (agent restarts no longer wait on it), never block on a kill that can't
+# land, and skip new httm runs while an earlier one is still wedged.
+HTTM_SCOPE_PREFIX = "cairn-httm-"
+_scope_probe = None
+
+def httm_disabled():
+    """CAIRN_HTTM=0 (or off/no/false) opts this agent out of httm entirely."""
+    return os.environ.get("CAIRN_HTTM", "1").strip().lower() in ("0", "off", "no", "false")
+
+def _scope_ok():
+    """True if `systemd-run --user --scope` works here (needs a user bus). Probed once and cached.
+    CAIRN_HTTM_SCOPE=0 forces it off (tests, hosts where scopes misbehave)."""
+    global _scope_probe
+    if os.environ.get("CAIRN_HTTM_SCOPE", "1") == "0":
+        return False
+    if _scope_probe is None:
+        _scope_probe = False
+        if shutil.which("systemd-run"):
+            try:
+                _scope_probe = subprocess.run(
+                    ["systemd-run", "--user", "--scope", "--quiet", "--collect", "true"],
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=15).returncode == 0
+            except (subprocess.SubprocessError, OSError):
+                pass
+    return _scope_probe
+
+def stuck_httm(proc="/proc"):
+    """PIDs of httm processes left behind by THIS user's cairn agent: comm 'httm' in a cairn-httm-*
+    scope or (from agents before the scope change) in cairn-agent.service. The agent runs httm
+    synchronously, so any such process still alive when it's about to start another is a leftover."""
+    pids, uid = [], os.getuid()
+    try:
+        entries = os.listdir(proc)
+    except OSError:
+        return pids
+    for e in entries:
+        if not e.isdigit():
+            continue
+        d = os.path.join(proc, e)
+        try:
+            if os.stat(d).st_uid != uid:
+                continue
+            with open(os.path.join(d, "comm")) as f:
+                if f.read().strip() != "httm":
+                    continue
+            with open(os.path.join(d, "cgroup")) as f:
+                cg = f.read()
+        except OSError:
+            continue
+        if HTTM_SCOPE_PREFIX in cg or "cairn-agent.service" in cg:
+            pids.append(int(e))
+    return sorted(pids)
+
+def httm_unavailable():
+    """None if httm may run now, else a one-line reason (shown on the dashboard as the action's error)."""
+    if httm_disabled():
+        return "httm is disabled on this agent (CAIRN_HTTM=0)"
+    if not shutil.which("httm"):
+        return "httm is not installed on this agent (optional, see AGENT.md)"
+    stuck = stuck_httm()
+    if stuck:
+        return (f"skipped: an earlier httm (pid {', '.join(map(str, stuck))}) is stuck in the kernel, "
+                "usually a wedged .zfs/snapshot automount; a reboot clears it")
+    return None
+
+def run_httm(cmd, timeout=900, env=None):
+    """run() for httm: refuse when unavailable, isolate in a transient scope, and never hang the agent
+    on a kill that can't land. Returns (rc, stdout, stderr); rc 125 = not run."""
+    why = httm_unavailable()
+    if why:
+        return 125, "", why
+    full = list(cmd)
+    if _scope_ok():
+        unit = f"{HTTM_SCOPE_PREFIX}{os.getpid()}-{time.time_ns()}"
+        full = ["systemd-run", "--user", "--scope", "--quiet", "--collect", f"--unit={unit}"] + full
+    try:
+        p = subprocess.Popen(full, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, env={**os.environ, **(env or {})})
+    except FileNotFoundError as e:
+        return 127, "", str(e)
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return p.returncode, out, err
+    except subprocess.TimeoutExpired:
+        p.kill()
+        try:
+            p.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            return 124, "", (f"timeout after {timeout}s, and httm (pid {p.pid}) ignored SIGKILL: stuck "
+                             "in the kernel, abandoned")
+        return 124, "", "timeout"
 
 def load_env(path="/etc/cairn/cairn.env"):
     p = Path(os.environ.get("CAIRN_ENV", path))
@@ -2548,6 +2647,9 @@ def scan_versions(t, rel, scan_cap=1500, show_cap=300, ver_cap=15, timeout=900, 
     also name a single file. `budget` (seconds) caps total wall-clock across batches so a whole-dataset
     nightly scan can't run away (it stops early and marks the result truncated). Returns (result_dict,
     err); result = {path, files, total, shown, truncated, scanned}."""
+    why = httm_unavailable()
+    if why:
+        return None, why
     src = t.get("source")
     if not src:
         return None, "versions requires a dataset-backed target"

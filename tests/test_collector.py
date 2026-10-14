@@ -920,3 +920,50 @@ def test_aide_accept_command():
     assert collector.build_command("aide-accept", t, {"path": "/etc/hosts"})[0][-1] == "/etc/hosts"
     assert collector.build_command("aide-accept", t, {"path": "--evil"})[0] is None
     assert collector.build_command("aide-accept", {"type": "zfs-local", "source": "p"}, {})[0] is None
+
+
+# ---- httm isolation / opt-out ----
+def _fake_proc(tmp_path, pid, comm, cgroup):
+    d = tmp_path / str(pid)
+    d.mkdir()
+    (d / "comm").write_text(comm + "\n")
+    (d / "cgroup").write_text(cgroup + "\n")
+
+
+def test_stuck_httm_finds_only_cairn_owned_httm(tmp_path):
+    base = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+    _fake_proc(tmp_path, 101, "httm", base + "cairn-agent.service")       # pre-scope leftover
+    _fake_proc(tmp_path, 102, "httm", base + "cairn-httm-5-123.scope")    # scoped, still alive
+    _fake_proc(tmp_path, 103, "httm", base + "vte-spawn-1.scope")         # user's own shell httm
+    _fake_proc(tmp_path, 104, "python3", base + "cairn-agent.service")    # not httm
+    (tmp_path / "self").mkdir()
+    assert collector.stuck_httm(str(tmp_path)) == [101, 102]
+
+
+def test_httm_opt_out_skips_without_running(monkeypatch):
+    monkeypatch.setenv("CAIRN_HTTM", "0")
+    rc, out, err = collector.run(["nice", "-n19", "httm", "--json", "/x"])
+    assert rc == 125 and out == "" and "CAIRN_HTTM=0" in err
+    res, err = collector.scan_versions({"source": "pool/ds"}, "")
+    assert res is None and "disabled" in err
+
+
+def test_httm_skipped_while_earlier_one_is_stuck(monkeypatch):
+    monkeypatch.delenv("CAIRN_HTTM", raising=False)
+    monkeypatch.setattr(collector.shutil, "which", lambda b: "/usr/bin/" + b)
+    monkeypatch.setattr(collector, "stuck_httm", lambda proc="/proc": [4242])
+    rc, _, err = collector.run(["httm", "--json", "/x"])
+    assert rc == 125 and "4242" in err and "stuck" in err
+
+
+def test_run_httm_times_out_without_hanging(monkeypatch):
+    monkeypatch.setenv("CAIRN_HTTM_SCOPE", "0")
+    monkeypatch.setattr(collector, "httm_unavailable", lambda: None)
+    rc, _, err = collector.run_httm(["sleep", "5"], timeout=1)
+    assert rc == 124 and err == "timeout"
+
+
+def test_non_httm_commands_bypass_the_httm_path(monkeypatch):
+    monkeypatch.setenv("CAIRN_HTTM", "0")
+    rc, out, _ = collector.run(["echo", "hi"])
+    assert rc == 0 and out.strip() == "hi"
