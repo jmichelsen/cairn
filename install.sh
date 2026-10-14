@@ -642,6 +642,19 @@ provision_replication() {
   vssh "$ssh_t" 'chmod 600 ~/.config/cairn/replication.conf; chmod +x ~/cairn/replication/vault-pull.sh; systemctl --user daemon-reload && systemctl --user enable --now cairn-pull.timer' 2>&1 | sed 's/^/   /' \
     && ok "vault: nightly pull timer enabled" || warn "vault: timer setup returned non-zero"
 
+  # 6. VAULT: trust THIS home's SSH host key. The pull runs non-interactively (BatchMode), so an
+  # unknown host key fails exactly like an unreachable home. Taken from home's own key files (no
+  # trust-on-first-use scan), for the address and port the vault will dial.
+  local hk="$home_addr" kl; [ -n "$home_port" ] && [ "$home_port" != 22 ] && hk="[$home_addr]:$home_port"
+  kl="$(for f in /etc/ssh/ssh_host_*_key.pub; do [ -r "$f" ] && awk -v h="$hk" '{print h, $1, $2}' "$f"; done)"
+  if [ -n "$kl" ]; then
+    printf '%s\n' "$kl" | vssh "$ssh_t" 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/known_hosts &&
+      while read -r l; do grep -qxF "$l" ~/.ssh/known_hosts || printf "%s\n" "$l" >> ~/.ssh/known_hosts; done' \
+      && ok "vault: trusts this home's SSH host key as $hk" || warn "vault: could not record this home's SSH host key"
+  else
+    warn "can't read /etc/ssh/ssh_host_*_key.pub here; on the vault run once: ssh ${home_port:+-p $home_port }$HOME_SSH true (accept the key)"
+  fi
+
   if askyn "run the first pull now?" y; then
     printf '   \033[1;35m>>> first pull on the vault <<<\033[0m\n'
     vssh "$ssh_t" '~/cairn/replication/vault-pull.sh' 2>&1 | sed 's/^/   /' || warn "first pull returned non-zero (check on the vault)"

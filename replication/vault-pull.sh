@@ -48,18 +48,29 @@ command -v syncoid >/dev/null || { echo "cairn-pull: syncoid not installed (apt 
 # `true` is permitted by the pull forced-command (pull-command.sh), so this tests the full path:
 # VPN route -> sshd -> key auth -> forced command.
 probe_home() {
-  local tries="${PULL_PROBE_TRIES:-4}" wait="${PULL_PROBE_WAIT:-5}" i=1
+  local tries="${PULL_PROBE_TRIES:-4}" wait="${PULL_PROBE_WAIT:-5}" i=1 err
   while [ "$i" -le "$tries" ]; do
-    if ssh -o BatchMode=yes -o ConnectTimeout=10 ${PORT:+-p "$PORT"} -i "$KEY" "$HOME_SSH" true 2>/dev/null; then
+    if err=$(ssh -o BatchMode=yes -o ConnectTimeout=10 ${PORT:+-p "$PORT"} -i "$KEY" "$HOME_SSH" true 2>&1); then
       [ "$i" -gt 1 ] && echo "cairn-pull: reached $HOME_SSH on attempt $i/$tries"
       return 0
     fi
-    echo "cairn-pull: cannot reach $HOME_SSH (attempt $i/$tries) - retrying in ${wait}s" >&2
+    echo "cairn-pull: cannot reach $HOME_SSH${PORT:+ port $PORT} (attempt $i/$tries): ${err##*$'\n'}" >&2
+    case "$err" in *"Host key verification failed"*|*"REMOTE HOST IDENTIFICATION HAS CHANGED"*|*"Permission denied"*)
+      echo "cairn-pull: that is not a network problem, retrying won't help. Host key: run once by hand" \
+           "'ssh ${PORT:+-p $PORT }-i $KEY $HOME_SSH true' and check the key; permission: home's authorized_keys" \
+           "must still have the cairn-pull key" >&2
+      return 2 ;;
+    esac
+    echo "cairn-pull: retrying in ${wait}s" >&2
     sleep "$wait"; i=$((i+1))
   done
   return 1
 }
-if ! probe_home; then
+probe_home; rc=$?
+if [ "$rc" = 2 ]; then
+  echo "cairn-pull: reached $HOME_SSH but could not log in (see above)" >&2
+  exit 4
+elif [ "$rc" != 0 ]; then
   echo "cairn-pull: UNREACHABLE - $HOME_SSH did not answer after ${PULL_PROBE_TRIES:-4} tries (VPN/netbird down?)" >&2
   exit 3
 fi

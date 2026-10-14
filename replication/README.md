@@ -85,6 +85,14 @@ prompt). The vault reaches home on the port you give at the "SSH port" prompt (o
 which is written to `replication.conf` as `PORT` and used for both the reachability probe and
 syncoid (`--sshport`). An alias in `~/.ssh/config` with a `Port` line works too.
 
+**Home's host key.** The pull runs unattended (`BatchMode`), so the vault must already trust home's
+SSH host key for the exact address and port it dials, or every pull fails with "Host key
+verification failed". `install.sh home --replication` writes home's own host keys (from
+`/etc/ssh/ssh_host_*_key.pub`, not a network scan) into the vault's `~/.ssh/known_hosts` as
+`[address]:port`. Change the address or port later and re-run it. The pull exits **3** when home
+can't be reached (it retries first) and **4** when it reached home but couldn't log in (host key or
+key refused; no retry), printing ssh's own error either way.
+
 For the per-dataset permissions both sides need, `phase1/zfs-perms.py` on each host shows and
 grants them (see the main README's *ZFS permissions*).
 
