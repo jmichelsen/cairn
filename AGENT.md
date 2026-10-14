@@ -302,7 +302,8 @@ process.
 
 **`cannot create snapshots : permission denied` (or send/receive denied).** The agent's user lacks
 a ZFS delegation. Run `phase1/zfs-perms.py` as that user: it shows what's missing and why, and
-`--apply` grants it. A grant made from a root shell (`sudo -i`) with `$USER` went to root, not you.
+`--apply` grants it. The agent also checks this every cycle and puts a "ZFS permission missing"
+WARN on the affected card. A grant made from a root shell (`sudo -i`) with `$USER` went to root, not you.
 
 **Replicate warns `cannot destroy snapshots: permission denied`.** The replication still succeeds;
 syncoid just can't prune its old sync-snapshots on the source because the agent user lacks `destroy`

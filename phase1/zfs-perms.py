@@ -12,7 +12,9 @@ then checks again.
   phase1/zfs-perms.py --apply --all    # also the optional Snapshot-button grants
   phase1/zfs-perms.py --user alice     # check/grant for another user (e.g. when run as root)
 
-Required = what replication needs (send side, receive side, a vault pulling from here). Optional =
+Required = what replication needs (send side, receive side, a vault pulling from here); within it,
+`hold`/`mountpoint` (and `snapshot` for a vault pull) are recommended extras that --apply grants too
+but whose absence doesn't break anything, so the agent's dashboard check doesn't warn on them. Optional =
 `snapshot` on a zfs-local target, which only enables its Snapshot button; some pools are kept out
 of reach on purpose, so those are never granted without --all. Grants never include destroy,
 rollback or anything that can delete data. Exit code: 0 when every REQUIRED permission is held
@@ -25,47 +27,33 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import collector as C  # noqa: E402  (zfs_delegated, run)
 
-SEND = ("snapshot", "send", "hold")                     # source side: snapshot + be sent / pulled
-RECV = ("create", "mount", "receive", "mountpoint")     # destination side: receive new datasets
-
-
 def plan(targets, local_pools):
-    """Pure: [(dataset, perms_tuple, [reasons], required)] this host needs, merged per dataset and
-    kind (a dataset can have a required row and a separate optional one). Source-side
-    grants go on the dataset itself (covers its children); receive grants go on the destination's
-    POOL, because receiving a dataset that doesn't exist yet needs `create` on its parent. Datasets
-    on pools that aren't on this host are skipped (they're another agent's job)."""
+    """[(dataset, essential, extra, [reasons], required)] this host needs, merged per dataset and kind
+    (a dataset can have a required row and a separate optional one). The per-target rules live in
+    collector.zfs_perm_needs, shared with the agent's per-cycle check."""
     need = {}
-    def add(ds, perms, why, required=True):
-        if not ds or ds.split("/")[0] not in local_pools:
-            return
-        cur = need.setdefault((ds, required), [[], []])   # optional grants stay in their own row
-        for p in perms:
-            if p not in cur[0]:
-                cur[0].append(p)
-        cur[1].append(why + ("" if required else " (optional)"))
     for t in targets or []:
         if not isinstance(t, dict):
             continue
-        typ, name, src, dst = t.get("type"), t.get("name", "?"), t.get("source"), t.get("dest")
-        if typ == "zfs-local" and src:
-            if t.get("source_agent"):
-                # a replica: receive only. No Snapshot grant - a local snapshot on the receiving side
-                # makes the next incremental pull fail ("destination has been modified").
-                add(src.split("/")[0], RECV, f"{name}: receives replicas from '{t['source_agent']}'")
-            else:
-                add(src, ("snapshot",), f"{name}: Snapshot button", required=False)
-        elif typ == "zfs-repl" and src and dst:
-            if t.get("dest_agent"):
-                add(src, SEND, f"{name}: '{t['dest_agent']}' pulls it from here")
-            else:
-                add(src, SEND, f"{name}: Replicate (send side)")
-                add(dst.split("/")[0], RECV, f"{name}: Replicate (receive side, {dst})")
-    return [(ds, tuple(v[0]), v[1], req) for (ds, req), v in sorted(need.items(), key=lambda kv: (kv[0][0], not kv[0][1]))]
+        for ds, ess, extra, why, req in C.zfs_perm_needs(t, local_pools):
+            cur = need.setdefault((ds, req), [[], [], []])
+            for p in ess:
+                if p not in cur[0]:
+                    cur[0].append(p)
+            for p in extra:
+                if p not in cur[1] and p not in cur[0]:
+                    cur[1].append(p)
+            cur[2].append(why + ("" if req else " (optional)"))
+    rows = []
+    for (ds, req), (ess, extra, why) in sorted(need.items(), key=lambda kv: (kv[0][0], not kv[0][1])):
+        extra = [p for p in extra if p not in ess]     # promoted to essential by another target
+        rows.append((ds, tuple(ess), tuple(extra), why, req))
+    return rows
 
 
 def missing(ds, perms, user, groups):
-    return [p for p in perms if not C.zfs_delegated(ds, p, user, groups)]
+    have = C.zfs_allowed(ds, user, groups)
+    return [p for p in perms if p not in have]
 
 
 def _groups(user):
@@ -79,15 +67,20 @@ def _local_pools():
 
 
 def _report(rows, user, groups):
-    """Print the table; return (required datasets with gaps, optional datasets with gaps)."""
+    """Print the table; return (required datasets with essential gaps, optional datasets with gaps)."""
     gaps = opt = 0
-    for ds, perms, why, req in rows:
-        miss = missing(ds, perms, user, groups)
+    for ds, ess, extra, why, req in rows:
+        miss, rec = missing(ds, ess, user, groups), missing(ds, extra, user, groups)
         if miss:
             gaps += req
             opt += not req
-        state = "OK" if not miss else ("MISSING " if req else "optional, not held: ") + ",".join(miss)
-        print(f"  {ds:<34} {','.join(perms):<34} {state}")
+        if miss:
+            state = ("MISSING " if req else "optional, not held: ") + ",".join(miss)
+        elif rec:
+            state = "OK (recommended: " + ",".join(rec) + ")"
+        else:
+            state = "OK"
+        print(f"  {ds:<34} {','.join(ess + extra):<34} {state}")
         for w in why:
             print(f"      - {w}")
     return gaps, opt
@@ -130,13 +123,14 @@ def main():
         return 1
     sudo = [] if os.geteuid() == 0 else ["sudo"]
     print()
-    for ds, perms, _, req in rows:
-        miss = missing(ds, perms, user, groups)
+    for ds, ess, extra, _, req in rows:
+        miss = missing(ds, ess + extra, user, groups)
         if miss and (req or a.all):
             cmd = sudo + ["zfs", "allow", "-u", user, ",".join(miss), ds]
             print("  $ " + " ".join(cmd))
             if subprocess.run(cmd).returncode != 0:
                 print(f"    failed on {ds}")
+    C._ZALLOW.clear()                                   # re-read, don't trust the pre-grant cache
     print("\nAfter granting:")
     gaps, _ = _report(rows, user, groups)
     print("All required permissions are held." if not gaps

@@ -388,22 +388,97 @@ def _whoami():
         _WHOAMI = (u, out.split() if rc == 0 else [])
     return _WHOAMI
 
+_ZALLOW = {}            # dataset -> (ts, `zfs allow` output); short cache, the per-cycle check reads it
+ZALLOW_TTL = 300
+
+def _zfs_allow_out(ds):
+    hit = _ZALLOW.get(ds)
+    if hit and time.time() - hit[0] < ZALLOW_TTL:
+        return hit[1]
+    rc, out, _ = run(["zfs", "allow", ds])
+    out = out if rc == 0 else None
+    _ZALLOW[ds] = (time.time(), out)
+    return out
+
+def zfs_allowed(ds, user, groups=()):
+    """Set of permissions `user` (directly, via a group, or everyone) holds on `ds` through `zfs allow`,
+    including ones inherited from ancestors (zfs allow lists those too). Empty on any doubt."""
+    out = _zfs_allow_out(ds)
+    if out is None:
+        return set()
+    gset, have = set(groups), set()
+    for raw in out.splitlines():
+        toks = raw.strip().split()
+        if len(toks) >= 3 and ((toks[0] == "user" and toks[1] == user) or (toks[0] == "group" and toks[1] in gset)):
+            have.update(toks[2].split(","))
+        elif len(toks) >= 2 and toks[0] == "everyone":
+            have.update(toks[1].split(","))
+    return have
+
 def zfs_delegated(ds, perm, user, groups=()):
     """True if `user` (or a group they're in, or everyone) holds `perm` on `ds` via `zfs allow` -
     i.e. the user-mode agent can run that zfs verb WITHOUT sudo. Best-effort; False on any doubt."""
-    rc, out, _ = run(["zfs", "allow", ds])
-    if rc != 0:
-        return False
-    gset = set(groups)
-    for raw in out.splitlines():
-        toks = raw.strip().split()
-        if len(toks) >= 3 and toks[0] == "user" and toks[1] == user and perm in toks[2].split(","):
-            return True
-        if len(toks) >= 3 and toks[0] == "group" and toks[1] in gset and perm in toks[2].split(","):
-            return True
-        if len(toks) >= 2 and toks[0] == "everyone" and perm in toks[1].split(","):
-            return True
-    return False
+    return perm in zfs_allowed(ds, user, groups)
+
+def zfs_perm_needs(t, local_pools):
+    """The `zfs allow` grants ONE target needs on this host: [(dataset, essential, extra, why, required)].
+    essential = without it the action fails; extra = granted alongside by zfs-perms.py --apply but not
+    alerted on (hold, mountpoint). required=False only for the optional Snapshot-button grant. Send-side
+    grants go on the dataset (covers its children); receive grants on the destination POOL, since
+    receiving a dataset that doesn't exist yet needs `create` on its parent. Datasets on pools that
+    aren't on this host are skipped (another agent's job). Shared by zfs-perms.py and the agent's
+    per-cycle check, so the two can never disagree."""
+    out = []
+    typ, name, src, dst = t.get("type"), t.get("name", "?"), t.get("source"), t.get("dest")
+    def add(ds, ess, extra, why, req=True):
+        if ds and ds.split("/")[0] in local_pools:
+            out.append((ds, tuple(ess), tuple(extra), why, req))
+    recv = (("create", "mount", "receive"), ("mountpoint",))
+    if typ == "zfs-local" and src:
+        if t.get("source_agent"):
+            # a replica: receive only. No Snapshot grant - a local snapshot on the receiving side
+            # makes the next incremental pull fail ("destination has been modified").
+            add(src.split("/")[0], *recv, f"{name}: receives replicas from '{t['source_agent']}'")
+        else:
+            add(src, ("snapshot",), (), f"{name}: Snapshot button", req=False)
+    elif typ == "zfs-repl" and src and dst:
+        if t.get("dest_agent"):   # the vault pulls with --no-sync-snap: only send is essential here
+            add(src, ("send",), ("snapshot", "hold"), f"{name}: '{t['dest_agent']}' pulls it from here")
+        else:
+            add(src, ("snapshot", "send"), ("hold",), f"{name}: Replicate (send side)")
+            add(dst.split("/")[0], *recv, f"{name}: Replicate (receive side, {dst})")
+    return out
+
+def perm_gaps(t, local_pools, user, groups):
+    """[(dataset, missing_essential, why)] for this target's REQUIRED grants."""
+    gaps = []
+    for ds, ess, _, why, req in zfs_perm_needs(t, local_pools):
+        if req:
+            miss = [p for p in ess if p not in zfs_allowed(ds, user, groups)]
+            if miss:
+                gaps.append((ds, miss, why))
+    return gaps
+
+def _annotate_perm_gaps(st, t, pools):
+    """Per-cycle: WARN a ZFS card whose agent user lacks a delegation its replication needs, with the
+    fix. Skipped for root (needs no delegation)."""
+    if os.geteuid() == 0:
+        return
+    user, groups = _whoami()
+    gaps = perm_gaps(t, set(pools or {}), user, groups)
+    if not gaps:
+        return
+    try:
+        d = json.loads(st.get("detail_json") or "{}")
+    except (ValueError, TypeError):
+        d = {}
+    rs = d.setdefault("reasons", [])
+    for ds, miss, why in gaps:
+        rs.append(f"ZFS permission missing: '{user}' lacks {','.join(miss)} on {ds} "
+                  f"({why.split(': ', 1)[-1]}). Fix: run phase1/zfs-perms.py --apply on this host")
+    d["perm_missing"] = [{"dataset": ds, "perms": miss} for ds, miss, _ in gaps]
+    st["severity"] = worst(st.get("severity") or "OK", "WARN")
+    st["detail_json"] = json.dumps(d)
 
 def can_sudo(cmd_path):
     """True if the agent user may run cmd_path as root with NO password (a provisioned NOPASSWD rule).
@@ -2198,6 +2273,11 @@ def collect_all(cfg, now=None):
                 sts = [dict(severity="UNKNOWN", last_error=f"unknown type {typ}")]
         except Exception as e:
             sts = [dict(severity="UNKNOWN", last_error=f"adapter error: {e}")]
+        if typ in ("zfs-local", "zfs-repl") and sts:
+            try:
+                _annotate_perm_gaps(sts[0], t, pools)
+            except Exception:
+                pass      # a delegation probe must never break a target's real status
         for i, st in enumerate(sts):
             # uniform passthrough: any target may advertise WHAT it backs up + its schedule; merge
             # into detail without overriding a value the adapter already derived (e.g. per-handler).
