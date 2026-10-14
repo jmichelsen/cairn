@@ -24,7 +24,8 @@ Pure + dependency-free (stdlib only) so it unit-tests without a sanoid install.
 import os
 import re
 
-__all__ = ["parse", "load_defaults", "effective", "freshness", "annotate_target"]
+__all__ = ["parse", "load_defaults", "effective", "freshness", "annotate_target", "defaults_path",
+           "POLICIES", "classify", "render"]
 
 # sanoid convertTimePeriod() suffix -> seconds (case-insensitive). m/M are MINUTES (no months).
 _SUFFIX_SECONDS = {"y": 60 * 60 * 24 * 31 * 365, "w": 60 * 60 * 24 * 7, "d": 60 * 60 * 24,
@@ -228,3 +229,77 @@ def load_and_annotate(targets, conf_path="/etc/sanoid/sanoid.conf",
         if annotate_target(t, parsed, defaults).get("governed"):
             n += 1
     return n
+
+
+def defaults_path():
+    """sanoid.defaults.conf: /etc/sanoid on a source install, /usr/share/sanoid on Debian/Ubuntu."""
+    for p in ("/etc/sanoid/sanoid.defaults.conf", "/usr/share/sanoid/sanoid.defaults.conf"):
+        if os.path.exists(p):
+            return p
+    return "/etc/sanoid/sanoid.defaults.conf"
+
+
+# ---- policies cairn suggests (phase1/sanoid-setup.py, phase1/doctor.py) --------------------------
+# The values are sanoid's own example templates (examples/sanoid.conf), under cairn_ names so they
+# never collide with a template of the same name the user has edited (a hand-edited
+# template_backup that snapshots would be dangerous on a received copy). `kind` says what a policy
+# is for: an ORIGINAL (data that lives on this box) or a COPY (a dataset a pull writes into). A copy
+# never gets autosnap: a local snapshot there makes the next pull fail.
+_BACKUP = ["autoprune = yes", "frequently = 0", "hourly = 30", "daily = 90", "monthly = 12", "yearly = 0",
+           "autosnap = no", "hourly_warn = 2880", "hourly_crit = 3600", "daily_warn = 48", "daily_crit = 60"]
+POLICIES = {
+    "production": {"kind": "original", "label": "snapshots: hourly kept 36h, daily kept 30 days, monthly kept 3 months "
+                   "(sanoid's 'production' example)",
+                   "lines": ["frequently = 0", "hourly = 36", "daily = 30", "monthly = 3", "yearly = 0",
+                             "autosnap = yes", "autoprune = yes"]},
+    "backup": {"kind": "copy", "label": "pulled copy, pruned: keeps 30 hourly, 90 daily, 12 monthly of what arrives, "
+               "warns after 48h without a new one (sanoid's 'backup' example)", "lines": _BACKUP},
+    "keepall": {"kind": "copy", "label": "pulled copy, never pruned: keeps every snapshot that arrives (it grows "
+                "forever), same 48h warning", "lines": [x if x != "autoprune = yes" else "autoprune = no" for x in _BACKUP]},
+    "ignore": {"kind": "any", "label": "leave alone: no snapshots, no pruning, cairn doesn't check its freshness "
+               "(sanoid's 'ignore' example)", "lines": ["autoprune = no", "autosnap = no", "monitor = no"]},
+}
+
+
+def classify(targets, received=(), local_pools=()):
+    """[(dataset, kind, target name)] for the datasets this host's cairn targets touch: a zfs-repl
+    source or a zfs-local child dataset is an 'original'; a zfs-local with source_agent, a dataset a
+    pull SET writes into, or a zfs-repl dest on a pool of THIS host (a local 2nd copy) is a 'copy'.
+    Pool roots are left out (usually containers). Deduplicated."""
+    received = list(received)
+    out, seen = [], set()
+    def add(ds, kind, name):
+        if ds and ds not in seen:
+            seen.add(ds); out.append((ds, kind, name))
+    for t in targets or []:
+        if not isinstance(t, dict):
+            continue
+        typ, src = t.get("type"), t.get("source") or ""
+        if typ == "zfs-repl":
+            add(src, "original", t.get("name"))
+            dst = t.get("dest") or ""
+            if dst and not t.get("dest_agent") and dst.split("/")[0] in set(local_pools):
+                received.append(dst)
+        elif typ == "zfs-local" and (t.get("source_agent") or src in received):
+            add(src, "copy", t.get("name"))
+        elif typ == "zfs-local" and "/" in src:
+            add(src, "original", t.get("name"))
+    for ds in received:
+        add(ds, "copy", None)
+    return out
+
+
+def render(choices, parsed, header=""):
+    """sanoid.conf text for {dataset: (policy, {override: value})}: each needed cairn_ template once
+    (unless sanoid.conf already has it), then one stanza per dataset."""
+    used = []
+    for pol, _ in choices.values():
+        if pol not in used:
+            used.append(pol)
+    lines = [header] if header else []
+    for pol in used:
+        if "cairn_" + pol not in parsed.get("templates", {}):
+            lines += [f"[template_cairn_{pol}]"] + ["\t" + x for x in POLICIES[pol]["lines"]] + [""]
+    for ds, (pol, over) in choices.items():
+        lines += [f"[{ds}]", f"\tuse_template = cairn_{pol}"] + [f"\t{k} = {v}" for k, v in (over or {}).items()] + [""]
+    return "\n".join(lines)

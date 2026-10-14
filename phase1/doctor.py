@@ -13,6 +13,8 @@ cairn.env, exactly like the agent) and checks, in order:
   targets    targets.yaml parses; names, types and keys are valid (typos get a suggestion)
   zfs        datasets exist, replication dest/dest_agent make sense, the vault-pulled sources have
              snapshots, ZFS delegations (same rules as zfs-perms.py), httm
+  sanoid     each replicated dataset is snapshotted on a schedule, each received copy is pruned and
+             never snapshotted; phase1/sanoid-setup.py writes the missing entries
   tools      the programs each target type needs are installed
   pull       (vault only) replication.conf, the pull key, SET names vs targets, ssh to home, timer
   status     a dry collection: what the agent would report right now, every non-OK target with why
@@ -480,6 +482,76 @@ def check_zfs(r, targets, pools):
                    f"kill -9 {' '.join(map(str, stuck))}; if they won't die they're in D state (a hung dataset)")
 
 
+# ---------------------------------------------------------------- sanoid (snapshot schedule)
+def sanoid_findings(targets, parsed, defaults, received=(), pools=()):
+    """([(level, msg)], [datasets the wizard would offer]) for the datasets cairn watches here. An
+    original nothing snapshots, a copy nothing prunes, and (worst) a copy sanoid SNAPSHOTS, which makes
+    the next pull fail. Same classification as phase1/sanoid-setup.py. Pure."""
+    import sanoid_parser as SP
+    out, offer = [], []
+    names = {t.get("source"): t.get("name") for t in targets if isinstance(t, dict)}
+    repl_src = {t.get("source") for t in targets if isinstance(t, dict) and t.get("type") == "zfs-repl"}
+    for ds, kind, name in SP.classify(targets, received, pools):
+        label = f"'{name or names.get(ds) or ds}'"
+        f = SP.freshness(ds, parsed, defaults)
+        if kind == "copy":
+            m, _ = SP.effective(ds, parsed, defaults)
+            if m is not None and SP._truthy(m.get("autosnap", "yes")):
+                out.append(("WARN", f"{label}: sanoid takes snapshots of {ds}, which is a pulled copy: a local "
+                            "snapshot there makes the next pull fail. Give it a prune-only policy (backup)"))
+            elif not f.get("governed"):
+                out.append(("INFO", f"{label}: nothing prunes the copies in {ds}: every pull adds a snapshot and "
+                            "none are ever removed (fine if you want to keep them all)"))
+                offer.append(ds)
+        elif not f.get("governed"):
+            if ds in repl_src:
+                out.append(("WARN", f"{label}: nothing snapshots {ds} on a schedule, and replication only copies "
+                            "snapshots that already exist, so the copy stops moving"))
+            else:
+                out.append(("INFO", f"{label}: {ds} has no snapshot schedule in sanoid.conf (fine if you "
+                            "snapshot it another way)"))
+            offer.append(ds)
+        elif f.get("suppress") and ds in repl_src:
+            out.append(("INFO", f"{label}: sanoid doesn't snapshot or monitor {ds} ({f['reason']}); make sure "
+                        "something else snapshots it"))
+    return out, offer
+
+
+def check_sanoid(r, targets, pools=()):
+    zt = [t for t in targets if t.get("type") in ("zfs-local", "zfs-repl")]
+    if not zt:
+        return
+    import sanoid_parser as SP
+    conf = Path(os.environ.get("CAIRN_SANOID_CONF", "/etc/sanoid/sanoid.conf"))
+    r.section(f"sanoid ({conf})")
+    try:
+        parsed = SP.parse(conf.read_text())
+    except OSError:
+        parsed = {"templates": {}, "datasets": {}}
+        r.info(f"no readable {conf}: sanoid snapshots and prunes nothing here (see docs/getting-started.md)")
+    defaults = SP.load_defaults(os.environ.get("CAIRN_SANOID_DEFAULTS") or SP.defaults_path())
+    received = []
+    if PULL_CONF.is_file():
+        received = [d for _, _, d, _ in parse_pull_conf(PULL_CONF.read_text())["SETS"] if d]
+    found, offer = sanoid_findings(zt, parsed, defaults, received, pools)
+    for lvl, msg in found:
+        r.add(lvl, msg)
+    if offer:
+        r.info(f"{len(offer)} dataset(s) have no sanoid policy",
+               "phase1/sanoid-setup.py (asks what each should get, writes sanoid.conf with a backup; "
+               "--print to only see the entries)")
+    if offer or parsed["datasets"]:
+        if not shutil.which("sanoid"):
+            r.warn("sanoid isn't installed", "sudo apt install sanoid")
+        else:
+            _, en, _ = _sh(["systemctl", "is-enabled", "sanoid.timer"])
+            if en != "enabled":
+                r.warn(f"sanoid.timer is {en or 'missing'}: sanoid.conf is never applied",
+                       "sudo systemctl enable --now sanoid.timer")
+    if not found:
+        r.ok("sanoid schedules every dataset here that needs it")
+
+
 def _load_zfs_perms():
     spec = importlib.util.spec_from_file_location("zfs_perms", HERE / "zfs-perms.py")
     mod = importlib.util.module_from_spec(spec)
@@ -839,6 +911,7 @@ def main():
     targets = check_targets_cfg(r, cfg, tpath) if cfg is not None else []
     pools = set(C.zpool_list())
     check_zfs(r, targets, pools)
+    check_sanoid(r, targets, pools)
     check_tools(r, targets)
     check_pull(r, targets, pools, a.offline)
     if targets and not a.no_collect:

@@ -71,7 +71,7 @@ the status it computes.
 ## Sanoid-derived freshness
 
 For `zfs-local` and `zfs-repl` targets, the agent reads `/etc/sanoid/sanoid.conf` (plus
-`sanoid.defaults.conf`) and sets snapshot-freshness thresholds per dataset, keyed on `source`:
+`sanoid.defaults.conf`, found in `/etc/sanoid` or Debian's `/usr/share/sanoid`) and sets snapshot-freshness thresholds per dataset, keyed on `source`:
 
 - The finest snapshot type sanoid takes and alerts on (frequently, hourly, daily, ...) sets
   `fresh_warn_h` / `fresh_crit_h` from that type's `_warn` / `_crit`. The card notes `sanoid:<type>`.

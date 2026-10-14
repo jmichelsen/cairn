@@ -48,6 +48,7 @@ and replication **pair cards** that merge a source and its off-site copy into on
 
 | Doc | What's in it |
 | --- | --- |
+| [docs/getting-started.md](docs/getting-started.md) | **New to ZFS / sanoid / cairn? Start here:** the pieces, then a step-by-step setup with checks |
 | This README | Install, concepts, the dashboard, accounts, alerts, updating |
 | [docs/targets.md](docs/targets.md) | **Every target type and key** you can put in `targets.yaml` |
 | [AGENT.md](AGENT.md) | The agent: tokens, settings, actions, dry-run, recovery, troubleshooting |
@@ -89,6 +90,7 @@ Prompts read from your terminal even under `curl ... | bash`. The bootstrap clon
 | `./install.sh --smart-detail` | Also install the scoped `smartctl` wrapper for SMART attribute tables |
 | `./install.sh --check` | Preflight only, changes nothing |
 | `phase1/zfs-perms.py [--apply]` | Show (and grant) the ZFS permissions this host's targets need, see [ZFS permissions](#zfs-permissions) |
+| `phase1/sanoid-setup.py [--print]` | Wizard: asks what snapshot schedule each dataset cairn watches should get (sanoid's example policies) and writes the sanoid.conf entries, see [docs/getting-started.md](docs/getting-started.md#4-snapshot-on-a-schedule-sanoid) |
 | `phase1/doctor.py` | Check this host's whole setup and list every problem with its fix, see [Checking a setup](#checking-a-setup-doctor) |
 | `./install.sh home --configure` | Re-run configuration. **Destructive:** regenerates every token, so every agent must be re-enrolled |
 | `--yes` / `-y` | Accept defaults, no prompts |
@@ -180,7 +182,8 @@ receives may stay unmounted; the data and snapshots are still there.
 
 ## Checking a setup (doctor)
 
-Something not working, or a new box just installed? Run the doctor on **every** box that runs an
+New to all of this? Follow [docs/getting-started.md](docs/getting-started.md) first. Something not
+working, or a new box just installed? Run the doctor on **every** box that runs an
 agent (main box and vault), as the agent's user, from the cairn checkout:
 
 ```bash
@@ -211,6 +214,7 @@ and prints each check as `ok`, `info`, `WARN` or `FAIL`, every problem with a `f
 | api | The API answers, its version matches this checkout (which side to update if not), this agent's credential is accepted, plus the **fleet findings about this agent** (below) |
 | targets | `targets.yaml` parses; every target has a unique name and a known type; required keys present; unknown keys flagged with a suggestion (`dest-agent` → `dest_agent`); `dest` is a dataset, not a path or `user@host`; complete `scrub_cadence` entries |
 | zfs | Sources exist; a `zfs-repl` dest on another box has `dest_agent` (and a local one doesn't); a vault-pulled source has snapshots to pull; every required ZFS delegation is held (same rules as `zfs-perms.py`); httm installed or opted out; stuck httm processes |
+| sanoid | Every replicated source is snapshotted on a schedule (else the copy stops moving); a received copy is never snapshotted by sanoid (that breaks the next pull); copies nothing prunes are noted; `sanoid.timer` enabled. Points at `phase1/sanoid-setup.py` |
 | tools | The programs each configured target type needs (`borg`, `restic`, `smartctl`, `rsync`, `syncoid`...) |
 | pull | Vault only: `replication.conf` complete, pull key present and private, `syncoid` installed, **each SET named like the target that watches its dest** (the "Replicate now" join), receivers have `source_agent`, ssh to home with the pull key (on its port), the timer is enabled, the last pull's result |
 | status | A dry collection: what the agent would report right now, every non-OK target with its reason |
@@ -539,6 +543,7 @@ phase1/   api.py                control plane: report ingest, intent routing, vi
           cairn-token.py  cairn-user.py   token and account admin
           zfs-perms.py          works out and grants the ZFS delegations a host needs
           doctor.py             checks a host's whole setup, every problem with its fix
+          sanoid-setup.py       wizard that writes sanoid.conf entries for the datasets cairn watches
           grant-access.sh  smart-probe.sh  zpool-scrub.sh   one-time read grants + opt-in sudo wrappers
           notify_selftest.py    delivery self-test behind the Kuma heartbeat
 replication/                    the vault's nightly pull (runner, forced-command wrapper, units)

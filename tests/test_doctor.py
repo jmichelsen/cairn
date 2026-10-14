@@ -284,3 +284,93 @@ def test_doctor_empty_dest():
     assert doctor.empty_dest("tank/g", fake({"exists": False})) is None
     assert doctor.empty_dest("tank/g", fake({"snaps": "tank/g@a"})) is None
     assert doctor.empty_dest("tank/g", fake({"token": "1-abc"})) is None
+
+
+# ---- sanoid coverage + the setup wizard ---------------------------------------------------------
+import importlib.util  # noqa: E402
+import sanoid_parser as SP  # noqa: E402
+
+_DEF = dict(SP._FALLBACK_DEFAULTS)
+_spec = importlib.util.spec_from_file_location(
+    "sanoid_setup", os.path.join(os.path.dirname(__file__), "..", "phase1", "sanoid-setup.py"))
+wizard = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(wizard)
+
+
+def test_unscheduled_repl_source_warns_and_is_offered():
+    found, offer = doctor.sanoid_findings(
+        [{"name": "g", "type": "zfs-repl", "source": "rpool/apps/wiki", "dest": "tank/g"}], SP.parse(""), _DEF)
+    assert found[0][0] == "WARN" and "copy stops moving" in found[0][1] and offer == ["rpool/apps/wiki"]
+
+
+def test_pulled_copy_is_a_copy_even_without_source_agent():
+    tg = [{"name": "Pics", "type": "zfs-local", "source": "iwolf/Pics"},
+          {"name": "k", "type": "zfs-local", "source": "iwolf/k", "source_agent": "local"}]
+    assert SP.classify(tg, ["iwolf/Pics"]) == [("iwolf/Pics", "copy", "Pics"), ("iwolf/k", "copy", "k")]
+    found, offer = doctor.sanoid_findings(tg, SP.parse(""), _DEF, received=["iwolf/Pics"])
+    assert offer == ["iwolf/Pics", "iwolf/k"] and all("nothing prunes" in m for _, m in found)
+
+
+def test_autosnap_on_a_pulled_copy_warns():
+    conf = SP.parse("[template_backup]\n\tautosnap = yes\n\thourly = 36\n[iwolf/Pics]\n\tuse_template = backup\n")
+    found, offer = doctor.sanoid_findings([{"name": "Pics", "type": "zfs-local", "source": "iwolf/Pics"}],
+                                          conf, _DEF, received=["iwolf/Pics"])
+    assert found[0][0] == "WARN" and "makes the next pull fail" in found[0][1] and not offer
+
+
+def test_pool_root_and_scheduled_datasets_are_quiet():
+    conf = SP.parse("[template_production]\n\thourly = 36\n\tautosnap = yes\n[rpool/data]\n\tuse_template = production\n")
+    tg = [{"name": "pool", "type": "zfs-local", "source": "rpool"},
+          {"name": "d", "type": "zfs-repl", "source": "rpool/data", "dest": "tank/data"}]
+    assert doctor.sanoid_findings(tg, conf, _DEF) == ([], [])
+
+
+def test_copy_policies_never_snapshot():
+    for name, p in SP.POLICIES.items():
+        if p["kind"] in ("copy", "any"):
+            assert "autosnap = no" in p["lines"], name
+    for pol in wizard.CHOICES["copy"]:
+        assert pol in ("custom", "skip") or SP.POLICIES[pol]["kind"] in ("copy", "any")
+
+
+def test_render_adds_each_template_once_with_overrides_and_skips_existing():
+    text = SP.render({"a/x": ("production", {}), "a/y": ("production", {"daily": "60"}),
+                      "t/c": ("backup", {})}, SP.parse(""))
+    assert text.count("[template_cairn_production]") == 1 and "[template_cairn_backup]" in text
+    assert "[a/y]\n\tuse_template = cairn_production\n\tdaily = 60" in text
+    conf = SP.parse("[template_cairn_production]\n\thourly = 1\n")
+    assert "[template_cairn_production]" not in SP.render({"a/x": ("production", {})}, conf)
+
+
+def test_rendered_entries_parse_back_to_the_intended_freshness():
+    text = SP.render({"rpool/g": ("production", {}), "tank/g": ("backup", {})}, SP.parse(""))
+    parsed = SP.parse(text)
+    assert SP.freshness("rpool/g", parsed, _DEF)["type"] == "hourly"
+    f = SP.freshness("tank/g", parsed, _DEF)
+    assert f["warn_h"] == 48 and f["crit_h"] == 60          # backup: 2880 / 3600 minutes on hourly
+    m, _ = SP.effective("tank/g", parsed, _DEF)
+    assert m["autosnap"] == "no"
+
+
+def test_wizard_plan_skips_covered_and_yes_takes_defaults():
+    conf = SP.parse("[template_production]\n\thourly = 36\n[rpool/done]\n\tuse_template = production\n")
+    tg = [{"name": "a", "type": "zfs-repl", "source": "rpool/done", "dest": "t/a"},
+          {"name": "b", "type": "zfs-repl", "source": "rpool/new", "dest": "t/b"}]
+    todo, covered = wizard.plan(tg, ["tank/copy"], conf, _DEF)
+    assert [d for d, _, _ in todo] == ["rpool/new", "tank/copy"] and covered[0][0] == "rpool/done"
+    # --yes never starts pruning a copy (that deletes snapshots); copies stay as they are
+    assert wizard.choose(todo, assume_yes=True) == {"rpool/new": ("production", {})}
+
+
+def test_wizard_writes_with_a_backup(tmp_path, monkeypatch):
+    conf = tmp_path / "sanoid.conf"; conf.write_text("[old]\n")
+    monkeypatch.setattr(wizard, "_sudo", lambda: [])
+    assert wizard.write(conf, "[new]\n\tuse_template = cairn_production")
+    assert conf.read_text() == "[old]\n[new]\n\tuse_template = cairn_production\n"
+    assert [p.read_text() for p in tmp_path.glob("sanoid.conf.bak-*")] == ["[old]\n"]
+
+
+def test_local_second_copy_dest_is_a_copy():
+    tg = [{"name": "m", "type": "zfs-repl", "source": "mcz/m", "dest": "mediaz/m"},
+          {"name": "v", "type": "zfs-repl", "source": "mcz/v", "dest": "iwolf/v", "dest_agent": "vault"}]
+    assert SP.classify(tg, [], {"mcz", "mediaz"}) == [("mcz/m", "original", "m"), ("mcz/v", "original", "v"),
+                                                     ("mediaz/m", "copy", None)]

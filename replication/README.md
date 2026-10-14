@@ -93,6 +93,12 @@ verification failed". `install.sh home --replication` writes home's own host key
 can't be reached (it retries first) and **4** when it reached home but couldn't log in (host key or
 key refused; no retry), printing ssh's own error either way.
 
+**Snapshots.** The pull copies only snapshots that already exist on home, so each source needs a
+sanoid schedule there; and a pull never deletes anything, so the vault keeps every snapshot it
+receives unless its own sanoid prunes them (prune-only: `autosnap = no`, never snapshot a received
+copy). `--replication` offers `phase1/sanoid-setup.py` on both boxes for this; the vault side is
+optional and defaults to keeping everything.
+
 **Don't create the dest dataset yourself.** The first pull creates it. If it already exists with no
 snapshots (made by hand), syncoid refuses to overwrite it; the pull skips that SET with an
 explanation and the commands to check and remove it, and `phase1/doctor.py` on the vault flags it
