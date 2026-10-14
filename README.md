@@ -160,11 +160,17 @@ phase1/zfs-perms.py --apply       # grant the missing required ones (one sudo pe
 phase1/zfs-perms.py --apply --all # also the optional Snapshot-button grants
 ```
 
-| On this host | Grant | On |
-| --- | --- | --- |
-| Source of a replication (local Replicate, or a vault pulling it) | `snapshot,send,hold` | the source dataset |
-| Destination of a local replication, or a vault's replica (`source_agent:`) | `create,mount,receive,mountpoint` | the destination's pool |
-| Snapshot button on a `zfs-local` dataset (optional) | `snapshot` | that dataset |
+| On this host | Required | Also granted (recommended) | On |
+| --- | --- | --- | --- |
+| Source of a local Replicate | `snapshot,send` | `hold` | the source dataset |
+| Source a vault pulls (`dest_agent:`) | `send` | `snapshot,hold` | the source dataset |
+| Destination of a local Replicate, or a vault's replica (`source_agent:`) | `create,mount,receive` | `mountpoint` | the destination's pool |
+| Snapshot button on a `zfs-local` dataset | (optional) `snapshot` | | that dataset |
+
+**The agent checks this every cycle.** A replication card whose agent user lacks a *required*
+grant turns WARN with the reason, e.g. "ZFS permission missing: 'alice' lacks send on
+tank/photos ... Fix: run phase1/zfs-perms.py --apply on this host". Missing recommended or optional
+grants never warn.
 
 It never grants `destroy`, `rollback` or anything else that can delete data, and never grants
 Snapshot on a vault replica (a local snapshot there breaks the next pull). Run it as the agent's

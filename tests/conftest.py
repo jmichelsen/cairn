@@ -1,0 +1,15 @@
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "phase1"))
+
+
+@pytest.fixture(autouse=True)
+def _fresh_zfs_allow_cache():
+    """collector caches `zfs allow` output for a few minutes; tests reuse dataset names."""
+    import collector
+    collector._ZALLOW.clear()
+    yield
+    collector._ZALLOW.clear()
