@@ -236,6 +236,54 @@ The two "replicate" buttons do different things:
 - **Replicate** on home's `zfs-repl` target queues a `sync`, which runs `syncoid` locally on home
   from the target's source to its dest.
 
+### Why the vault pulls instead of home pushing
+
+This was decided early and deliberately. The reasons, in order of how much they matter:
+
+1. **Home can't destroy the off-site copies.** With a push, home holds a credential that writes to
+   the vault, and in practice usually one that can prune too (`destroy`, or root), because the
+   sender is what cleans up old snapshots. Ransomware or an attacker on home would use it to wipe
+   the backup before encrypting the original. With the pull, the only replication credential lives
+   on the vault, and on home it can do nothing but `zfs send` (the forced command, see
+   [replication/README.md](../replication/README.md#how-the-security-holds)). The vault's own user
+   has `create,mount,receive,mountpoint` and **no `destroy`**, so even a login to the vault user
+   (your setup key, below) can't remove a snapshot it has received.
+2. **Deletions on home don't follow to the vault.** A pull only adds: syncoid runs without
+   `--delete-target-snapshots`, so snapshots pruned, destroyed or rolled back on home stay on the
+   vault until the vault's own sanoid policy (if any) prunes them. A mistake or an attack on home
+   has a window of the vault's retention, not of the next sync.
+3. **Nothing to open at the vault's site.** The vault is typically behind someone else's router
+   (a friend's house). Pulling means it only makes outbound connections: no port forward, no
+   static or public address, and its address can change freely. Home already has to be reachable
+   (agents report to its API), so home is the side that accepts a connection.
+4. **The vault controls the timing**, so a vault that's off, asleep or offline just catches up on
+   its next run (`Persistent=true` on the timer); nothing on home retries into the void.
+
+**What it costs, and the limits:**
+
+- **Home accepts SSH from the vault**, through a port forward or a VPN when the vault is off-site.
+  The key is restricted (`restrict` plus a forced command that permits only a read-only
+  `zfs send` pipeline), so a stolen vault key can read what's delegated for `send` on home, not
+  change it.
+- **A compromised vault can read your data** through that same key. Encrypted datasets with
+  `encrypted: true` are pulled raw (ciphertext the vault can't read), but the forced command doesn't
+  force `-w`, so a vault under an attacker's control could ask for a plain send of a dataset whose
+  key is loaded on home. Treat the vault as trusted for reading.
+- **Your setup login on the vault.** `./install.sh home --add-vault` / `--replication` (and
+  `doctor.py --vault`) log in to the vault with your normal SSH key, which setup authorizes there.
+  That login is the vault user, which can't destroy snapshots (point 1), but keep that user's
+  `sudo` password-protected: passwordless sudo on the vault would hand home's key the power to
+  destroy. For the strictest setup, remove home's key from the vault's `authorized_keys` after
+  setup and add it back when you need it.
+- **The control plane runs on home.** The dashboard can queue actions on the vault's agent, but the
+  agent builds every command from its own `targets.yaml`, never from the request, and only from a
+  fixed set (pull, sync, scrub, snapshot, read-only recovery listings and copy-only restore, plus
+  backups and AIDE accepts for any removable drives or AIDE it watches). None destroys a ZFS
+  dataset or snapshot, and a snapshot on a received copy (a target with `source_agent`) is refused,
+  since it would break the next pull.
+  Update makes the vault fetch cairn from its git remote, or GitHub for a copied install, not from
+  home.
+
 Hosts do not need a mesh VPN. The installer defaults to home's LAN address for both the API URL and
 the pull's SSH address. A VPN is optional, useful when the vault lives off-site.
 

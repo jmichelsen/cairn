@@ -1014,3 +1014,11 @@ def test_sync_refused_for_vault_pulled_pair():
          "dest_agent": "offsite-vault"}
     cmd, err = collector.build_command("sync", t, {})
     assert cmd is None and "offsite-vault" in err
+
+
+def test_snapshot_refused_on_a_received_copy():
+    cmd, err = collector.build_command("snapshot", {"name": "g", "type": "zfs-local", "source": "tank/g",
+                                                     "source_agent": "local"})
+    assert cmd is None and "break the next pull" in err
+    cmd, err = collector.build_command("snapshot", {"name": "g", "type": "zfs-local", "source": "tank/g"})
+    assert cmd[:2] == ["zfs", "snapshot"] and err is None

@@ -2385,6 +2385,9 @@ def build_command(action, t, opts=None):
     if action == "snapshot":
         if not src:
             return None, "target has no source dataset"
+        if t.get("source_agent"):   # a received copy: a local snapshot makes the next pull fail
+            return None, (f"'{t.get('name')}' is a copy pulled from '{t['source_agent']}': snapshotting it here "
+                          "would break the next pull. Snapshot the source instead")
         return ["zfs", "snapshot", f"{src}@cairn-manual-{time.strftime('%Y%m%dT%H%M%S')}"], None
     if action == "sync":
         if typ != "zfs-repl":
