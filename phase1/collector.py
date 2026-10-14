@@ -2224,7 +2224,7 @@ def _apply_sanoid(targets):
         sanoid_parser.load_and_annotate(
             targets,
             os.environ.get("CAIRN_SANOID_CONF", "/etc/sanoid/sanoid.conf"),
-            os.environ.get("CAIRN_SANOID_DEFAULTS", "/etc/sanoid/sanoid.defaults.conf"))
+            os.environ.get("CAIRN_SANOID_DEFAULTS") or sanoid_parser.defaults_path())
     except Exception:
         pass
 

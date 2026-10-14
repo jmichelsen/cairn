@@ -85,6 +85,15 @@ ensure_zfs_perms() {
       || warn "some ZFS permissions are still missing - see above"
   else info "later: phase1/zfs-perms.py --apply   (re-run any time after editing targets.yaml)"; fi
 }
+# Snapshot schedule: phase1/sanoid-setup.py asks what each dataset cairn watches here should get
+# (sanoid's example policies) and appends the entries to sanoid.conf, after saving a backup.
+ensure_sanoid() {
+  command -v zfs >/dev/null 2>&1 && command -v sanoid >/dev/null 2>&1 || return 0
+  say "Snapshot schedule (sanoid)"
+  local yes=(); [ "$YES" = 1 ] && yes=(--yes)
+  python3 "$HERE/phase1/sanoid-setup.py" ${yes[@]+"${yes[@]}"} \
+    || warn "sanoid setup didn't finish - re-run any time: phase1/sanoid-setup.py"
+}
 _pkg_do() {  # run the package manager for "$@"; return its exit status (never dies)
   case "$PKG" in
     apt-get) sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
@@ -465,6 +474,7 @@ EOF
   sleep 3
   systemctl --user is-active --quiet cairn-agent.service && ok "host agent running" || warn "agent not active yet (a fresh 'backup' group sometimes needs a re-login; the unit's sg wrapper handles it on next start)"
   ensure_zfs_perms
+  ensure_sanoid
 
   # ---- optional: provision a remote vault ----
   if askyn "add a remote off-site VAULT now?" n; then provision_vault; fi
@@ -655,6 +665,17 @@ provision_replication() {
     warn "can't read /etc/ssh/ssh_host_*_key.pub here; on the vault run once: ssh ${home_port:+-p $home_port }$HOME_SSH true (accept the key)"
   fi
 
+  # 7. Snapshot schedules: home must snapshot what the vault pulls (the pull copies existing snapshots
+  # only). On the vault it's optional: pruning old copies (never snapshotting them: that breaks the
+  # next pull). Without it the vault keeps every snapshot it receives; the wizard defaults to that.
+  ensure_sanoid
+  vrsync -a "$HERE/phase1/sanoid-setup.py" "$HERE/phase1/sanoid_parser.py" "$ssh_t:cairn/phase1/" 2>/dev/null
+  printf '   \033[1;35m>>> snapshot pruning on the vault (a sudo prompt below is the VAULT) <<<\033[0m\n'
+  local vyes=""; [ "$YES" = 1 ] && vyes=" --yes"
+  vssh -t "$ssh_t" "cd ~/cairn && python3 phase1/sanoid-setup.py$vyes" <"$TTY" \
+    || warn "vault sanoid setup didn't finish - on the vault: ~/cairn/phase1/sanoid-setup.py"
+  printf '   \033[1;35m>>> back on home (local) <<<\033[0m\n'
+
   if askyn "run the first pull now?" y; then
     printf '   \033[1;35m>>> first pull on the vault <<<\033[0m\n'
     vssh "$ssh_t" '~/cairn/replication/vault-pull.sh' 2>&1 | sed 's/^/   /' || warn "first pull returned non-zero (check on the vault)"
@@ -795,6 +816,7 @@ EOF
     || warn "agent not active - check: systemctl --user status cairn-agent"
   local shown_int; shown_int="$(grep -m1 '^CAIRN_INTERVAL=' "$ENVF" 2>/dev/null | cut -d= -f2)"; shown_int="${shown_int:-300}"
   ensure_zfs_perms
+  ensure_sanoid
   say "VAULT setup complete - it should appear in home's Agents card within one poll interval (~${shown_int}s)"
 }
 
