@@ -20,6 +20,7 @@ scrub_cadence:
 targets:
   # --- Replicated ZFS datasets: monitors replication LAG (newest snapshot common to src+dst)
   #     and (for encrypted off-site copies) that the destination key stays unavailable. ---
+  #     `tier: A` = irreplaceable data: counted in the 3-2-1 scorecard (see README). Other tiers are labels only.
   - { name: photos, type: zfs-repl, source: tank/photos, dest: backup/photos, tier: A }
   - { name: docs,   type: zfs-repl, source: tank/docs,   dest: backup/docs,   tier: A }
   # Encrypted, zero-knowledge off-site copy: flags CRIT if the dest key ever loads.
