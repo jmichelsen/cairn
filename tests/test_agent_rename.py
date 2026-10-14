@@ -73,6 +73,6 @@ def test_refuses_taken_name_unknown_agent_and_bad_name(tmp_path):
 def test_refuses_while_the_old_agent_is_still_reporting(tmp_path):
     p = _db(tmp_path, last=int(time.time()) - 30)
     r = _run(p, "local", "mclife", "--no-backup")
-    assert r.returncode != 0 and "Stop it first" in r.stderr
+    assert r.returncode != 0 and "stop it first" in r.stderr and "--force" in r.stderr
     assert sqlite3.connect(p).execute("SELECT 1 FROM agents WHERE name='local'").fetchone()
     assert _run(p, "local", "mclife", "--no-backup", "--force").returncode == 0
