@@ -399,6 +399,10 @@ def do_execute(cfg):
                 api_call("POST", f"/api/v1/backup/intents/{iid}/result",
                          {"ok": False, "output": f"no confirmed link for dataset '{ds}'"}); continue
             newsub = C.cairn_subpath(dmap[ds]["source"], HOSTNAME)   # cairn/<host>/<dataset-slug>
+            if DRYRUN or opts.get("dryrun"):
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                         {"ok": True, "output": f"[DRY-RUN] would move {link['dest_subpath']} -> {newsub} on {pr['mount']}"})
+                print(f"  intent {iid} {target} removable-relocate {ds} [dry]"); continue
             ok2, msg = C.removable_relocate(pr["mount"], link["dest_subpath"], newsub)
             if ok2:
                 api_call("POST", "/api/v1/backup/agent/removable-links",

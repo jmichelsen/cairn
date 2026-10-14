@@ -2400,11 +2400,16 @@ def build_command(action, t, opts=None):
             rp, err = _validate_under(version, mp)
             if err:
                 return None, f"bad version path: {err}"
+            # dest (API-only; the dashboard always uses the default) must stay inside the dataset too.
             staging = opts.get("dest") or os.path.join(mp, ".cairn-restores")
-            sp, err = _validate_under(staging, mp) if not opts.get("dest") else (staging, None)
-            dest = os.path.join(sp if not err else staging, os.path.basename(rp) + f".restored-{time.strftime('%Y%m%dT%H%M%S')}")
-            # -v so stdout carries "'<src>' -> '<dest>'": the UI parses that to show where it landed.
-            return ["cp", "-av", "--no-clobber", "--", rp, dest], None
+            sp, err = _validate_under(staging, mp)
+            if err:
+                return None, f"bad restore dest: {err}"
+            dest = os.path.join(sp, os.path.basename(rp) + f".restored-{time.strftime('%Y%m%dT%H%M%S')}")
+            # mkdir first: nothing else creates the staging dir. Paths go in as positional args, never
+            # interpolated into the script. -v so stdout carries "'<src>' -> '<dest>'" for the UI.
+            return ["sh", "-c", 'mkdir -p -- "$1" && exec cp -av --no-clobber -- "$2" "$3"',
+                    "cairn-restore", sp, rp, dest], None
     return None, f"unknown action '{action}'"
 
 def build_dryrun(action, t, opts=None):

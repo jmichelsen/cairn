@@ -50,8 +50,32 @@ def test_restore_is_verbose_copy_only(monkeypatch):
         "restore", {"name": "p", "type": "zfs-local", "source": "pool"},
         {"version": "/mnt/pool/.zfs/snapshot/s1/file.txt"})
     assert err is None
-    assert cmd[:4] == ["cp", "-av", "--no-clobber", "--"] and cmd[-2].endswith("file.txt")
+    assert cmd[0] == "sh" and "cp -av --no-clobber" in cmd[2] and "mkdir -p" in cmd[2]
+    assert cmd[-3].endswith("/.cairn-restores") and cmd[-2].endswith("file.txt")
     assert "/.cairn-restores/" in cmd[-1] and ".restored-" in cmd[-1]
+
+
+def test_restore_dest_must_stay_inside_the_dataset(monkeypatch):
+    monkeypatch.setattr(collector, "run", _canned("/mnt/pool\n"))
+    t = {"name": "p", "type": "zfs-local", "source": "pool"}
+    v = "/mnt/pool/.zfs/snapshot/s1/file.txt"
+    cmd, err = collector.build_command("restore", t, {"version": v, "dest": "/etc"})
+    assert cmd is None and "bad restore dest" in err
+    cmd, err = collector.build_command("restore", t, {"version": v, "dest": "/mnt/pool/restored"})
+    assert err is None and cmd[-3] == "/mnt/pool/restored"
+
+
+def test_restore_creates_staging_and_never_clobbers(tmp_path, monkeypatch):
+    mp = tmp_path / "pool"; snap = mp / ".zfs" / "snapshot" / "s1"; snap.mkdir(parents=True)
+    (snap / "file.txt").write_text("old")
+    monkeypatch.setattr(collector, "run", _canned(str(mp) + "\n"))
+    cmd, err = collector.build_command("restore", {"name": "p", "type": "zfs-local", "source": "pool"},
+                                       {"version": str(snap / "file.txt")})
+    assert err is None
+    import subprocess as sp
+    r = sp.run(cmd, capture_output=True, text=True)
+    assert r.returncode == 0 and (mp / ".cairn-restores").is_dir()
+    assert open(cmd[-1]).read() == "old"
 
 
 # ---- zpool_scrub_progress --------------------------------------------------------------------
