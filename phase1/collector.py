@@ -11,7 +11,7 @@ Usage:
   collector.py [--once] [--db PATH] [--targets PATH] [--alert]
 Env (or /etc/cairn/cairn.env): CAIRN_DB, CAIRN_TARGETS, BORG_PASSPHRASE_*
 """
-import argparse, json, os, re, shlex, shutil, sqlite3, subprocess, sys, time
+import argparse, json, os, re, shlex, shutil, signal, sqlite3, subprocess, sys, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -79,15 +79,32 @@ def _scope_ok():
                 pass
     return _scope_probe
 
-def stuck_httm(proc="/proc"):
-    """PIDs of httm processes left behind by THIS user's cairn agent: comm 'httm' in a cairn-httm-*
-    scope or (from agents before the scope change) in cairn-agent.service. The agent runs httm
-    synchronously, so any such process still alive when it's about to start another is a leftover."""
-    pids, uid = [], os.getuid()
+def _proc_stat(d):
+    """(state, ppid) from /proc/<pid>/stat, or ("?", 0) when unreadable."""
+    try:
+        with open(os.path.join(d, "stat")) as f:
+            rest = f.read().rsplit(")", 1)[1].split()
+        return rest[0], int(rest[1])
+    except (OSError, IndexError, ValueError):
+        return "?", 0
+
+def _cgroup(d):
+    try:
+        with open(os.path.join(d, "cgroup")) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+def httm_procs(proc="/proc"):
+    """THIS user's cairn-owned httm processes: comm 'httm' in a cairn-httm-* scope or (agents before the
+    scope change) in cairn-agent.service. Each is {pid, state, inflight}: inflight means its parent is a
+    live process in cairn-agent.service, i.e. an agent is waiting on it right now (a scan in progress,
+    not a leftover). Zombies are skipped (already dead, waiting to be reaped)."""
+    out, uid = [], os.getuid()
     try:
         entries = os.listdir(proc)
     except OSError:
-        return pids
+        return out
     for e in entries:
         if not e.isdigit():
             continue
@@ -98,13 +115,39 @@ def stuck_httm(proc="/proc"):
             with open(os.path.join(d, "comm")) as f:
                 if f.read().strip() != "httm":
                     continue
-            with open(os.path.join(d, "cgroup")) as f:
-                cg = f.read()
         except OSError:
             continue
-        if HTTM_SCOPE_PREFIX in cg or "cairn-agent.service" in cg:
-            pids.append(int(e))
-    return sorted(pids)
+        cg = _cgroup(d)
+        if HTTM_SCOPE_PREFIX not in cg and "cairn-agent.service" not in cg:
+            continue
+        state, ppid = _proc_stat(d)
+        if state == "Z":
+            continue
+        inflight = bool(ppid) and "cairn-agent.service" in _cgroup(os.path.join(proc, str(ppid)))
+        out.append({"pid": int(e), "state": state, "inflight": inflight})
+    return sorted(out, key=lambda x: x["pid"])
+
+def stuck_httm(proc="/proc"):
+    """PIDs of cairn httm processes no agent is waiting on: left behind by an agent that was stopped or
+    restarted mid-scan, or wedged in the kernel. A scan in progress is not counted."""
+    return [x["pid"] for x in httm_procs(proc) if not x["inflight"]]
+
+def reap_orphan_httm(proc="/proc", wait=3.0):
+    """SIGKILL leftover cairn httm processes (nobody reads their output) unless they're in D state, where
+    a kill can't land until the kernel lets go. Returns the PIDs signalled."""
+    killed = []
+    for x in httm_procs(proc):
+        if x["inflight"] or x["state"] == "D":
+            continue
+        try:
+            os.kill(x["pid"], signal.SIGKILL)
+            killed.append(x["pid"])
+        except OSError:
+            pass
+    deadline = time.time() + (wait if killed else 0)
+    while killed and time.time() < deadline and set(killed) & set(stuck_httm(proc)):
+        time.sleep(0.2)
+    return killed
 
 def httm_unavailable():
     """None if httm may run now, else a one-line reason (shown on the dashboard as the action's error)."""
@@ -112,6 +155,7 @@ def httm_unavailable():
         return "httm is disabled on this agent (CAIRN_HTTM=0)"
     if not shutil.which("httm"):
         return "httm is not installed on this agent (optional, see AGENT.md)"
+    reap_orphan_httm()
     stuck = stuck_httm()
     if stuck:
         return (f"skipped: an earlier httm (pid {', '.join(map(str, stuck))}) is stuck in the kernel, "
@@ -144,6 +188,14 @@ def run_httm(cmd, timeout=900, env=None):
             return 124, "", (f"timeout after {timeout}s, and httm (pid {p.pid}) ignored SIGKILL: stuck "
                              "in the kernel, abandoned")
         return 124, "", "timeout"
+    finally:
+        # leaving early (the agent got SIGTERM, or anything raised): don't leave httm running in its
+        # scope with nobody reading it. No wait here: a process in D state can't be waited on.
+        if p.poll() is None:
+            try:
+                p.kill()
+            except OSError:
+                pass
 
 def load_env(path="/etc/cairn/cairn.env"):
     p = Path(os.environ.get("CAIRN_ENV", path))

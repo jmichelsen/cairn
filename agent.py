@@ -16,7 +16,7 @@ Env: CAIRN_API_URL, CAIRN_API_TOKEN, CAIRN_AGENT_NAME, CAIRN_TARGETS, CAIRN_CAN_
      CAIRN_INTERVAL, CAIRN_DRYRUN(0/1), CAIRN_ACTION_TIMEOUT
 Run: agent.py [--once]
 """
-import base64, gzip, json, os, socket, sys, time, urllib.request, urllib.error
+import base64, gzip, json, os, signal, socket, sys, time, urllib.request, urllib.error
 from pathlib import Path
 
 HOSTNAME = socket.gethostname().split(".")[0]   # source-server namespace for cairn/<host>/<dataset>
@@ -663,6 +663,9 @@ def _start_mdns():
 
 def main():
     once = "--once" in sys.argv
+    # systemd stops the agent with SIGTERM. Turn it into SystemExit so cleanup runs: an httm in flight
+    # lives in its own scope (outside this service's cgroup) and would otherwise outlive the agent.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     cfg = yaml.safe_load(Path(TARGETS).read_text())
     auth = "enroll" if ENROLL_SECRET else "static-token"
     print(f"agent '{NAME}' v{VERSION} -> {API}  (auth={auth}, execute={CAN_EXEC}, dryrun={DRYRUN}, interval={INTERVAL}s)")

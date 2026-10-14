@@ -269,7 +269,10 @@ agent.
 **Stuck httm.** If a `.zfs/snapshot` automount wedges in the kernel, httm can't be killed (not even
 SIGKILL) until a reboot. The agent runs each httm in its own transient `systemd-run --user --scope`
 (`cairn-httm-*.scope`), so a stuck one doesn't delay agent restarts, and while one is stuck the
-agent skips new httm runs and says so instead of piling up more. Find them with
+agent skips new httm runs and says so instead of piling up more. When the agent stops or restarts
+mid-scan it kills its httm first, and before each httm run it kills any cairn httm no agent is
+waiting on (left by an older agent), unless it's in `D` state. A scan in progress is never counted
+as stuck, so `phase1/doctor.py` only warns about a leftover or a `D`-state one. Find them with
 `ps -o pid,stat,etime,wchan:32,args -C httm` (state `D` = stuck in the kernel); the kernel log
 usually shows a "blocked for more than 120 seconds" trace naming the ZFS call.
 
