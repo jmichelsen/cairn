@@ -12,6 +12,8 @@
 #   KEY       /path/to/the/pull/private/key
 #   SET       <name> <source-dataset> <dest-dataset> [raw]     # 'raw' => encrypted raw send (-w)
 set -u
+# Debian keeps syncoid in /usr/sbin, which a normal user's PATH lacks when run by hand.
+case ":$PATH:" in *:/usr/sbin:*) ;; *) PATH="$PATH:/usr/local/sbin:/usr/sbin:/sbin" ;; esac
 # Args: [CONF] [--only NAME] [--conf CONF]. --only pulls just ONE configured SET (the dashboard's
 # per-dataset "Replicate now"); no --only pulls every SET (the nightly timer).
 CONF="$HOME/.config/cairn/replication.conf"; ONLY=""
