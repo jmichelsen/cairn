@@ -537,7 +537,11 @@ def adapter_zfs_repl(t, defaults, now, pools):
                         st["severity"] = "WARN"; rs.append(f"source snapshot {age//3600}h old")
                     else:
                         st["severity"] = "OK"
-                _pd = dict(reasons=rs, paired=da, dst_on_agent=da, src_n=len(ssnaps))
+                # The vault pulls this pair, so home's own syncoid (Replicate/no-snap) has nothing local
+                # to send to: only Snapshot applies, and only with `zfs allow snapshot` on the source.
+                user, groups = _whoami()
+                _pd = dict(reasons=rs, paired=da, dst_on_agent=da, src_n=len(ssnaps),
+                           caps={"snapshot": zfs_delegated(src, "snapshot", user, groups), "sync": False})
                 if t.get("fresh_src"):
                     _pd["fresh_src"] = t["fresh_src"]
                 st["detail_json"] = json.dumps(_pd)
@@ -2308,6 +2312,9 @@ def build_command(action, t, opts=None):
         dst = t.get("dest")
         if not src or not dst:
             return None, "target missing source/dest"
+        if t.get("dest_agent"):
+            return None, (f"'{t.get('name')}' is replicated by the '{t['dest_agent']}' agent, which pulls it: "
+                          "use Replicate now on that agent's card")
         cmd = ["syncoid", "--no-privilege-elevation", "--no-stream"]
         if t.get("encrypted"):
             # raw send (-w) for zero-knowledge replicas: the destination stays encrypted with its
