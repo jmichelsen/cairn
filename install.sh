@@ -7,6 +7,7 @@
 #   ./install.sh home --add-vault  # add a remote vault to an ALREADY-set-up home (skips home setup)
 #   ./install.sh home --replication [--vault-ssh user@host[:port]] [--home-port N]  # set up the nightly vault-pull replication
 #   ./install.sh home --configure  # re-run config on an existing install (DESTRUCTIVE: regenerates tokens)
+#   ./install.sh --rename-agent NEW  # rename THIS box's agent, keeping its history (run on the dashboard's box)
 #   ./install.sh --check         # preflight only, change nothing
 #
 # Design: you run ONE command, answer a few questions, and elevate ONCE (a single sudo for the
@@ -210,7 +211,7 @@ ensure_docker_access() {
 }
 
 # ---------------- args ----------------
-ROLE=""; CONFIG_IN=""; YES=0; SMART_DETAIL=0; CHECK=0; API_URL=""; VAULT_SSH=""; VAULT_PORT=""; HOME_PORT=""; ADD_VAULT=0; RECONFIGURE=0; REPLICATION=0; UPDATE=0
+ROLE=""; CONFIG_IN=""; YES=0; SMART_DETAIL=0; CHECK=0; API_URL=""; VAULT_SSH=""; VAULT_PORT=""; HOME_PORT=""; ADD_VAULT=0; RECONFIGURE=0; REPLICATION=0; UPDATE=0; RENAME_TO=""
 while [ $# -gt 0 ]; do case "$1" in
   home|vault) ROLE="$1";;
   --role) ROLE="$2"; shift;;
@@ -224,6 +225,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --configure|--reconfigure) RECONFIGURE=1;;
   --smart-detail) SMART_DETAIL=1;;
   --update) UPDATE=1; YES=1;;   # non-interactive code refresh: keep every existing setting, restart
+  --rename-agent) RENAME_TO="${2:-}"; [ -n "$RENAME_TO" ] || die "--rename-agent needs the new name"; shift;;
   --yes|-y) YES=1;;
   --check) CHECK=1;;
   -h|--help) sed -n '2,20p' "$0"; exit 0;;
@@ -272,6 +274,61 @@ update_agent() {
     ok "agent updated ${was} -> $(cat "$HERE/VERSION" 2>/dev/null || echo '?') and restarted"
   else warn "agent not active after update - check: systemctl --user status cairn-agent"; fi
 }
+# ---------------- rename this box's agent, keeping its history ----------------
+# Everything the API holds about an agent is filed under its CAIRN_AGENT_NAME. This stops the agent,
+# renames it in the API's database (phase1/cairn-agent-rename.py inside the API container: backup
+# first, one transaction), switches the name where this box sets it, and starts the agent again. A
+# failed rename restarts the agent under its old name, so it never leaves a second, empty agent.
+dexec() { if [ "$DOCKER_SUDO" = 1 ]; then sudo "$CTR" exec "$@"; else "$CTR" exec "$@"; fi; }
+rename_agent() {
+  local NEW="$RENAME_TO" unit="$HOME/.config/systemd/user/cairn-agent.service" envf="$HERE/config/cairn.env"
+  local OLD api tool=/app/phase1/cairn-agent-rename.py
+  [[ "$NEW" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "'$NEW' isn't a valid agent name (letters, digits, . _ -)"
+  [ -f "$unit" ] || die "no agent unit at $unit - run this on the box whose agent you're renaming"
+  OLD="$(sed -n 's/^Environment=CAIRN_AGENT_NAME=//p' "$unit" | tail -1)"
+  [ -n "$OLD" ] || OLD="$(sed -n 's/^CAIRN_AGENT_NAME=//p' "$envf" 2>/dev/null | sed 's/[[:space:]]#.*//' | tail -1)"
+  [ -n "$OLD" ] || OLD=local
+  [ "$OLD" != "$NEW" ] || die "this box's agent is already named '$NEW'"
+  ensure_docker_access
+  api="$(dps --format '{{.Names}}' | grep -xE "$API_NAMES" | head -1 || true)"
+  [ -n "$api" ] || die "no cairn API container running here. Run this on the box with the dashboard; to rename an agent on another box, see AGENT.md: Renaming an agent"
+  dexec "$api" test -f "$tool" || die "the API container predates the rename tool: rebuild it first (cd $HERE && $CTR compose up -d --build api)"
+  say "Renaming this box's agent '$OLD' -> '$NEW' (its history moves with it)"
+  dexec "$api" python3 "$tool" "$OLD" "$NEW" --dry-run || die "the rename can't go ahead (see above); nothing changed"
+  askyn "go ahead? (stops the agent for a moment; the database is backed up first)" y || { info "nothing changed"; return 0; }
+  systemctl --user stop cairn-agent.service
+  if ! dexec "$api" python3 "$tool" "$OLD" "$NEW" --force; then
+    systemctl --user start cairn-agent.service
+    die "the rename failed (see above); the agent is running again as '$OLD' and nothing changed"
+  fi
+  # the unit's Environment= wins over cairn.env: switch every place that sets it, else add it to cairn.env
+  local set=0
+  grep -q '^Environment=CAIRN_AGENT_NAME=' "$unit" && { sed -i "s/^Environment=CAIRN_AGENT_NAME=.*/Environment=CAIRN_AGENT_NAME=$NEW/" "$unit"; set=1; }
+  grep -q '^CAIRN_AGENT_NAME=' "$envf" 2>/dev/null && { sed -i "s/^CAIRN_AGENT_NAME=.*/CAIRN_AGENT_NAME=$NEW/" "$envf"; set=1; }
+  [ "$set" = 1 ] || printf 'CAIRN_AGENT_NAME=%s\n' "$NEW" >> "$envf"
+  systemctl --user daemon-reload
+  systemctl --user start cairn-agent.service
+  sleep 3
+  systemctl --user is-active --quiet cairn-agent.service && ok "agent running as '$NEW'" \
+    || warn "agent not active after the rename - check: systemctl --user status cairn-agent"
+  # a vault that receives from this box names it in source_agent: offer to switch those too
+  local v spec n
+  v="${CAIRN_VAULT_SSH:-$(sed -n 's/^CAIRN_VAULT_SSH=//p' "$envf" 2>/dev/null | sed 's/[[:space:]]#.*//' | head -1)}"
+  if [ -z "$v" ]; then
+    info "if a vault receives copies from this box, change 'source_agent: $OLD' to '$NEW' in its targets.yaml and restart its agent"
+  fi
+  for spec in ${v//,/ }; do
+    VAULT_SSH="$spec"; VAULT_PORT=""; split_vault_port
+    n="$(vssh -o BatchMode=yes -o ConnectTimeout=8 "$VAULT_SSH" "grep -cE 'source_agent:[[:space:]]*$OLD([[:space:],}]|\$)' ~/cairn/config/targets.yaml" 2>/dev/null || true)"
+    [ "${n:-0}" -gt 0 ] 2>/dev/null || { info "vault $VAULT_SSH: no 'source_agent: $OLD' to change"; continue; }
+    if askyn "vault $VAULT_SSH: change $n 'source_agent: $OLD' line(s) to '$NEW' and restart its agent?" y; then
+      vssh "$VAULT_SSH" "cd ~/cairn/config && cp -a targets.yaml targets.yaml.bak-\$(date +%Y%m%d-%H%M%S) && sed -i -E 's/(source_agent:[[:space:]]*)$OLD([[:space:],}]|\$)/\1$NEW\2/' targets.yaml && systemctl --user restart cairn-agent" \
+        && ok "vault $VAULT_SSH: source_agent now '$NEW', agent restarted" || warn "vault $VAULT_SSH: update failed - edit its targets.yaml by hand"
+    fi
+  done
+  ok "done. Run phase1/doctor.py --problems to check; the dashboard's configuration banner lists anything still naming '$OLD'."
+}
+[ -n "$RENAME_TO" ] && { rename_agent; exit 0; }
 [ "$UPDATE" = 1 ] && { update_agent; exit 0; }
 
 # ---------------- self-bootstrap (so `curl … | bash` works without a manual clone) ----------------

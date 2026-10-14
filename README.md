@@ -91,7 +91,7 @@ Prompts read from your terminal even under `curl ... | bash`. The bootstrap clon
 | `./install.sh --check` | Preflight only, changes nothing |
 | `phase1/zfs-perms.py [--apply]` | Show (and grant) the ZFS permissions this host's targets need, see [ZFS permissions](#zfs-permissions) |
 | `phase1/sanoid-setup.py [--print]` | Wizard: asks what snapshot schedule each dataset cairn watches should get (sanoid's example policies) and writes the sanoid.conf entries, see [docs/getting-started.md](docs/getting-started.md#4-snapshot-on-a-schedule-sanoid) |
-| `phase1/cairn-agent-rename.py OLD NEW` | Rename an agent without losing its history (run in the API container, agent stopped), see [AGENT.md](AGENT.md#renaming-an-agent) |
+| `./install.sh --rename-agent NEW` | Rename this box's agent without losing its history (stops it, renames it in the API, switches the setting, restarts it; offers to update the vault), see [AGENT.md](AGENT.md#renaming-an-agent) |
 | `phase1/doctor.py` | Check this host's whole setup and list every problem with its fix, see [Checking a setup](#checking-a-setup-doctor) |
 | `./install.sh home --configure` | Re-run configuration. **Destructive:** regenerates every token, so every agent must be re-enrolled |
 | `--yes` / `-y` | Accept defaults, no prompts |

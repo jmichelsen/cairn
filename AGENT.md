@@ -283,23 +283,37 @@ isn't in `sanoid.conf`, so the real fix is to add it there.)
 
 An agent's history (targets, status, retired targets, removable links, past actions) is filed under
 its `CAIRN_AGENT_NAME`, so changing only that setting starts its cards over and leaves the old name
-behind as a silent agent that alerts. Rename it in the API's database instead, with the agent stopped:
+behind as a silent agent that alerts. To rename the main box's agent, run on that box (the one with
+the dashboard):
 
 ```bash
-systemctl --user stop cairn-agent                                     # on the agent's host
-docker compose exec api python3 /app/phase1/cairn-agent-rename.py local mclife --dry-run   # API host
-docker compose exec api python3 /app/phase1/cairn-agent-rename.py local mclife --force     # backs up first
-# on the agent's host: set CAIRN_AGENT_NAME=mclife where the agent reads it (the unit's
-# Environment= line wins over cairn.env), then:
-systemctl --user start cairn-agent
+./install.sh --rename-agent mclife
 ```
 
-(`podman compose exec ...` with Podman.) It refuses a name already in use. It also refuses while the
-old agent reported recently, since a running agent would re-create the old name; it can't tell a
-just-stopped agent from a running one, hence `--force` once you've stopped it. Start the agent under
-the new name only after the rename succeeded, or the new name appears as a separate empty agent. Then change any `dest_agent` /
-`source_agent` naming the old agent in other agents' `targets.yaml`; the dashboard's configuration
-banner lists any that are left.
+It finds the current name (the unit's `Environment=` line, else `cairn.env`, else `local`), shows
+what will move, and on a yes: stops the agent, renames it in the API's database (a backup is taken
+first; one transaction), switches the name where this box sets it, and starts the agent again. If
+the rename fails, the agent comes back under its old name and nothing changes. With
+`CAIRN_VAULT_SSH` set, it then offers to change `source_agent: <old>` on the vault and restart the
+vault's agent; otherwise do that by hand.
+
+**Renaming an agent on another box** (e.g. a vault): the database lives with the API, so run the tool
+in the API container, with that agent stopped, then set its new `CAIRN_AGENT_NAME` and start it:
+
+```bash
+systemctl --user stop cairn-agent                                                   # on the vault
+docker compose exec api python3 /app/phase1/cairn-agent-rename.py vault offsite --dry-run   # API host
+docker compose exec api python3 /app/phase1/cairn-agent-rename.py vault offsite --force
+# on the vault: CAIRN_AGENT_NAME=offsite in its cairn.env (or unit), then start the agent;
+# on the main box: dest_agent: vault -> offsite in its targets.yaml, restart its agent
+```
+
+(`podman compose exec ...` with Podman.) The tool refuses a name already in use. It also refuses
+while the old agent reported recently, since a running agent would re-create the old name; it can't
+tell a just-stopped agent from a running one, hence `--force` once you've stopped it. Start the
+agent under the new name only after the rename succeeded, or the new name appears as a separate
+empty agent. The dashboard's configuration banner lists any `dest_agent` / `source_agent` still
+naming the old agent.
 
 ## Troubleshooting
 
