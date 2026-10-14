@@ -3433,16 +3433,26 @@ def _acts(r, can_act, viewer=False):
         snap = (f"<button onclick=\"act('{n}','snapshot',true)\">Snapshot</button>"
                 if caps.get("snapshot", True) else "")
         if _d.get("paired"):
-            # the other agent pulls this one; home's syncoid has no local dest. Replicate lives on its card.
-            main = snap + f'<span class=ro>replicated by {_esc(_d["paired"])}</span>'
+            # the other agent pulls this one; home's syncoid has no local dest. Replicate lives on the
+            # merged pair card - and this card only renders on its own when there IS no pair yet, i.e.
+            # the other agent hasn't reported a zfs-local whose source is exactly our dest. Say so.
+            main = snap + (f'<span class=ro>replicated by {_esc(_d["paired"])}, which isn\'t reporting '
+                           f'{_esc(r.get("dest") or "the copy")} yet: add it to {_esc(_d["paired"])}\'s '
+                           f'targets.yaml as a zfs-local with source_agent</span>')
         else:
             main = (f"<button class=pri onclick=\"act('{n}','sync',true)\">Replicate</button>" + snap +
                     f"<button onclick=\"act('{n}','sync',false)\">no-snap</button>")
     elif t == "zfs-local":
         main = ""
+        if _d.get("source_agent"):
+            # a replica this agent pulls (normally shown inside its pair card; on its own until the home
+            # half reports). On-demand pull here, and no Snapshot: a local snapshot on a replica breaks
+            # the next incremental pull.
+            main += (f"<button class=pri onclick=\"replicateNow('{n}','{_esc(r.get('agent') or '')}')\">"
+                     "Replicate now</button>")
         # snapshot needs zfs delegation; hide the button on datasets this agent can't snapshot (e.g.
         # an OS root pool with no `zfs allow`), so it never queues an intent that only fails.
-        if r.get("source") and caps.get("snapshot", True):
+        elif r.get("source") and caps.get("snapshot", True):
             main += f"<button class=pri onclick=\"act('{n}','snapshot',true)\">Snapshot</button>"
         # Scrub is a whole-POOL operation (only on a pool root) AND needs the provisioned sudo wrapper.
         if r.get("source") and "/" not in r["source"] and caps.get("scrub", True):

@@ -496,9 +496,17 @@ def test_paired_repl_card_hides_home_replicate():
     d = json.loads(r["detail_json"]); d["paired"] = "offsite-vault"; r["detail_json"] = json.dumps(d)
     h = api._acts(r, True, False)
     assert ">Replicate<" not in h and ">no-snap<" not in h and ">Snapshot<" not in h
-    assert "replicated by offsite-vault" in h
+    assert "replicated by offsite-vault" in h and "add it to offsite-vault" in h
 
 
 def test_unpaired_repl_card_keeps_replicate():
     h = api._acts(_row("tank/photos", typ="zfs-repl"), True, False)
     assert ">Replicate<" in h and ">Snapshot<" in h and ">no-snap<" in h
+
+
+def test_vault_replica_card_offers_pull_not_snapshot():
+    r = _row("tank/apps/wiki", caps={"snapshot": True})
+    d = json.loads(r["detail_json"]); d["source_agent"] = "home"; r["detail_json"] = json.dumps(d)
+    r["agent"] = "offsite-vault"
+    h = api._acts(r, True, False)
+    assert "replicateNow('t','offsite-vault')" in h and ">Snapshot<" not in h
