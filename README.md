@@ -75,15 +75,16 @@ pushes + runs the vault install for you. On the vault, the same script consumes 
 ```bash
 cp config/cairn.env.example config/cairn.env   # 3 tokens (openssl rand -hex 32) + SMTP/Gotify
 cp config/targets.example.yaml config/targets.yaml               # list YOUR pools / datasets / repos
-docker compose up -d --build                                     # api + report-only container agent
+docker compose --profile container-agent up -d --build         # api + report-only container agent
 ```
-For **actions** you run the execute-capable host agent (`phase1/grant-access.sh` + the host agent
-unit, see `AGENT.md`) - and in that case bring up **`docker compose up -d --build api`** (api only),
-NOT the whole stack, or you end up with two agents reporting for the same host. `install.sh home`
-does this for you (api-only container + host agent).
+A plain **`docker compose up -d --build`** starts the **api only**. That's the mode for the
+execute-capable host agent (`phase1/grant-access.sh` + the host agent unit, see `AGENT.md`), and
+it's what `install.sh home` sets up. The container agent is opt-in (the `container-agent` profile)
+so it can never run alongside the host agent: both report as `local` and would fight over the same
+targets. Same commands with `podman-compose` (1.0.6+ for profiles).
 </details>
 
-**Read-only first (recommended).** The default compose runs an **unprivileged, report-only**
+**Read-only first (recommended).** The `container-agent` profile runs an **unprivileged, report-only**
 container agent - great for kicking the tires. What you get vs. what needs the host agent:
 
 | Works in the default RO container | Needs the host/execute agent |
