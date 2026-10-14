@@ -187,7 +187,19 @@ agent (main box and vault), as the agent's user, from the cairn checkout:
 phase1/doctor.py               # everything
 phase1/doctor.py --offline     # skip the API and ssh checks
 phase1/doctor.py --no-collect  # skip the dry collection (the slowest part)
+phase1/doctor.py --vault user@vault:2222   # main box: also check the vault over ssh
 ```
+
+**Checking the vault from the main box.** With `--vault user@host[:port]` (repeatable), or
+`CAIRN_VAULT_SSH` in `cairn.env` (comma-separated; `./install.sh home --replication` records it), the
+doctor logs in to the vault with your normal ssh key (`BatchMode`, so it never hangs on a password
+prompt; a non-standard port goes after the colon), reads its `targets.yaml`, `replication.conf`,
+agent name and pools, and compares them with this box's `zfs-repl` targets: the dest pool exists
+there, `dest_agent` is the vault's real agent name, a vault `zfs-local` watches each dest under the
+same name with `source_agent`, a SET pulls it from the right source (raw when `encrypted`), and the
+vault pulls nothing this box doesn't declare. It then runs the vault's own doctor there (0.38 or
+newer), which includes the vault's ssh test back to this box on the `PORT` in its `replication.conf`.
+This works without the API, so it still helps when a pair never showed up on the dashboard.
 
 It reads the settings the agent really uses (the unit's `Environment=` lines win over `cairn.env`)
 and prints each check as `ok`, `info`, `WARN` or `FAIL`, every problem with a `fix:` line:

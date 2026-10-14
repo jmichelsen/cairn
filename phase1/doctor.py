@@ -18,8 +18,17 @@ cairn.env, exactly like the agent) and checks, in order:
   status     a dry collection: what the agent would report right now, every non-OK target with why
 
   phase1/doctor.py                 # everything
-  phase1/doctor.py --offline       # skip network checks (API, ssh to home)
+  phase1/doctor.py --offline       # skip network checks (API, ssh to home, the vault)
   phase1/doctor.py --no-collect    # skip the dry collection (the slowest part)
+  phase1/doctor.py --vault user@vault[:port]   # main box: also check the vault over ssh
+
+On the main box, --vault (or CAIRN_VAULT_SSH in cairn.env, which install.sh records when it sets up
+the vault's pull; comma-separate several) logs in to the vault with your normal ssh key, reads its
+targets.yaml, replication.conf, agent name and pools, and compares them with this box's zfs-repl
+targets: the vault pool exists, dest_agent is the vault's real agent name, a vault target watches
+each dest under the same name with source_agent, a SET pulls it from the right source (raw when
+encrypted), and nothing is pulled that this box doesn't declare. Then it runs the vault's own doctor
+there (0.38+), which includes the vault's ssh test back to this box on its configured port.
 
 Exit code: 0 when nothing FAILed (WARNs allowed), 1 otherwise. Paste the whole output when asking
 for help: it holds no secrets.
@@ -616,10 +625,168 @@ def check_status(r, cfg):
     r.ok(f"{len(res) - len(bad)} of {len(res)} statuses OK") if res else r.warn("nothing to report")
 
 
+# ---------------------------------------------------------------- the vault, over ssh (main box)
+def split_hostport(spec):
+    """'user@host:2222' -> ('user@host', '2222'); no port -> (spec, '')."""
+    m = re.match(r"^(.+):(\d+)$", spec or "")
+    return (m.group(1), m.group(2)) if m else (spec, "")
+
+
+_REMOTE_SCRIPT = r"""
+cd "$HOME/cairn" 2>/dev/null || { echo "@@ERR no ~/cairn on this host"; exit 0; }
+uenv=$(systemctl --user show cairn-agent.service -p Environment --value 2>/dev/null | tr ' ' '\n')
+fenv() { sed -n "s/^$1=//p" config/cairn.env 2>/dev/null | sed 's/[[:space:]]#.*//' | head -1; }
+T=$(printf '%s\n' "$uenv" | sed -n 's/^CAIRN_TARGETS=//p'); [ -n "$T" ] || T=$(fenv CAIRN_TARGETS)
+[ -n "$T" ] || T="$HOME/cairn/targets.yaml"
+N=$(printf '%s\n' "$uenv" | sed -n 's/^CAIRN_AGENT_NAME=//p'); [ -n "$N" ] || N=$(fenv CAIRN_AGENT_NAME)
+echo "@@NAME"; echo "${N:-local}"
+echo "@@VERSION"; cat VERSION 2>/dev/null
+echo "@@POOLS"; zpool list -H -o name 2>/dev/null
+echo "@@TARGETS"; cat "$T" 2>/dev/null
+echo "@@PULL"; cat "$HOME/.config/cairn/replication.conf" 2>/dev/null
+echo "@@END"
+"""
+
+
+def fetch_remote(dest, port, timeout=40):
+    """Read the vault's config over ssh. Returns (info dict, error string or None)."""
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"] + (["-p", port] if port else [])
+    try:
+        p = subprocess.run(cmd + [dest, "bash -s"], input=_REMOTE_SCRIPT, capture_output=True,
+                           text=True, timeout=timeout)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return None, str(e)
+    if "@@" not in p.stdout:
+        return None, (p.stderr.strip().splitlines() or [f"ssh exited {p.returncode}"])[-1]
+    return parse_remote(p.stdout)
+
+
+def parse_remote(out):
+    secs, cur = {}, None
+    for ln in out.splitlines():
+        if ln.startswith("@@ERR"):
+            return None, ln[6:]
+        if ln.startswith("@@"):
+            cur = ln[2:].strip(); secs[cur] = []
+        elif cur:
+            secs[cur].append(ln)
+    try:
+        import yaml
+        tcfg = yaml.safe_load("\n".join(secs.get("TARGETS", []))) or {}
+    except Exception as e:
+        return None, f"the vault's targets.yaml doesn't parse: {e}"
+    targets = [t for t in (tcfg.get("targets") or []) if isinstance(t, dict)] if isinstance(tcfg, dict) else []
+    return {"name": (secs.get("NAME") or ["local"])[0].strip() or "local",
+            "version": "".join(secs.get("VERSION", [])).strip(),
+            "pools": {x.strip() for x in secs.get("POOLS", []) if x.strip()},
+            "targets": targets,
+            "pull": parse_pull_conf("\n".join(secs.get("PULL", []))) if secs.get("PULL") else None}, None
+
+
+def compare_vault(home_targets, home_name, v):
+    """[(level, msg, fix)] comparing this box's zfs-repl targets with one vault's config. Pure."""
+    out = []
+    vn, pools, vt, pull = v["name"], v["pools"], v["targets"], v["pull"]
+    vloc = [t for t in vt if t.get("type") == "zfs-local"]
+    sets = pull["SETS"] if pull else []
+    mine = [t for t in home_targets if t.get("type") == "zfs-repl" and t.get("dest")
+            and (t.get("dest_agent") == vn or str(t["dest"]).split("/")[0] in pools)]
+    if not mine:
+        out.append(("WARN", f"no zfs-repl here sends to '{vn}' (pools there: {', '.join(sorted(pools)) or 'none'})",
+                    f"a target replicated to it needs `dest: <vault pool>/...` and `dest_agent: {vn}`"))
+    for t in mine:
+        n, src, dst = t["name"], t.get("source"), t["dest"]
+        dpool = dst.split("/")[0]
+        if dpool not in pools:
+            out.append(("FAIL", f"'{n}': dest pool '{dpool}' isn't on '{vn}' (its pools: {', '.join(sorted(pools))})",
+                        "fix `dest` to the dataset name on the vault"))
+            continue
+        if t.get("dest_agent") != vn:
+            out.append(("FAIL", f"'{n}': dest_agent is '{t.get('dest_agent') or '(unset)'}' but the vault's agent is named '{vn}'",
+                        f"set `dest_agent: {vn}`"))
+        recv = [x for x in vloc if x.get("source") == dst]
+        if not recv:
+            leaf = dst.rsplit("/", 1)[-1]
+            near = [x for x in vloc if str(x.get("source", "")).rsplit("/", 1)[-1] == leaf or x.get("name") == n]
+            hint = f"; '{near[0]['name']}' there watches {near[0].get('source')}" if near else ""
+            out.append(("FAIL", f"'{n}': no zfs-local on '{vn}' watches {dst}{hint}",
+                        f"on the vault add `- {{ name: {n}, type: zfs-local, source: {dst}, source_agent: {home_name} }}`"))
+        else:
+            r = recv[0]
+            if r.get("name") != n:
+                out.append(("FAIL", f"'{n}': the vault calls it '{r.get('name')}', so the pair's names differ and "
+                            "its Replicate now finds no SET", f"rename '{r.get('name')}' to '{n}' in the vault's targets.yaml"))
+            if r.get("source_agent") != home_name:
+                out.append(("WARN", f"'{n}': the vault's target has source_agent '{r.get('source_agent') or '(unset)'}', "
+                            f"this box's agent is '{home_name}'", f"set `source_agent: {home_name}` there"))
+        if pull is None:
+            out.append(("FAIL", f"'{n}': the vault has no replication.conf, so nothing pulls it",
+                        "./install.sh home --replication --vault-ssh <user>@<vault>[:port]"))
+            continue
+        s = [x for x in sets if x[2] == dst]
+        if not s:
+            out.append(("FAIL", f"'{n}': no SET in the vault's replication.conf pulls into {dst}",
+                        "re-run ./install.sh home --replication to re-sync the SETs"))
+            continue
+        name, ssrc, _, raw = s[0]
+        if name != n:
+            out.append(("FAIL", f"'{n}': the SET pulling {dst} is named '{name}'", "re-run ./install.sh home --replication"))
+        if ssrc != src:
+            out.append(("FAIL", f"'{n}': the SET pulls from {ssrc}, but this box sends {src}", "re-run ./install.sh home --replication"))
+        if bool(t.get("encrypted")) != (raw == "raw"):
+            out.append(("WARN", f"'{n}': encrypted is {bool(t.get('encrypted'))} here but the SET {'is' if raw == 'raw' else 'is not'} raw",
+                        "re-run ./install.sh home --replication"))
+    declared = {t.get("dest") for t in mine}
+    for name, ssrc, sdst, _ in sets:
+        if sdst not in declared:
+            out.append(("WARN", f"the vault pulls {ssrc} -> {sdst} (SET '{name}') but no zfs-repl here declares it, "
+                        "so it has no pair card and doesn't count in 3-2-1",
+                        f"add `- {{ name: {name}, type: zfs-repl, source: {ssrc}, dest: {sdst}, dest_agent: {vn} }}`"))
+    if not out:
+        out.append(("OK", f"this box and '{vn}' agree on {len(mine)} replicated dataset(s)", None))
+    return out
+
+
+def check_vaults(r, specs, home_targets, offline):
+    if offline or not specs:
+        return
+    home_name = os.environ.get("CAIRN_AGENT_NAME", "local")
+    for spec in specs:
+        dest, port = split_hostport(spec.strip())
+        if not dest:
+            continue
+        r.section(f"vault {dest}" + (f" port {port}" if port else ""))
+        v, err = fetch_remote(dest, port)
+        if err:
+            r.fail(f"can't check the vault over ssh: {err}",
+                   f"`ssh {'-p ' + port + ' ' if port else ''}{dest}` must work without a password prompt (your key, "
+                   "not the pull key); give the port as user@host:port")
+            continue
+        r.info(f"agent '{v['name']}', cairn {v['version'] or '?'}, pools {', '.join(sorted(v['pools'])) or 'none'}")
+        for lvl, msg, fix in compare_vault(home_targets, home_name, v):
+            r.add(lvl, msg, fix)
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"] + (["-p", port] if port else [])
+        rc, out, err = _sh(cmd + [dest, "cd ~/cairn && test -f phase1/doctor.py && python3 phase1/doctor.py --no-collect"
+                                         " || echo @@NODOCTOR"], timeout=240)
+        if "@@NODOCTOR" in out:
+            r.warn(f"the vault runs cairn {v['version'] or '?'}, which has no doctor of its own",
+                   "update it (Update on the Agents card), then re-run this")
+            continue
+        r.section(f"vault {dest}: its own doctor")
+        for ln in out.splitlines()[1:]:
+            m = re.match(r"^\s+\[(FAIL|WARN)\] (.*)$", ln)
+            if m:
+                r.items.append((m.group(1), f"(vault) {m.group(2)}", None))
+            if not r.quiet and ln.strip() and not re.match(r"^\d+ problem", ln):
+                print("    " + ln)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--offline", action="store_true", help="skip the API and ssh checks")
     ap.add_argument("--no-collect", action="store_true", help="skip the dry collection")
+    ap.add_argument("--vault", action="append", default=[], metavar="USER@HOST[:PORT]",
+                    help="main box: also check this vault over ssh (repeatable; default CAIRN_VAULT_SSH)")
     a = ap.parse_args()
     r = Report()
     print(f"cairn doctor {(ROOT / 'VERSION').read_text().strip() if (ROOT / 'VERSION').is_file() else ''} "
@@ -647,6 +814,8 @@ def main():
     check_pull(r, targets, pools, a.offline)
     if targets and not a.no_collect:
         check_status(r, cfg)
+    vaults = a.vault or [x for x in os.environ.get("CAIRN_VAULT_SSH", "").split(",") if x.strip()]
+    check_vaults(r, vaults, targets, a.offline)
     f, w = r.count("FAIL"), r.count("WARN")
     print(f"\n{f} problem(s), {w} warning(s)." + ("" if f or w else " All good."))
     return 1 if f else 0
