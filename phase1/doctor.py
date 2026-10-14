@@ -22,6 +22,7 @@ cairn.env, exactly like the agent) and checks, in order:
   phase1/doctor.py                 # everything
   phase1/doctor.py --offline       # skip network checks (API, ssh to home, the vault)
   phase1/doctor.py --no-collect    # skip the dry collection (the slowest part)
+  phase1/doctor.py --problems      # only the WARN/FAIL findings and their fixes (alias --warnings, -p)
   phase1/doctor.py --vault user@vault[:port]   # main box: also check the vault over ssh
 
 On the main box, --vault (or CAIRN_VAULT_SSH in cairn.env, which install.sh records when it sets up
@@ -90,19 +91,38 @@ class Report:
     """Collects (level, section, message, fix) findings and prints them as they come."""
     MARK = {"OK": " ok ", "INFO": "info", "WARN": "WARN", "FAIL": "FAIL"}
 
-    def __init__(self, quiet=False):
-        self.items, self.quiet = [], quiet
+    def __init__(self, quiet=False, problems_only=False):
+        self.items, self.quiet, self.problems_only = [], quiet, problems_only
+        self._pending = None            # problems_only: a section header held until it has a problem
 
     def section(self, title):
-        if not self.quiet:
+        if self.quiet:
+            return
+        if self.problems_only:
+            self._pending = title
+        else:
             print(f"\n== {title}")
+
+    def _header(self):
+        if self._pending is not None:
+            print(f"\n== {self._pending}")
+            self._pending = None
 
     def add(self, level, msg, fix=None):
         self.items.append((level, msg, fix))
-        if not self.quiet:
-            print(f"  [{self.MARK[level]}] {msg}")
-            if fix:
-                print(f"         fix: {fix}")
+        if self.quiet or (self.problems_only and level not in ("WARN", "FAIL")):
+            return
+        self._header()
+        print(f"  [{self.MARK[level]}] {msg}")
+        if fix:
+            print(f"         fix: {fix}")
+
+    def raw(self, line, problem=False):
+        """A pre-formatted line (the vault's own doctor output)."""
+        if self.quiet or (self.problems_only and not problem):
+            return
+        self._header()
+        print(line)
 
     def ok(self, msg): self.add("OK", msg)
     def info(self, msg, fix=None): self.add("INFO", msg, fix)
@@ -874,22 +894,30 @@ def check_vaults(r, specs, home_targets, offline):
                    "update it (Update on the Agents card), then re-run this")
             continue
         r.section(f"vault {dest}: its own doctor")
+        keep = False                    # in problems-only mode: a WARN/FAIL line and its fix lines
         for ln in out.splitlines()[1:]:
             m = re.match(r"^\s+\[(FAIL|WARN)\] (.*)$", ln)
             if m:
                 r.items.append((m.group(1), f"(vault) {m.group(2)}", None))
-            if not r.quiet and ln.strip() and not re.match(r"^\d+ problem", ln):
-                print("    " + ln)
+                keep = True
+            elif re.match(r"^\s+\[", ln) or ln.startswith("=="):
+                keep = False
+            if ln.strip() and not re.match(r"^\d+ problem", ln):
+                if r.problems_only and ln.startswith("=="):
+                    continue
+                r.raw("    " + ln, problem=keep)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--offline", action="store_true", help="skip the API and ssh checks")
     ap.add_argument("--no-collect", action="store_true", help="skip the dry collection")
+    ap.add_argument("--problems", "--warnings", "-p", dest="problems", action="store_true",
+                    help="print only WARN and FAIL findings (with their fixes), not ok/info lines")
     ap.add_argument("--vault", action="append", default=[], metavar="USER@HOST[:PORT]",
                     help="main box: also check this vault over ssh (repeatable; default CAIRN_VAULT_SSH)")
     a = ap.parse_args()
-    r = Report()
+    r = Report(problems_only=a.problems)
     print(f"cairn doctor {(ROOT / 'VERSION').read_text().strip() if (ROOT / 'VERSION').is_file() else ''} "
           f"on {os.uname().nodename} as {os.environ.get('USER') or C._whoami()[0]}")
     uenv = effective_env()
