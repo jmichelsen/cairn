@@ -24,7 +24,7 @@ COPY phase1 /src/phase1
 COPY tools  /src/tools
 COPY replication /src/replication
 COPY tests  /src/tests
-COPY agent.py VERSION /src/
+COPY agent.py VERSION cairn-agent.service /src/
 RUN python3 -m py_compile phase1/*.py agent.py \
  && python3 tools/check_js.py \
  && python3 -m pytest -q
