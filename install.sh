@@ -582,7 +582,11 @@ provision_replication() {
   local sets; sets="$(_repl_sets)"
   [ -n "$sets" ] || { warn "no zfs-repl targets in config/targets.yaml - nothing to replicate"; return; }
   info "replication sets:"; while read -r n s d r; do [ -n "$n" ] && info "  $n: $s -> $d ${r:+(raw)}"; done <<<"$sets"
-  [ -n "$ssh_t" ] || ask ssh_t "vault ssh target (user@host, or user@host:port)" "$VAULT_SSH${VAULT_PORT:+:$VAULT_PORT}"
+  # Re-runs default to the last answers: the vault from CAIRN_VAULT_SSH (recorded by remember_vault),
+  # home's address/port from the vault's existing replication.conf (below).
+  local vdef="$VAULT_SSH${VAULT_PORT:+:$VAULT_PORT}"
+  [ -n "$vdef" ] || vdef="$(sed -n 's/^CAIRN_VAULT_SSH=//p' "$HERE/config/cairn.env" 2>/dev/null | sed 's/[[:space:]]#.*//' | head -1 | cut -d, -f1)"
+  [ -n "$ssh_t" ] || ask ssh_t "vault ssh target (user@host, or user@host:port)" "$vdef"
   [ -n "$ssh_t" ] || { warn "no vault ssh target - skipping replication"; return; }
   VAULT_SSH="$ssh_t"; split_vault_port; ssh_t="$VAULT_SSH"
   local sshp="${VAULT_PORT:+ port $VAULT_PORT}" err
@@ -600,11 +604,18 @@ provision_replication() {
 
   local vuser="${ssh_t%@*}"; [ "$vuser" = "$ssh_t" ] && vuser="$USER"
   local huser="$USER" wrapper="$HERE/replication/pull-command.sh"
+  local prev prev_addr="" prev_port=""
+  prev="$(vssh "$ssh_t" 'cat ~/.config/cairn/replication.conf 2>/dev/null' 2>/dev/null)"
+  if [ -n "$prev" ]; then
+    prev_addr="$(awk '$1=="HOME_SSH"{print $2; exit}' <<<"$prev")"; prev_addr="${prev_addr#*@}"
+    prev_port="$(awk '$1=="PORT"{print $2; exit}' <<<"$prev")"; prev_port="${prev_port:-22}"
+    info "the vault already pulls from ${prev_addr:-?} port $prev_port - Enter keeps that"
+  fi
   local home_addr; ask home_addr "address the VAULT uses to reach THIS home (LAN ip / VPN / host)" \
-    "$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.)' | head -1)"
+    "${prev_addr:-$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(10\.|192\.168\.|172\.)' | head -1)}"
   [ -n "$home_addr" ] || { warn "no home address - skipping replication"; return; }
   local HOME_SSH="$huser@$home_addr" home_port
-  ask home_port "SSH port the VAULT uses to reach THIS home" "${HOME_PORT:-$(local_sshd_port)}"
+  ask home_port "SSH port the VAULT uses to reach THIS home" "${HOME_PORT:-${prev_port:-$(local_sshd_port)}}"
   local src_pools dst_pools p
   src_pools="$(echo "$sets" | awk 'NF{print $2}' | cut -d/ -f1 | sort -u)"
   dst_pools="$(echo "$sets" | awk 'NF{print $3}' | cut -d/ -f1 | sort -u)"
@@ -648,6 +659,8 @@ provision_replication() {
   { printf 'HOME_SSH  %s\nKEY  %s/.ssh/cairn-pull\n' "$HOME_SSH" "$vhome"
     [ -n "$home_port" ] && [ "$home_port" != 22 ] && printf 'PORT  %s\n' "$home_port"
     while read -r n s d r; do [ -n "$n" ] && printf 'SET  %s  %s  %s  %s\n' "$n" "$s" "$d" "$r"; done <<<"$sets"; } > "$cf"
+  local gone; gone="$(awk '$1=="SET"{print $2}' <<<"$prev" | grep -vxF -f <(awk '$1=="SET"{print $2}' "$cf") || true)"
+  [ -n "$gone" ] && warn "dropping SET(s) the vault had but this box's targets.yaml doesn't declare: $(echo $gone) (add a zfs-repl target for each to keep it)"
   vrsync -a "$cf" "$ssh_t:.config/cairn/replication.conf" 2>/dev/null; rm -f "$cf"
   vssh "$ssh_t" 'chmod 600 ~/.config/cairn/replication.conf; chmod +x ~/cairn/replication/vault-pull.sh; systemctl --user daemon-reload && systemctl --user enable --now cairn-pull.timer' 2>&1 | sed 's/^/   /' \
     && ok "vault: nightly pull timer enabled" || warn "vault: timer setup returned non-zero"

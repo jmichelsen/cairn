@@ -65,13 +65,17 @@ the vault's `zfs-local` target that same name. The vault agent must be execute-c
 
 Run it on **home**. `./install.sh vault` does not set up the pull; it is offered at the end of
 `./install.sh home --add-vault`, or run `--replication` on its own any time (idempotent, re-run to
-re-sync). It needs key-based SSH from home to the vault. It:
+re-sync). It needs key-based SSH from home to the vault. **Re-running** defaults every answer to the
+last one: the vault target from `CAIRN_VAULT_SSH` in `cairn.env` (recorded on the first run), home's
+address and port from the vault's current `replication.conf`, so pressing Enter (or `--yes`) keeps
+them. SETs are rebuilt from home's `zfs-repl` targets; a SET the vault has that no target declares
+is dropped, with a warning naming it. It:
 
 1. detects home's `zfs-repl` targets from `config/targets.yaml` (one SET each, named after the
    target, `raw` when the target is `encrypted`);
-2. asks the address the vault uses to reach home, defaulting to home's LAN address (a VPN address or
-   hostname also works), and the SSH port it should use, defaulting to the `Port` in home's
-   `sshd_config` (22 if none);
+2. asks the address the vault uses to reach home, defaulting to the one already in the vault's
+   `replication.conf`, else home's LAN address (a VPN address or hostname also works), and the SSH
+   port it should use, defaulting likewise, else the `Port` in home's `sshd_config` (22 if none);
 3. **home:** `zfs allow send,snapshot,hold` on each source pool, where any of them is missing;
 4. **vault:** generates the dedicated `~/.ssh/cairn-pull` key;
 5. **home:** authorizes it as `restrict,command="…/pull-command.sh" <pubkey>`;
