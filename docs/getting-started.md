@@ -36,7 +36,7 @@ Creating a pool means choosing disks and a layout; follow the
 Give each app or collection its own dataset, so each can have its own schedule and be copied on its own:
 
 ```bash
-sudo zfs create -p rpool/apps/wiki                 # -p also creates rpool/vol if needed
+sudo zfs create -p rpool/apps/wiki                 # -p also creates rpool/apps if needed
 zfs get -H -o value mountpoint rpool/apps/wiki      # where it lives, e.g. /rpool/apps/wiki
 ```
 
