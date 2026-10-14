@@ -8,12 +8,15 @@
 # Setup (all config lives in ONE file - no hidden .env):
 #   cp config/cairn.env.example config/cairn.env   # set the 3 tokens + SMTP/Gotify
 #   cp config/targets.example.yaml       config/targets.yaml         # list YOUR pools/datasets/repos
-#   # edit the agent's borg/backupninja mounts below to your paths, then pick ONE deploy mode:
-#   docker compose up -d --build          # CONTAINER mode: api + the report-only container agent
-#   docker compose up -d --build api      # HOST mode: api only - pair with the execute-capable
-#                                         #   host agent from AGENT.md / install.sh (install.sh home
-#                                         #   already does exactly this). Do NOT run both modes, or
-#                                         #   you get TWO agents reporting for the same host.
+#   # then pick ONE deploy mode:
+#   docker compose up -d --build          # HOST mode (default): api only - pair with the execute-
+#                                         #   capable host agent from AGENT.md / install.sh
+#                                         #   (install.sh home does exactly this).
+#   docker compose --profile container-agent up -d --build
+#                                         # CONTAINER mode: api + the report-only container agent
+#                                         #   (edit its borg/backupninja mounts below first).
+#   Never run both modes: the container agent and the host agent both report as `local`.
+#   podman-compose works the same way (profiles need podman-compose 1.0.6+).
 
 name: cairn
 
@@ -41,10 +44,11 @@ services:
     restart: unless-stopped
 
   # ---- local agent: reads THIS host's ZFS/borg/backupninja and reports to the API ----
-  # HOST-mode deploys skip this service (bring up `api` only) and run the execute-capable host
-  # agent instead - see AGENT.md. Running this container AND the host agent = two agents for one
-  # host. `docker compose up -d api` starts just the api; `docker compose rm -sf agent` drops this.
+  # Opt-in (profile `container-agent`): a plain `docker compose up` does NOT start it, so it can't
+  # collide with the host agent that install.sh sets up. Running this container AND the host agent =
+  # two agents reporting as `local` for one host.
   agent:
+    profiles: ["container-agent"]
     build: .
     image: cairn:latest
     command: ["agent"]

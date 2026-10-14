@@ -104,7 +104,7 @@ root once).
 
 ```
 cd ~/cairn
-docker compose stop agent               # 1. drop the RO container agent (api stays up)
+docker compose --profile container-agent rm -sf agent   # 1. drop the RO container agent (api stays up)
 ./run-local-agent.sh report             # 2. report once, report-only - proves clean takeover
 ./run-local-agent.sh dry                # 3. execute+DRYRUN: buttons appear; a click only LOGS the command
                                         #    (click one in the UI, verify the [DRYRUN] line, Ctrl-C)
@@ -120,7 +120,7 @@ unit reads the token from `config/cairn.env`; flip `CAIRN_DRYRUN=1` in it (then
 cairn-agent` / `journalctl --user -u cairn-agent -f` for logs.
 
 **Rolling back** is symmetric: `systemctl --user disable --now cairn-agent.service` then
-`docker compose start agent` returns you to the RO container.
+`docker compose --profile container-agent up -d agent` returns you to the RO container.
 
 ## Remote agent (the off-site vault)
 
