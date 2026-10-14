@@ -3430,9 +3430,14 @@ def _acts(r, can_act, viewer=False):
                     f"<button onclick=\"openRecover('{n}','versions')\" title=\"browse folders and restore an older version of a file\">Versions</button>")
         rec += "</div>"
     if t == "zfs-repl":
-        main = (f"<button class=pri onclick=\"act('{n}','sync',true)\">Replicate</button>"
-                f"<button onclick=\"act('{n}','snapshot',true)\">Snapshot</button>"
-                f"<button onclick=\"act('{n}','sync',false)\">no-snap</button>")
+        snap = (f"<button onclick=\"act('{n}','snapshot',true)\">Snapshot</button>"
+                if caps.get("snapshot", True) else "")
+        if _d.get("paired"):
+            # the other agent pulls this one; home's syncoid has no local dest. Replicate lives on its card.
+            main = snap + f'<span class=ro>replicated by {_esc(_d["paired"])}</span>'
+        else:
+            main = (f"<button class=pri onclick=\"act('{n}','sync',true)\">Replicate</button>" + snap +
+                    f"<button onclick=\"act('{n}','sync',false)\">no-snap</button>")
     elif t == "zfs-local":
         main = ""
         # snapshot needs zfs delegation; hide the button on datasets this agent can't snapshot (e.g.

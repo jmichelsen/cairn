@@ -488,3 +488,17 @@ def test_privacy_is_public_and_redirects_to_the_studio_policy():
     assert _gate("/privacy", "") == 200                      # no token needed (old links point here)
     r = api.privacy()
     assert r.status_code == 302 and r.headers["location"] == "https://lowandslowstudio.com/apps/cairn/privacy/"
+
+
+# ---- vault-pulled pairs: no home-side syncoid -------------------------------------------------
+def test_paired_repl_card_hides_home_replicate():
+    r = _row("rpool/apps/wiki", typ="zfs-repl", caps={"snapshot": False, "sync": False})
+    d = json.loads(r["detail_json"]); d["paired"] = "offsite-vault"; r["detail_json"] = json.dumps(d)
+    h = api._acts(r, True, False)
+    assert ">Replicate<" not in h and ">no-snap<" not in h and ">Snapshot<" not in h
+    assert "replicated by offsite-vault" in h
+
+
+def test_unpaired_repl_card_keeps_replicate():
+    h = api._acts(_row("tank/photos", typ="zfs-repl"), True, False)
+    assert ">Replicate<" in h and ">Snapshot<" in h and ">no-snap<" in h

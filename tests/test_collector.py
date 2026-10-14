@@ -1007,3 +1007,10 @@ def test_zfs_events_unreadable_journal_is_unknown_not_ok(monkeypatch):
     monkeypatch.setattr(collector, "run", lambda *a, **k: (127, "", "No such file"))
     st = collector.adapter_zfs_events({"name": "zfs-events", "type": "zfs-events"}, {}, 0)[0]
     assert st["severity"] == "UNKNOWN" and "journal" in st["last_error"]
+
+
+def test_sync_refused_for_vault_pulled_pair():
+    t = {"name": "wiki", "type": "zfs-repl", "source": "rpool/wiki", "dest": "tank/wiki",
+         "dest_agent": "offsite-vault"}
+    cmd, err = collector.build_command("sync", t, {})
+    assert cmd is None and "offsite-vault" in err
