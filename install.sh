@@ -44,6 +44,18 @@ PKG=""  # detected package manager
 detect_pkg() { for m in apt-get dnf yum pacman zypper; do command -v "$m" >/dev/null && { PKG="$m"; return; }; done; }
 _sudo_primed=0
 prime_sudo() { [ "$_sudo_primed" = 1 ] && return; sudo -v || die "sudo required to install packages / grant access"; _sudo_primed=1; }
+# ZFS delegation for the agent's user, derived from THIS host's targets.yaml by phase1/zfs-perms.py:
+# shows what each dataset needs and why, then (on a yes) grants only the missing REQUIRED ones.
+ensure_zfs_perms() {
+  command -v zfs >/dev/null 2>&1 && [ -f "$HERE/config/targets.yaml" ] || return 0
+  say "Checking ZFS permissions for $USER"
+  python3 "$HERE/phase1/zfs-perms.py" --targets "$HERE/config/targets.yaml" && return 0
+  if askyn "grant the missing ZFS permissions now (sudo zfs allow, no destroy)?" y; then
+    prime_sudo
+    python3 "$HERE/phase1/zfs-perms.py" --targets "$HERE/config/targets.yaml" --apply \
+      || warn "some ZFS permissions are still missing - see above"
+  else info "later: phase1/zfs-perms.py --apply   (re-run any time after editing targets.yaml)"; fi
+}
 _pkg_do() {  # run the package manager for "$@"; return its exit status (never dies)
   case "$PKG" in
     apt-get) sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
@@ -420,6 +432,7 @@ EOF
   systemctl --user restart cairn-agent.service || warn "agent start failed - check: systemctl --user status cairn-agent"
   sleep 3
   systemctl --user is-active --quiet cairn-agent.service && ok "host agent running" || warn "agent not active yet (a fresh 'backup' group sometimes needs a re-login; the unit's sg wrapper handles it on next start)"
+  ensure_zfs_perms
 
   # ---- optional: provision a remote vault ----
   if askyn "add a remote off-site VAULT now?" n; then provision_vault; fi
@@ -543,8 +556,11 @@ provision_replication() {
   dst_pools="$(echo "$sets" | awk 'NF{print $3}' | cut -d/ -f1 | sort -u)"
 
   # 1. HOME: delegate send/snapshot/hold on each SOURCE pool (skip if already present)
+  local have q za
   for p in $src_pools; do
-    if zfs allow "$p" 2>/dev/null | grep -qE "user $huser .*\bsend\b"; then ok "home: send already delegated on $p"
+    za="$(zfs allow "$p" 2>/dev/null)"; have=1
+    for q in send snapshot hold; do echo "$za" | grep -qE "user $huser .*\b$q\b" || have=0; done
+    if [ "$have" = 1 ]; then ok "home: send,snapshot,hold already delegated on $p"
     else warn "home: delegating send,snapshot,hold on $p (one-time sudo)"
       prime_sudo && sudo zfs allow "$huser" send,snapshot,hold "$p" && ok "delegated on $p" || warn "could not delegate on $p"; fi
   done
@@ -562,7 +578,9 @@ provision_replication() {
 
   # 4. VAULT: delegate receive on each DEST pool (skip if present)
   for p in $dst_pools; do
-    if ssh "$ssh_t" "zfs allow $p 2>/dev/null | grep -qE 'user $vuser .*\\breceive\\b'"; then ok "vault: receive already delegated on $p"
+    za="$(ssh "$ssh_t" "zfs allow $p" 2>/dev/null)"; have=1
+    for q in create mount receive mountpoint; do echo "$za" | grep -qE "user $vuser .*\b$q\b" || have=0; done
+    if [ "$have" = 1 ]; then ok "vault: create,mount,receive,mountpoint already delegated on $p"
     else printf '   \033[1;35m>>> vault sudo (delegate receive on %s) <<<\033[0m\n' "$p"
       ssh -t "$ssh_t" "sudo zfs allow $vuser create,mount,receive,mountpoint $p" <"$TTY" && ok "vault: delegated receive on $p" || warn "vault: could not delegate receive on $p"; fi
   done
@@ -572,7 +590,8 @@ provision_replication() {
   rsync -a "$HERE/replication/vault-pull.sh" "$ssh_t:cairn/replication/vault-pull.sh" 2>/dev/null
   rsync -a "$HERE/replication/cairn-pull.service" "$HERE/replication/cairn-pull.timer" "$ssh_t:.config/systemd/user/" 2>/dev/null
   local cf; cf="$(mktemp)"
-  { printf 'HOME_SSH  %s\nKEY  /home/%s/.ssh/cairn-pull\n' "$HOME_SSH" "$vuser"
+  local vhome; vhome="$(ssh "$ssh_t" 'printf %s "$HOME"' 2>/dev/null)"; vhome="${vhome:-/home/$vuser}"
+  { printf 'HOME_SSH  %s\nKEY  %s/.ssh/cairn-pull\n' "$HOME_SSH" "$vhome"
     while read -r n s d r; do [ -n "$n" ] && printf 'SET  %s  %s  %s  %s\n' "$n" "$s" "$d" "$r"; done <<<"$sets"; } > "$cf"
   rsync -a "$cf" "$ssh_t:.config/cairn/replication.conf" 2>/dev/null; rm -f "$cf"
   ssh "$ssh_t" 'chmod 600 ~/.config/cairn/replication.conf; chmod +x ~/cairn/replication/vault-pull.sh; systemctl --user daemon-reload && systemctl --user enable --now cairn-pull.timer' 2>&1 | sed 's/^/   /' \
@@ -716,6 +735,7 @@ EOF
   systemctl --user is-active --quiet cairn-agent.service && ok "vault agent running → $CAIRN_API_URL" \
     || warn "agent not active - check: systemctl --user status cairn-agent"
   local shown_int; shown_int="$(grep -m1 '^CAIRN_INTERVAL=' "$ENVF" 2>/dev/null | cut -d= -f2)"; shown_int="${shown_int:-300}"
+  ensure_zfs_perms
   say "VAULT setup complete - it should appear in home's Agents card within one poll interval (~${shown_int}s)"
 }
 

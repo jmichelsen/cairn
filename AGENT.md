@@ -114,9 +114,11 @@ editing the unit: `systemctl --user daemon-reload && systemctl --user restart ca
 `http://localhost:8929`. That is the recommended setup.
 
 Privilege comes from grants, not root:
-- **ZFS actions** use `zfs allow` delegation. For Snapshot and Replicate your user needs
-  `snapshot,send,hold` on source pools and `create,mount,receive,mountpoint` on destination
-  pools (check with `zfs allow <pool>`; grant once as root with `zfs allow -u <you> <perms> <pool>`).
+- **ZFS actions** use `zfs allow` delegation. `phase1/zfs-perms.py` works out exactly which
+  grants this host's targets need and grants the missing ones with `--apply`; the installer runs
+  it for you (see the [README](README.md#zfs-permissions)). In short: `snapshot,send,hold` on
+  replication sources, `create,mount,receive,mountpoint` on destination pools, and optionally
+  `snapshot` on datasets whose Snapshot button you want.
 - **Scrub** isn't delegatable, so it needs `sudo phase1/grant-access.sh --scrub`, which installs a
   root-owned wrapper (`/opt/cairn/phase1/zpool-scrub.sh`) and a sudoers rule for exactly that. The
   Scrub button only appears on a pool's root dataset once `sudo -n` can run the wrapper.
@@ -297,6 +299,10 @@ user@$(id -u).service` (or reboot) - after which the `sg` wrapper is redundant.
 **Agent restarts take minutes.** Something in the agent's group won't exit, almost always a stuck
 httm on an agent older than 0.34.4 (see *Stuck httm*). Update the agent; a reboot clears the stuck
 process.
+
+**`cannot create snapshots : permission denied` (or send/receive denied).** The agent's user lacks
+a ZFS delegation. Run `phase1/zfs-perms.py` as that user: it shows what's missing and why, and
+`--apply` grants it. A grant made from a root shell (`sudo -i`) with `$USER` went to root, not you.
 
 **Replicate warns `cannot destroy snapshots: permission denied`.** The replication still succeeds;
 syncoid just can't prune its old sync-snapshots on the source because the agent user lacks `destroy`
