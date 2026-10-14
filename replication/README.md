@@ -93,6 +93,12 @@ verification failed". `install.sh home --replication` writes home's own host key
 can't be reached (it retries first) and **4** when it reached home but couldn't log in (host key or
 key refused; no retry), printing ssh's own error either way.
 
+**Don't create the dest dataset yourself.** The first pull creates it. If it already exists with no
+snapshots (made by hand), syncoid refuses to overwrite it; the pull skips that SET with an
+explanation and the commands to check and remove it, and `phase1/doctor.py` on the vault flags it
+before the first pull. Neither ever destroys anything. An interrupted first pull (which resumes) is
+not affected.
+
 For the per-dataset permissions both sides need, `phase1/zfs-perms.py` on each host shows and
 grants them (see the main README's *ZFS permissions*).
 

@@ -66,6 +66,17 @@ probe_home() {
   done
   return 1
 }
+# An existing dest with NO snapshots (usually made by hand) can't take the first full send, and
+# syncoid's own error ("target exists but has no snapshots matching") doesn't say what to do. Prints
+# the dest's used size when that's the case. An interrupted first receive (receive_resume_token set)
+# also has no snapshots yet but is NOT this: syncoid resumes it, so it's left alone. Never destroys.
+empty_dest() {
+  zfs list -H -o name "$1" >/dev/null 2>&1 || return 1
+  [ "$(zfs get -H -o value receive_resume_token "$1" 2>/dev/null)" = "-" ] || return 1
+  [ -z "$(zfs list -H -t snapshot -o name -d 1 "$1" 2>/dev/null | head -1)" ] || return 1
+  zfs list -H -o used "$1" 2>/dev/null
+}
+
 probe_home; rc=$?
 if [ "$rc" = 2 ]; then
   echo "cairn-pull: reached $HOME_SSH but could not log in (see above)" >&2
@@ -84,6 +95,19 @@ for s in "${SETS[@]}"; do
   ran=$((ran+1))
   opts=("${COMMON[@]}"); [ "$raw" = raw ] && opts+=(--sendoptions=w)
   echo "== pull $name: $HOME_SSH:$src -> $dst ${raw:+(raw)} =="
+  if used=$(empty_dest "$dst"); then
+    echo "  FAILED ($name): $dst already exists on this vault (using $used) but has no snapshots."
+    echo "  The first pull must CREATE it: syncoid won't put a full copy into an existing dataset that"
+    echo "  shares no snapshots with the source, because that would overwrite it. It was most likely"
+    echo "  created by hand. Check what it holds:"
+    echo "      zfs list -t all -r -o name,used,refer $dst"
+    echo "  If that is only $dst itself (no snapshots, no children, a few hundred KB), remove it, keeping"
+    echo "  its parent, then pull again:"
+    echo "      sudo zfs destroy $dst"
+    echo "      $0 --only $name"
+    echo "  If it holds real data, stop and find out where that data came from first."
+    rc=1; continue
+  fi
   if syncoid "${opts[@]}" "$HOME_SSH:$src" "$dst"; then echo "  ok"; else echo "  FAILED ($name)"; rc=1; fi
 done
 [ -n "$ONLY" ] && [ "$ran" = 0 ] && { echo "cairn-pull: no configured SET named '$ONLY'" >&2; exit 2; }

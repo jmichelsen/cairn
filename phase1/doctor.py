@@ -556,6 +556,23 @@ def pull_set_findings(conf, targets, pools):
     return out
 
 
+def empty_dest(ds, sh=None):
+    """The dataset's used size if it exists with NO snapshots and no interrupted receive to resume
+    (a hand-made placeholder the first pull can't receive into), else None. Same rule as vault-pull.sh."""
+    sh = sh or _sh
+    rc, _, _ = sh(["zfs", "list", "-H", "-o", "name", ds])
+    if rc != 0:
+        return None
+    rc, tok, _ = sh(["zfs", "get", "-H", "-o", "value", "receive_resume_token", ds])
+    if rc != 0 or tok.strip() != "-":
+        return None
+    rc, snaps, _ = sh(["zfs", "list", "-H", "-t", "snapshot", "-o", "name", "-d", "1", ds])
+    if rc != 0 or snaps.strip():
+        return None
+    rc, used, _ = sh(["zfs", "list", "-H", "-o", "used", ds])
+    return used.strip() or "?" if rc == 0 else "?"
+
+
 def check_pull(r, targets, pools, offline):
     receiving = [t for t in targets if t.get("type") == "zfs-local" and t.get("source_agent")]
     if not PULL_CONF.is_file() and not receiving:
@@ -580,6 +597,13 @@ def check_pull(r, targets, pools, offline):
         r.fail("syncoid isn't installed, so the pull can't run", "apt install sanoid")
     for lvl, msg, fix in pull_set_findings(conf, targets, pools):
         r.add(lvl, msg, fix)
+    for name, _, dst, _ in conf["SETS"]:
+        used = empty_dest(dst) if dst and dst.split("/")[0] in pools else None
+        if used:
+            r.fail(f"SET '{name}': {dst} already exists here (using {used}) with no snapshots, so the first pull "
+                   "can't create it (syncoid won't overwrite an existing dataset)",
+                   f"check `zfs list -t all -r -o name,used,refer {dst}`; if it's only that empty dataset, "
+                   f"`sudo zfs destroy {dst}` (keep its parent), then `~/cairn/replication/vault-pull.sh --only {name}`")
     if not offline and key.is_file():
         cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-i", str(key)]
         if conf["PORT"]:
