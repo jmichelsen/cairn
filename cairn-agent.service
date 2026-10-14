@@ -11,7 +11,8 @@ Type=simple
 Environment=PYTHONUNBUFFERED=1
 Environment=CAIRN_ENV=%h/cairn/config/cairn.env
 Environment=CAIRN_API_URL=http://localhost:8929
-Environment=CAIRN_AGENT_NAME=local
+# CAIRN_AGENT_NAME comes from cairn.env (install.sh writes this box's hostname); set it here only to
+# override that, and use phase1/cairn-agent-rename.py to change an existing agent's name.
 Environment=CAIRN_TARGETS=%h/cairn/config/targets.yaml
 Environment=CAIRN_CAN_EXECUTE=1
 Environment=CAIRN_INTERVAL=120
