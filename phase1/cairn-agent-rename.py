@@ -11,15 +11,18 @@ Run it ON THE API HOST, inside the API container, with the agent STOPPED:
   # 1. on the agent's host
   systemctl --user stop cairn-agent
   # 2. on the API host (backs up the database first, then renames)
-  docker compose exec api python3 /app/phase1/cairn-agent-rename.py local mclife
-  #    (podman: podman compose exec ...; add --dry-run first to see what changes)
+  docker compose exec api python3 /app/phase1/cairn-agent-rename.py local mclife --force
+  #    (podman: podman compose exec ...; --dry-run first to see what changes; --force because the
+  #    agent was only just stopped)
   # 3. on the agent's host: set CAIRN_AGENT_NAME=mclife where the agent reads it (the unit's
   #    Environment= line wins over cairn.env), then
   systemctl --user start cairn-agent
   # 4. in OTHER agents' targets.yaml: any dest_agent / source_agent naming the old name
 
 Refuses when the new name is already in use, or when the old agent reported recently (it would
-re-create the old name on its next report; stop it first, or --force). Tokens keep working: they
+re-create the old name on its next report). A just-stopped agent looks the same, so after stopping it
+re-run with --force. Start the agent under the new name only after the rename succeeded: starting it
+first creates the new name as a separate, empty agent, and the rename then refuses. Tokens keep working: they
 aren't bound to the name, but the enrollment token's label is renamed too when it matches.
 
 Env: CAIRN_DB (default /data/cairn.db, the container's path)
@@ -136,8 +139,10 @@ def main():
         print(f"  {desc}: {n} row(s)")
     age = recently_active(c, a.old)
     if age is not None and not a.force and not a.dry_run:
-        sys.exit(f"'{a.old}' reported {age}s ago, so it's still running and would re-create '{a.old}' on its next "
-                 "report. Stop it first (systemctl --user stop cairn-agent on its host), or pass --force")
+        sys.exit(f"'{a.old}' reported {age}s ago. If it's still running it would re-create '{a.old}' on its next "
+                 "report, so stop it first (systemctl --user stop cairn-agent on its host). The database can't tell "
+                 "a just-stopped agent from a running one: once it's stopped, re-run with --force. Don't start it "
+                 "under the new name until this has succeeded")
     if a.dry_run:
         print("dry run: nothing changed")
         return 0

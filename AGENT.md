@@ -288,14 +288,16 @@ behind as a silent agent that alerts. Rename it in the API's database instead, w
 ```bash
 systemctl --user stop cairn-agent                                     # on the agent's host
 docker compose exec api python3 /app/phase1/cairn-agent-rename.py local mclife --dry-run   # API host
-docker compose exec api python3 /app/phase1/cairn-agent-rename.py local mclife             # backs up first
+docker compose exec api python3 /app/phase1/cairn-agent-rename.py local mclife --force     # backs up first
 # on the agent's host: set CAIRN_AGENT_NAME=mclife where the agent reads it (the unit's
 # Environment= line wins over cairn.env), then:
 systemctl --user start cairn-agent
 ```
 
-(`podman compose exec ...` with Podman.) It refuses a name already in use, and refuses while the old
-agent is still reporting (it would re-create the old name). Then change any `dest_agent` /
+(`podman compose exec ...` with Podman.) It refuses a name already in use. It also refuses while the
+old agent reported recently, since a running agent would re-create the old name; it can't tell a
+just-stopped agent from a running one, hence `--force` once you've stopped it. Start the agent under
+the new name only after the rename succeeded, or the new name appears as a separate empty agent. Then change any `dest_agent` /
 `source_agent` naming the old agent in other agents' `targets.yaml`; the dashboard's configuration
 banner lists any that are left.
 
