@@ -175,6 +175,35 @@ phase1/  schema.sql             SQLite schema (targets, status, intents)
   edits to `sanoid.conf`. Pin a target manually by setting both `fresh_warn_h` and `fresh_crit_h`
   (see `CAIRN_SANOID_DERIVE`).
 
+## Tier A and the 3-2-1 scorecard
+
+`tier` is a label you set on a target in `targets.yaml`; cairn never assigns it. Only one value
+does anything: **`tier: A` on a `zfs-repl` target puts that dataset in the 3-2-1 scorecard.**
+Any other value (B, C, ...) is just a badge on the card.
+
+Mark the replication targets for data you can't re-download or recreate (photos, documents, VM
+images you care about) as tier A, and leave replaceable data (media libraries, caches, scratch)
+untagged so it doesn't count against your score.
+
+```yaml
+- { name: photos,        type: zfs-repl, source: tank/photos, dest: backup/photos, tier: A }
+- { name: photos_vault,  type: zfs-repl, source: tank/photos, dest: vault/photos,  tier: A,
+    dest_agent: vault }
+```
+
+For each tier A **source dataset** (all of its replication targets are grouped together) the
+scorecard counts:
+
+- **copies** and **media**: the distinct pools holding it (source + every destination), plus one
+  of each for a confirmed removable-drive copy that has synced within `CAIRN_REMOVABLE_STALE_D`
+  days (default 90).
+- **off-site**: a destination marked `location: offsite`, or one reported by another agent
+  (`dest_agent:`, e.g. a remote vault).
+
+A dataset passes with **3+ copies, 2+ media and 1+ off-site**; the overall badge passes only when
+every tier A dataset does. Each failing card says what's missing (no off-site copy, a stale
+removable drive, or a missing 3rd copy).
+
 ## Pre/post hooks (e.g. consistent VM snapshots)
 
 A target in `config/targets.yaml` can wrap cairn's **snapshot**, **sync** and **backup-now**
