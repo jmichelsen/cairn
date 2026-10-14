@@ -2377,12 +2377,12 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .rl-t.pending{color:var(--mut);opacity:.6;border-style:dashed}
 .rl-btns,.rl-ctl{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px;align-items:center}
 .rl-hint{font-size:11px;color:var(--mut)} .rl-hint b{color:var(--ink);font-weight:600}
-.rl-add{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}
+.rl-pick{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}
 .rl-addl{font-size:11px;color:var(--mut);width:100%} .rl-addl code{color:var(--ink);font-size:11px}
-.rl-btns button,.rl-ctl button{appearance:none;font:600 11px/1 "Red Hat Text";border:1px solid var(--line);
+.rl-btns button,.rl-ctl button,.rl-pick button{appearance:none;font:600 11px/1 "Red Hat Text";border:1px solid var(--line);
   background:var(--surf);color:var(--ink);border-radius:7px;padding:5px 9px;cursor:pointer}
-.rl-btns button.pri,.rl-ctl button.pri{background:var(--acc);color:#fff;border-color:var(--acc)}
-.rl-btns button:hover,.rl-ctl button:hover{filter:brightness(1.08)}
+.rl-btns button.pri,.rl-ctl button.pri,.rl-pick button{background:var(--acc);color:#fff;border-color:var(--acc)}
+.rl-btns button:hover,.rl-ctl button:hover,.rl-pick button:hover{filter:brightness(1.08)}
 .rl-sel,.rl-sub{font:12px "Red Hat Text";padding:5px 7px;border:1px solid var(--line);border-radius:7px;
   background:var(--surf);color:var(--ink);max-width:100%}
 .rl-diff{margin:6px 0;max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:7px}
@@ -4011,7 +4011,7 @@ def _removable_links_html(r, viewer=False):
         if avail:
             lead = "or link a dataset manually" if detect else "link another dataset"
             opts = "".join(f'<option value="{_esc(nm)}">{_esc(src or nm)}</option>' for nm, src in avail)
-            picker = (f'<div class=rl-add><span class=rl-addl>{lead} '
+            picker = (f'<div class=rl-pick><span class=rl-addl>{lead} '
                       f'(auto-filed under <code>cairn/{_esc(host)}/</code>):</span>'
                       f'<select class=rl-sel>{opts}</select>'
                       f'<button onclick="addLink(this,\'{name}\')">Add</button></div>')
