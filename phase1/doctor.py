@@ -68,7 +68,7 @@ TYPE_KEYS = {
     "snapper": {"source"} | FRESH,
     "removable": {"uuid", "by_id", "mount", "source", "dest_subpath", "tool", "exclude", "mirror",
                   "detach_warn_d", "remind_every_d"} | FRESH,
-    "smart": {"smartd_window_h"},
+    "smart": {"smartd_window_h", "temp_warn", "temp_crit"},
     "kernel-errors": {"window_h", "crit_count", "rescan_storm", "log_file"},
     "backupninja-handler": {"source", "log", "reports", "jobs"} | FRESH,
     "schedules": {"units"},
