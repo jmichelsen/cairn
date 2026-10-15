@@ -298,6 +298,43 @@ def _migrate_targets_identity(c):
     c.execute("DROP TABLE _targets_pre_agentkey")
     c.commit()
 
+SMART_COUNTERS = ("realloc", "pending", "offline_unc", "crc", "rpt_unc", "cmd_timeout", "spin_retry",
+                  "media_errors", "pct_used", "power_on_hours")
+
+def _backfill_smart_daily(c):
+    """First run with smart_daily: roll the retained raw status rows up into it (SQLite's JSON
+    functions, so it's one pass in C). Does nothing once the table has rows."""
+    if c.execute("SELECT 1 FROM smart_daily LIMIT 1").fetchone():
+        return
+    ex = lambda k: f"json_extract(s.detail_json,'$.{k}')"
+    cols = ", ".join(f"MAX({ex(k)})" for k in SMART_COUNTERS)
+    c.execute(f"""INSERT OR IGNORE INTO smart_daily(serial, day, model, temp_min, temp_max,
+                    {', '.join(SMART_COUNTERS)}, available_spare)
+        SELECT {ex('serial')}, date(s.ts,'unixepoch'), MAX({ex('model')}), MIN({ex('temp')}), MAX({ex('temp')}),
+               {cols}, MIN({ex('available_spare')})
+        FROM status s JOIN targets t ON t.id=s.target_id
+        WHERE t.type='smart' AND json_valid(s.detail_json) AND {ex('serial')} IS NOT NULL
+        GROUP BY {ex('serial')}, date(s.ts,'unixepoch')""")
+
+def _record_smart_day(conn, ts, d):
+    """Fold one SMART reading into its drive's row for that day (needs the drive's serial)."""
+    serial = d.get("serial")
+    if not serial:
+        return
+    num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    vals = [num(d.get(k)) for k in SMART_COUNTERS]
+    temp, spare = num(d.get("temp")), num(d.get("available_spare"))
+    upd = ", ".join(f"{k}=MAX(COALESCE({k},excluded.{k}),COALESCE(excluded.{k},{k}))" for k in SMART_COUNTERS)
+    conn.execute(f"""INSERT INTO smart_daily(serial, day, model, temp_min, temp_max, {', '.join(SMART_COUNTERS)},
+                       available_spare, source)
+        VALUES(?, date(?,'unixepoch'), ?, ?, ?, {','.join('?' * len(SMART_COUNTERS))}, ?, 'cairn')
+        ON CONFLICT(serial, day) DO UPDATE SET model=COALESCE(excluded.model, model),
+          temp_min=MIN(COALESCE(temp_min,excluded.temp_min),COALESCE(excluded.temp_min,temp_min)),
+          temp_max=MAX(COALESCE(temp_max,excluded.temp_max),COALESCE(excluded.temp_max,temp_max)),
+          available_spare=MIN(COALESCE(available_spare,excluded.available_spare),
+                              COALESCE(excluded.available_spare,available_spare)),
+          {upd}, source='cairn'""", [serial, ts, d.get("model"), temp, temp, *vals, spare])
+
 def _init_db():
     """Ensure the DB + schema exist so the API can start before the collector's first run
     (e.g. as a standalone container service)."""
@@ -361,6 +398,18 @@ def _init_db():
                 mirror        INTEGER DEFAULT 0,
                 updated_ts    INTEGER NOT NULL,
                 UNIQUE(agent, removable, dataset))""")
+            # SMART trends: one row per physical drive (by serial, so history survives the card being
+            # renamed sdc -> scsi-SATA_... -> wwn-...) per day, kept forever (raw status rows only live 90
+            # days). Counters keep the day's highest value, spare its lowest, temperature its range.
+            # source is 'cairn', or 'scrutiny' for days imported from a retired Scrutiny install.
+            c.execute("""CREATE TABLE IF NOT EXISTS smart_daily (
+                serial TEXT NOT NULL, day TEXT NOT NULL, model TEXT,
+                temp_min REAL, temp_max REAL, realloc INTEGER, pending INTEGER, offline_unc INTEGER,
+                crc INTEGER, rpt_unc INTEGER, cmd_timeout INTEGER, spin_retry INTEGER,
+                media_errors INTEGER, pct_used INTEGER, available_spare INTEGER, power_on_hours INTEGER,
+                source TEXT DEFAULT 'cairn',
+                PRIMARY KEY (serial, day))""")
+            _backfill_smart_daily(c)
             # CI pipeline status broker: one row per badge name (e.g. 'tests', 'deploy'), latest wins.
             # CI pushes here (POST /api/v1/ci/status); /badge/{name}.svg renders it. Lets the private
             # GitLab pipelines surface their status publicly without making the pipelines public.
@@ -1178,6 +1227,18 @@ def fleet_doctor(conn, now=None):
     out.sort(key=lambda f: (order.get(f["severity"], 3), f["agent"] or "", f["target"] or ""))
     return out
 
+@app.get("/api/v1/backup/smart/history")
+def smart_history(serial: str):
+    """One drive's daily SMART trend (temperature range + error counters), oldest first, by serial.
+    (auth: admin/viewer)"""
+    with db() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM smart_daily WHERE serial=? ORDER BY day", (serial,)).fetchall()]
+    if not rows:
+        raise HTTPException(404, "no history for that drive yet")
+    model = next((r["model"] for r in reversed(rows) if r.get("model")), None)
+    return {"serial": serial, "model": model, "days": rows}
+
 @app.get("/api/v1/backup/doctor")
 def doctor_view():
     """Fleet config check (dashboard banner + `curl`): problems that span agents. (auth: admin/viewer)"""
@@ -1244,6 +1305,8 @@ async def report(request: Request):
                 d = json.loads(s.get("detail_json") or "{}")
             except (ValueError, TypeError):
                 pass
+            if s.get("type") == "smart" and d:
+                _record_smart_day(conn, now, d)
             if sev in ("WARN", "CRIT"):
                 why = ", ".join(d.get("reasons", [])) or (s.get("last_error") or "")
                 hint = d.get("notify_hint") or {}
@@ -2494,6 +2557,14 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .smprobe{font-size:10px;color:var(--mut);margin-left:10px;font-family:"Roboto Mono",monospace}
 .smdet{margin-top:9px;max-height:360px;overflow:auto;border:1px solid var(--line);border-radius:7px}
 .smdet[hidden]{display:none}
+.strend{padding:8px 10px;max-height:none}
+.strhead{font-size:11px;color:var(--mut);margin-bottom:6px}
+.strlbl{font-size:11px;color:var(--ink);margin-top:8px} .strlbl.bad{color:var(--warn)}
+.strok{font-size:11px;color:var(--mut);margin-top:8px}
+.spark{display:block;width:100%;height:46px;margin-top:3px}
+.spark .sline{fill:none;stroke:var(--acc);stroke-width:1.5;vector-effect:non-scaling-stroke}
+.spark .sband{fill:var(--acc);opacity:.18}
+.spark .sref{stroke:var(--warn);stroke-width:1;stroke-dasharray:4 3;vector-effect:non-scaling-stroke}
 .smt{border-collapse:collapse;width:100%;font-family:"Roboto Mono",monospace;font-size:10.5px}
 .smt th{text-align:left;color:var(--mut);font-weight:700;font-size:9px;letter-spacing:.05em;text-transform:uppercase;
   padding:5px 7px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--surf)}
@@ -3702,6 +3773,74 @@ def _agent_card(a, viewer=False, tab=None, active=False):
             f'<div class=jrow><span class=jk>reports</span><span class=jv>every {ivl}</span></div>'
             f'{ver_html}</div></div>')
 
+SMART_TREND_COUNTERS = (("realloc", "reallocated (5)"), ("pending", "pending (197)"),
+                        ("offline_unc", "offline uncorrectable (198)"), ("crc", "CRC/link (199)"),
+                        ("rpt_unc", "reported uncorrectable (187)"), ("cmd_timeout", "command timeouts (188)"),
+                        ("spin_retry", "spin retries (10)"), ("media_errors", "NVMe media errors"))
+
+def _spark(vals, w=300, h=46, band=None, ref=None):
+    """Inline SVG line chart for one series (None = no reading that day). band: (lows, highs) drawn as
+    a filled range; ref: a dashed horizontal line (a limit). Scales to the data plus the limit."""
+    pts = [v for v in vals if v is not None] + ([x for x in band[0] if x is not None] if band else [])
+    if not pts:
+        return ""
+    lo, hi = min(pts), max(pts + ([ref] if ref is not None else []))
+    if hi == lo:
+        hi = lo + 1
+    n = max(len(vals) - 1, 1)
+    X = lambda i: round(i * w / n, 1)
+    Y = lambda v: round(h - 3 - (v - lo) * (h - 6) / (hi - lo), 1)
+    out = ""
+    if band:
+        top = [(X(i), Y(v)) for i, v in enumerate(band[1]) if v is not None]
+        bot = [(X(i), Y(v)) for i, v in enumerate(band[0]) if v is not None]
+        if top and bot:
+            poly = " ".join(f"{x},{y}" for x, y in top + bot[::-1])
+            out += f'<polygon points="{poly}" class=sband />'
+    if ref is not None:
+        out += f'<line x1="0" x2="{w}" y1="{Y(ref)}" y2="{Y(ref)}" class=sref />'
+    line = " ".join(f"{X(i)},{Y(v)}" for i, v in enumerate(vals) if v is not None)
+    out += f'<polyline points="{line}" class=sline />'
+    return f'<svg class=spark viewBox="0 0 {w} {h}" preserveAspectRatio="none">{out}</svg>'
+
+def _smart_trends(serial, warn=None):
+    """The SMART card's Trends panel: daily temperature range and every error counter that was ever
+    non-zero, from smart_daily (kept forever, keyed by serial). Server-rendered SVG, no JS."""
+    if not serial:
+        return ""
+    with db() as conn:
+        rows = [dict(x) for x in conn.execute("SELECT * FROM smart_daily WHERE serial=? ORDER BY day",
+                                              (serial,)).fetchall()]
+    if not rows:
+        return '<div class=hempty>no history yet: it builds up one point per day</div>'
+    imported = sum(1 for x in rows if x.get("source") == "scrutiny")
+    head = (f'{len(rows)} day(s) since {_esc(rows[0]["day"])}'
+            + (f', {imported} imported from Scrutiny' if imported else ""))
+    parts = [f'<div class=strhead>{head}</div>']
+    tmax = [x["temp_max"] for x in rows]
+    if any(v is not None for v in tmax):
+        cur = next((v for v in reversed(tmax) if v is not None), None)
+        hi = max(v for v in tmax if v is not None)
+        parts.append(f'<div class=strlbl>temperature: now {cur:g}°C, highest {hi:g}°C'
+                     + (f', warns at {warn}°C' if warn is not None else "") + '</div>'
+                     + _spark(tmax, band=([x["temp_min"] for x in rows], tmax), ref=warn))
+    flat = []
+    for key, label in SMART_TREND_COUNTERS:
+        vals = [x.get(key) for x in rows]
+        if any(v for v in vals):
+            first = next((x["day"] for x in rows if x.get(key)), "")
+            parts.append(f'<div class="strlbl bad">{_esc(label)}: now {vals[-1] if vals[-1] is not None else "?"}, '
+                         f'first non-zero {_esc(first)}</div>' + _spark(vals))
+        elif any(v is not None for v in vals):
+            flat.append(label.split(" (")[0])
+    pu = [x.get("pct_used") for x in rows]
+    if any(v is not None for v in pu):
+        parts.append(f'<div class=strlbl>SSD life used: {next((v for v in reversed(pu) if v is not None), 0)}%</div>'
+                     + _spark(pu))
+    if flat:
+        parts.append(f'<div class=strok>zero on every day: {_esc(", ".join(flat))}</div>')
+    return "".join(parts)
+
 def _smart_card(r, cid=""):
     """A per-drive pill: identity + the stats that matter at a glance, expandable to the full
     SMART attribute table (Scrutiny-style). Data is served from the collector's TTL cache."""
@@ -3722,7 +3861,9 @@ def _smart_card(r, cid=""):
     hs = "PASSED" if d.get("passed") is True else ("FAILED" if d.get("passed") is False else "-")
     tiles.append(("health", hs, "ok" if d.get("passed") is True else ("crit" if d.get("passed") is False else "")))
     if d.get("capacity"):            tiles.append(("capacity", _cap(d["capacity"]), ""))
-    if d.get("temp") is not None:    tiles.append(("temp", f'{d["temp"]}°C', "warn" if d["temp"] >= 50 else ""))
+    if d.get("temp") is not None:
+        tw, tc = d.get("temp_warn") or 50, d.get("temp_crit") or 60
+        tiles.append(("temp", f'{d["temp"]}°C', "crit" if d["temp"] >= tc else "warn" if d["temp"] >= tw else ""))
     if d.get("power_on_hours") is not None:
         poh = d["power_on_hours"];   tiles.append(("power-on", f"{poh/8760:.1f} y", ""))
     if d.get("power_cycles") is not None:
@@ -3730,7 +3871,8 @@ def _smart_card(r, cid=""):
     if d.get("pct_used") is not None:
         pu = d["pct_used"];          tiles.append(("life used", f"{pu}%", "warn" if pu >= 80 else ""))
     for lbl, key in (("reallocated", "realloc"), ("pending", "pending"),
-                     ("offline unc", "offline_unc"), ("CRC/link", "crc")):
+                     ("offline unc", "offline_unc"), ("CRC/link", "crc"), ("uncorrect", "rpt_unc"),
+                     ("timeouts", "cmd_timeout"), ("spin retry", "spin_retry"), ("media err", "media_errors")):
         v = d.get(key)
         if v:                        tiles.append((lbl, str(v), "warn"))
     kpi = "".join(f'<div class="skpi {c}"><b>{_esc(v)}</b><span>{_esc(l)}</span></div>' for l, v, c in tiles)
@@ -3738,7 +3880,7 @@ def _smart_card(r, cid=""):
     for a in d.get("attrs", []):
         aid = "" if a.get("id") is None else a["id"]
         raw = a.get("raw")
-        crit = (a.get("id") in (5, 197, 198, 199) and raw not in (None, 0, "0")) \
+        crit = (a.get("id") in (5, 10, 187, 188, 197, 198, 199) and raw not in (None, 0, "0", "0 0 0")) \
             or (a.get("when_failed") not in (None, "", "-"))
         def _c(x): return "-" if x is None else _esc(x)
         rows += (f'<tr class="{"bad" if crit else ""}"><td class=aid>{_c(aid)}</td>'
@@ -3768,7 +3910,9 @@ def _smart_card(r, cid=""):
             f'<span class="cbusy" data-tip="action running"></span><span class="cs">{cs_text}</span></span></div>'
             f'<div class="src">{ident}</div><div class="skpirow">{kpi}</div>{why_html}{ack_html}'
             f'<div class=chistrow><button class="histbtn" onclick="toggleSmart(this)">SMART details</button>'
-            f'{probed}<div class="smdet" hidden>{tbl}</div></div></div>')
+            f'{probed}<div class="smdet" hidden>{tbl}</div></div>'
+            f'<div class=chistrow><button class="histbtn" onclick="toggleSmart(this)">Trends</button>'
+            f'<div class="smdet strend" hidden>{_smart_trends(d.get("serial"), d.get("temp_warn"))}</div></div></div>')
 
 PAIR_ICON = (  # two linked nodes with an arrow: source -> off-site copy (data replication)
     '<svg class=picn viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '

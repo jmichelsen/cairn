@@ -319,6 +319,8 @@ Per-disk SMART health, one status per disk named `smart:<by-id>`. USB / removabl
 | Key | Req | Default | Meaning |
 | --- | --- | --- | --- |
 | `smartd_window_h` | no | 72 | How far back to read smartd's journal for alerts. |
+| `temp_warn` | no | 50 HDD, 70 SSD/NVMe | WARN at or above this temperature (°C). |
+| `temp_crit` | no | 60 HDD, 80 SSD/NVMe | CRIT at or above this temperature (°C). |
 
 **Default (sudoless):** disks come from `smartctl --scan`; health comes from smartd's journal
 (`journalctl -u smartd`, then `-t smartd`). Each disk is OK unless smartd logged, in the window:
@@ -332,8 +334,20 @@ scoped wrapper, `CAIRN_SMART_WRAPPER`, default `/opt/cairn/phase1/smart-probe.sh
 `smartctl -a` attribute table, cached for `CAIRN_SMART_TTL` seconds (default 24h, re-read early when
 smartd flags a change). A root agent always uses detail. Detail adds: CRIT on SMART health FAILED;
 WARN on reallocated / pending / offline-uncorrectable sectors, UDMA CRC errors (cable/link), NVMe
-critical warning, NVMe spare at or below threshold, SSD wear >= 90%; UNKNOWN when no
+critical warning, NVMe spare at or below threshold, SSD wear >= 90%, and on any non-zero
+Backblaze failure predictor: reported uncorrectable (187), command timeouts (188, counted per field
+on drives that pack it, like Seagate), spin retries (10), NVMe media errors; UNKNOWN when no
 `smart_status` could be read. smartd alerts are merged on top.
+
+**Temperature (both modes):** read live every cycle from the kernel's hwmon sensors, no root
+needed (NVMe always; SATA/SAS disks when the `drivetemp` module is loaded: `sudo modprobe drivetemp`,
+and add it to `/etc/modules-load.d/` to keep it). Without a sensor, detail mode falls back to the
+cached SMART reading. Alerts at `temp_warn` / `temp_crit`.
+
+**Trends:** each card's Trends panel charts that drive's daily temperature range and every error
+counter that was ever non-zero. The API keeps one row per drive per day forever (by serial number,
+so the history follows the drive if its card is renamed); the raw readings it rolls up are kept 90
+days. `GET /api/v1/backup/smart/history?serial=SN` returns it as JSON.
 
 No actions. Needs `smartctl` and journal read access (`adm` / `systemd-journal`) for alerts.
 

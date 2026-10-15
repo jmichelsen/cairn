@@ -1979,6 +1979,7 @@ def _smart_parse(dev, typ, o, err, now):
     cap = (d.get("user_capacity") or {}).get("bytes") or d.get("nvme_total_capacity")
     rot = d.get("rotation_rate")            # 0 => SSD
     realloc = pending = offline_unc = crc = pct_used = None
+    rpt_unc = cmd_timeout = spin_retry = media_errors = None
     attrs = []
     for a in (d.get("ata_smart_attributes") or {}).get("table", []):
         aid = a.get("id"); raw = a.get("raw") or {}
@@ -1990,11 +1991,20 @@ def _smart_parse(dev, typ, o, err, now):
         if aid == 197: pending = rawv
         if aid == 198: offline_unc = rawv
         if aid == 199: crc = rawv           # UDMA CRC = cable/link/backplane, not disk surface
+        # Backblaze's failure predictors beyond 5/197/198. Some vendors (Seagate) pack 188 and 10 as
+        # several 16-bit counters, so count from the raw string's numbers rather than the packed value.
+        if aid in (10, 187, 188):
+            nums = [int(x) for x in re.findall(r"\d+", raws or "")] if isinstance(raws, str) else []
+            cnt = sum(nums) if len(nums) > 1 and not re.search(r"[()]", raws) else rawv
+            if aid == 10:  spin_retry = cnt
+            if aid == 187: rpt_unc = cnt
+            if aid == 188: cmd_timeout = cnt
         if aid in (231, 177, 202, 233) and pct_used is None and isinstance(a.get("value"), int):
             pct_used = max(0, 100 - a["value"])     # SSD wear/life-left → % used (best-effort)
     nl = d.get("nvme_smart_health_information_log") or {}
     if nl:
         pct_used = nl.get("percentage_used", pct_used)
+        media_errors = nl.get("media_errors")
         if temp is None:   temp = nl.get("temperature")
         if poh is None:    poh = nl.get("power_on_hours")
         if cycles is None: cycles = nl.get("power_cycles")
@@ -2017,6 +2027,14 @@ def _smart_parse(dev, typ, o, err, now):
     if crc:
         st["severity"] = worst(st["severity"], "WARN")
         st["last_error"] = f"UDMA CRC errors={crc} (cable/backplane/HBA link - not disk surface)"
+    predictors = [(n, v) for n, v in (("reported uncorrectable (187)", rpt_unc),
+                                       ("command timeouts (188)", cmd_timeout),
+                                       ("spin retries (10)", spin_retry),
+                                       ("NVMe media errors", media_errors)) if v]
+    if predictors:
+        st["severity"] = worst(st["severity"], "WARN")
+        msg = ", ".join(f"{n}={v}" for n, v in predictors) + " (Backblaze failure predictors)"
+        st["last_error"] = ((st["last_error"] + " · ") if st["last_error"] else "") + msg
     if nl.get("critical_warning"):
         st["severity"] = worst(st["severity"], "WARN")
         st["last_error"] = f"NVMe critical_warning={nl['critical_warning']}"
@@ -2034,6 +2052,8 @@ def _smart_parse(dev, typ, o, err, now):
         capacity=cap, rotation=rot, is_ssd=(rot == 0) or proto.upper() == "NVME",
         temp=temp, power_on_hours=poh, power_cycles=cycles, pct_used=pct_used,
         realloc=realloc, pending=pending, offline_unc=offline_unc, crc=crc,
+        rpt_unc=rpt_unc, cmd_timeout=cmd_timeout, spin_retry=spin_retry, media_errors=media_errors,
+        available_spare=nl.get("available_spare"),
         dev=dev, typ=typ, attrs=attrs, probed_ts=now))
     return st
 
@@ -2184,6 +2204,65 @@ def _smart_scan_only():
                                                         "detail_optin": True})))
     return results
 
+def _hwmon_temps(root="/sys/class/hwmon"):
+    """{device name: degrees C} for drives the kernel exposes through hwmon, readable without root:
+    NVMe controllers always (hwmon name 'nvme', device 'nvme0'), SATA/SAS disks when the drivetemp
+    module is loaded (device -> its SCSI device, whose block/ dir names sdX). Live, unlike the SMART
+    snapshot, which is cached for a day."""
+    out = {}
+    try:
+        hws = os.listdir(root)
+    except OSError:
+        return out
+    for h in hws:
+        d = os.path.join(root, h)
+        try:
+            with open(os.path.join(d, "name")) as f:
+                kind = f.read().strip()
+            with open(os.path.join(d, "temp1_input")) as f:
+                c = int(f.read().strip()) / 1000
+        except (OSError, ValueError):
+            continue
+        if kind == "nvme":
+            dev = os.path.basename(os.path.realpath(os.path.join(d, "device")))
+            if dev.startswith("nvme"):
+                out[dev] = c
+        elif kind == "drivetemp":
+            try:
+                blocks = os.listdir(os.path.join(d, "device", "block"))
+            except OSError:
+                continue
+            for b in blocks:
+                out[b] = c
+    return out
+
+TEMP_LIMITS = {"hdd": (50, 60), "ssd": (70, 80)}   # (warn, crit) degrees C, overridable per target
+
+def _apply_temp(results, t, live):
+    """Fold the live temperature into each drive's card and alert on heat. Limits: the target's
+    temp_warn / temp_crit, else 50/60 C for spinning disks and 70/80 C for SSDs and NVMe."""
+    for r in results:
+        try:
+            d = json.loads(r.get("detail_json") or "{}")
+        except ValueError:
+            continue
+        dev = os.path.basename(d.get("dev") or "")
+        if dev in live:
+            d["temp"] = round(live[dev]); d["temp_live"] = True
+        temp = d.get("temp")
+        if not isinstance(temp, (int, float)):
+            continue
+        ssd = d.get("is_ssd") or dev.startswith("nvme")
+        dw, dc = TEMP_LIMITS["ssd" if ssd else "hdd"]
+        warn, crit = t.get("temp_warn", dw), t.get("temp_crit", dc)
+        sev = "CRIT" if temp >= crit else "WARN" if temp >= warn else None
+        if sev:
+            r["severity"] = worst(r.get("severity") or "UNKNOWN", sev)
+            msg = f"temperature {temp:g}°C (≥ {crit if sev == 'CRIT' else warn}°C)"
+            r["last_error"] = ((r["last_error"] + " · ") if r.get("last_error") else "") + msg
+        d["temp_warn"], d["temp_crit"] = warn, crit
+        r["detail_json"] = json.dumps(d)
+
 def adapter_smart(t, defaults, now):
     """Per-disk health, sudoless by default:
       • ALERTS + status come from smartd's journal (real-time, portable, free - smartd already polls
@@ -2202,6 +2281,7 @@ def adapter_smart(t, defaults, now):
     if not detail_on:
         results = _smart_scan_only()
         _merge_smartd(results, alerts)
+        _apply_temp(results, t, _hwmon_temps())
         return results or [dict(severity="UNKNOWN", last_error="smartctl --scan found no devices")]
     ttl = int(os.environ.get("CAIRN_SMART_TTL", str(24 * 3600)))
     newest_alert = max((a["ts"] for a in alerts.values()), default=0)
@@ -2227,6 +2307,7 @@ def adapter_smart(t, defaults, now):
         elif cached and cached.get("results"):
             results = cached["results"]                # keep last-good detail if this probe couldn't read
     _merge_smartd(results, alerts)                     # fold real-time alerts onto whatever detail we have
+    _apply_temp(results, t, _hwmon_temps())            # live temperature + heat alerts, every cycle
     return results
 
 # ---------- persistence ----------
