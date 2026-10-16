@@ -1,14 +1,19 @@
 # secrets & runtime state - never commit
 *.env
+*.env.*
 .cairn.env
 cairn.env
 !cairn.env.example
+# backups of any of the above (e.g. cairn.env.bak-<stamp>, targets.yaml.bak-<stamp>)
+*.bak
+*.bak-*
 *.db
 *.db-wal
 *.db-shm
-# a deployer's real config (copies of the examples) - never commit
-config/targets.yaml
-config/*.env
+# config/ holds only the examples in git; anything else there is a real deployment's config
+config/*
+!config/*.example
+!config/*.example.*
 # generated vault enrollment bundle (holds the enroll secret) - never commit
 vault-install.conf
 .cairn-pull.log
