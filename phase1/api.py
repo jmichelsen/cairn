@@ -105,7 +105,13 @@ def _mint_session(role, username):
 
 def _seed_tokens():
     """Seed the store from env (hash-at-rest). Idempotent. Plaintext env is only a bootstrap
-    secret - it is hashed, never stored raw."""
+    secret - it is hashed, never stored raw.
+
+    The env is the source of truth for these rows: when a value changes (a rotation), the row
+    under that label is replaced, so the OLD secret stops working at the next start. (label is
+    UNIQUE, so a plain INSERT OR IGNORE kept the old row and silently ignored the new value.)
+    An env agent token removed from CAIRN_AGENT_TOKENS is deactivated the same way. A row an
+    admin revoked keeps its revocation while the env value is unchanged."""
     now = int(time.time())
     seeds = []
     adm = os.environ.get("CAIRN_ADMIN_TOKEN") or os.environ.get("CAIRN_API_TOKEN")
@@ -116,8 +122,15 @@ def _seed_tokens():
     with db() as c:
         for h, role, label in seeds:
             kind = "admin" if role == "admin" else "access"   # env agent tokens are static access
+            old = c.execute("SELECT hash FROM auth_tokens WHERE label=?", (label,)).fetchone()
+            if old and old[0] != h:
+                c.execute("DELETE FROM auth_tokens WHERE label=?", (label,))
+                print(f"[auth] env token {label} changed: the previous secret is revoked", flush=True)
             c.execute("INSERT OR IGNORE INTO auth_tokens(hash,role,kind,label,created_ts,active) "
                       "VALUES(?,?,?,?,?,1)", (h, role, kind, label, now))
+        keep = [lbl for _, _, lbl in seeds if lbl.startswith("env-agent-")]
+        c.execute("UPDATE auth_tokens SET active=0 WHERE label LIKE 'env-agent-%' AND active=1"
+                  + (f" AND label NOT IN ({','.join('?' * len(keep))})" if keep else ""), keep)
         c.commit()
         return c.execute("SELECT COUNT(*) FROM auth_tokens WHERE role='admin' AND active=1").fetchone()[0]
 
