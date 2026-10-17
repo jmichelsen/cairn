@@ -210,8 +210,5 @@ leaked token can affect the wrong target.
   enrollment tokens stay behind, and every agent re-enrolls against the new server (new URL and
   token in its env). Site-scoped users are listed in the export by name only and get fresh invites.
   The source site stays intact until an admin deletes it, so a move can be verified first.
-
-## Open questions
-
-- Should an import be able to merge into an existing site (two sites consolidating), or only
-  create a new one? Proposed: new only, until there's a real case.
+- **Import never merges.** It only creates a new site; importing onto an existing slug is refused.
+  Consolidating two sites is out of scope.
