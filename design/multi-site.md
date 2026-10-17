@@ -16,9 +16,11 @@ deployments that are likely to come up next.
 | S3 | One vault holding copies for several homes | a single off-site box that pulls from two houses |
 | S4 | Control plane on its own host | a small VPS or mesh-only VM; no agent runs there |
 
-Out of scope: **multiple owners in one control plane** (one person's dashboard showing another
-person's data). Separate owners run separate cairn instances. Nothing below tries to isolate
-tenants from each other.
+Multiple owners in one control plane are **in scope via sites** (section 5): each site is managed
+independently with its own dashboard, settings and users, the way a UniFi controller hosts several
+sites. Isolation is logical (one database, every query scoped to a site), which is right for people
+who trust whoever runs the server, but not for hostile tenants. Whoever administers the control
+plane can see every site.
 
 ## What already works
 
@@ -91,18 +93,49 @@ off-site copy and each local 2nd copy, each showing its own freshness and severi
 - Coverage summary counts copies: "3 copies (1 local, 2 off-site)". The 3-2-1 check passes when
   at least one required off-site leg is fresh.
 
-### 5. Sites (S2, S3)
+### 5. Sites as independent tenants (S2, S3, shared servers)
 
-A **site** is a label grouping agents, set per agent with `CAIRN_SITE` (default: a single
-implicit site, so existing installs change nothing).
+Modeled on UniFi's multi-site controller: a **site** is a first-class object, and everything an
+operator sees or changes happens inside one site. A single-site install never sees any of this.
 
-- Dashboard: one section per site (summary, heatmap, cards). With one site, no site headers are
-  drawn, so the current layout is unchanged.
-- A vault serving several homes (S3) belongs to its own site (or none). Its legs appear on each
-  home's cards, so the vault's data is shown where it matters, under the home it protects.
-- Alerts: titles carry the site when there is more than one (`[cabin] Pics CRIT`). Per-site
-  routing (different recipients per site) is a later option, not part of the first cut.
-- Doctor's cross-agent checks run per site.
+**Data model**
+- `sites(id, slug, name, settings_json, created_ts)`. Migration creates one `default` site and
+  assigns every existing agent, target, ack, intent and link to it.
+- Every agent belongs to **exactly one site** (`agents.site_id`). Targets, status, acks, hides,
+  intents, removable links, manifests and SMART history inherit the site through their agent.
+- Agent names are unique within a site, not globally. Internally rows key on `(site_id, agent)`.
+
+**Enrollment.** An enrollment token is issued *for a site*. The agent it creates is bound to that
+site and to its own name (section 2), so an agent can never report into another site.
+
+**Users and tokens.** Each admin/viewer user or token has a site scope: one site, a list, or all
+sites. "All sites" is the server owner (UniFi's super admin). The middleware resolves the scope
+once per request, and every query goes through one scoping helper so a missed filter is a test
+failure, not a leak.
+
+**Dashboard**
+- Each site has its own dashboard at `/s/<slug>/`: summary, heatmap, cards, agents, history, the
+  same page as today, only showing that site.
+- A site switcher in the header, shown only when the user can see more than one site.
+- An **All sites** overview for multi-site users: one tile per site with worst severity, copy
+  coverage, stale agents and last alert, linking into the site (UniFi's site list).
+- With one site, `/` renders that site's dashboard directly and no switcher or overview is shown.
+
+**Per-site settings** (in `settings_json`, editable by that site's admins): alert recipients,
+Gotify target, Kuma push URL (one heartbeat per site), digest schedule, severity thresholds, ack
+TTL. The mail transport (SMTP host and credentials) stays server-wide.
+
+**A vault serving several sites (S3).** Because an agent belongs to one site, a shared off-site
+box runs **one agent per site**: separate agent names, tokens and `targets.yaml` files, each
+listing only that site's copies. Isolation stays clean, and each site's dashboard shows its own
+off-site legs. (The pull jobs themselves are per-site too; nothing on the vault is shared between
+sites except the pool.) A box serving datasets for two sites of the SAME owner can do the same.
+
+**Cross-site pairing is not allowed.** `dest_agent` and `source_agent` resolve within the site.
+Pairing across sites would leak one site's dataset names into another.
+
+**What a site admin cannot do:** see other sites, enroll agents into them, change server-wide
+settings (mail transport, TLS, update channel), or create sites. Those belong to all-sites admins.
 
 ### 6. Standalone control plane (S4)
 
@@ -131,10 +164,10 @@ execute-capable agents. In order of preference:
 
 | Phase | Delivers | Unblocks | Size |
 |---|---|---|---|
-| 1 | (agent, name) identity everywhere + migration | S2, S3 safely | medium |
+| 1 | (agent, name) identity everywhere + migration (becomes (site, agent, name) in phase 4) | S2, S3 safely | medium |
 | 2 | Token-bound agents | S4 public, any multi-agent setup | small-medium |
 | 3 | Pairing on `dest_agent` + multi-leg cards + `optional` legs | S1, S3 | medium |
-| 4 | Sites: `CAIRN_SITE`, grouped dashboard, alert prefix | S2 | medium |
+| 4 | Sites: `sites` table + migration, site-bound enrollment, scoped users/tokens, per-site dashboards + switcher + All-sites overview, per-site alert settings | S2, S3, shared servers | large |
 | 5 | Standalone compose + docs | S4 | small |
 
 Phases 1 and 2 are worth doing even for single-home installs: they remove ways a mistake or a
@@ -150,11 +183,17 @@ leaked token can affect the wrong target.
   home.
 - Optional leg stale: card stays OK, leg shows WARN.
 - Single-site install renders exactly as today (snapshot test of the dashboard HTML).
+- Every endpoint, called with a token scoped to site A, cannot read or change site B (a parametrized
+  test over the full route table, so a new endpoint without scoping fails CI).
+- An agent enrolled into site A that reports with site B's agent name is rejected.
+- `dest_agent` naming an agent in another site does not pair and the doctor flags it.
+- Per-site alert settings: a CRIT in site A goes only to site A's recipients.
 
 ## Open questions
 
-- Should a site have its own read-only viewer tokens (show one site only), or is one dashboard for
-  everything enough for a single owner?
-- Should severity thresholds be settable per site (a cabin checked weekly vs a main house daily)?
-- Does a vault that serves several homes need its own card group, or is "legs on the home cards"
-  plus the agents table enough?
+- Should a site admin be able to invite users to their own site, or do only all-sites admins
+  manage users?
+- One database with site scoping (proposed), or a database file per site for stronger isolation
+  and easy export of one site? Per-file costs cross-site overview queries.
+- Should a site be exportable/movable to another cairn server (e.g. a friend's site that later
+  self-hosts)? Cheap to design for now: site-scoped export of config + history.
