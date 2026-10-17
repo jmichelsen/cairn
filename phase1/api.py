@@ -36,6 +36,7 @@ from contextlib import asynccontextmanager
 async def _lifespan(app):
     _start_heartbeat_task()   # defined below; the notify self-test loop (no-op unless configured)
     _start_digest_task()      # once-daily email-digest flush (no-op unless CAIRN_DIGEST_HOUR set)
+    _start_db_backup_task()   # nightly consistent SQLite copy for file-level backups (borg etc.)
     yield
 
 app = FastAPI(title="Cairn", version="1.0", lifespan=_lifespan)
@@ -1069,6 +1070,86 @@ def _start_digest_task():
             await asyncio.sleep(60)
     asyncio.get_event_loop().create_task(_loop())
     print(f"[digest] daily email-digest flush at {DIGEST_HOUR:02d}:00 local", flush=True)
+
+# ---- nightly database backup ----
+# A file-level backup (borg, restic, rsync) that reads cairn.db while it is being written can capture
+# a torn copy. Once a night, at/after CAIRN_DB_BACKUP_HOUR local, write a consistent snapshot with
+# VACUUM INTO next to the database (CAIRN_DB_BACKUP_DIR, default <db dir>/backups), check it, and
+# keep the newest CAIRN_DB_BACKUP_KEEP. Restore = stop cairn, copy a snapshot over cairn.db (and
+# delete any cairn.db-wal / -shm), start cairn. CAIRN_DB_BACKUP_HOUR=off disables it.
+_DB_BACKUP_HOUR_RAW = os.environ.get("CAIRN_DB_BACKUP_HOUR", "2").strip().lower()
+try:
+    DB_BACKUP_HOUR = int(_DB_BACKUP_HOUR_RAW) if _DB_BACKUP_HOUR_RAW not in ("", "off", "none") else None
+    if DB_BACKUP_HOUR is not None and not (0 <= DB_BACKUP_HOUR <= 23):
+        DB_BACKUP_HOUR = None
+except ValueError:
+    DB_BACKUP_HOUR = None
+DB_BACKUP_KEEP = max(1, int(os.environ.get("CAIRN_DB_BACKUP_KEEP", "3") or 3))
+DB_BACKUP_DIR = os.environ.get("CAIRN_DB_BACKUP_DIR") or os.path.join(os.path.dirname(DB) or ".", "backups")
+
+def _db_backup_once(force=False):
+    """Write today's snapshot if it isn't there yet. Returns the path written, or None.
+    Skips (and says why) when free space is under twice the database size, so a backup can
+    never be what fills the disk."""
+    nowt = time.localtime()
+    if not force and (DB_BACKUP_HOUR is None or nowt.tm_hour < DB_BACKUP_HOUR):
+        return None
+    if not os.path.exists(DB):
+        return None
+    today = time.strftime("%Y-%m-%d", nowt)
+    dest = os.path.join(DB_BACKUP_DIR, f"cairn-{today}.db")
+    if os.path.exists(dest):
+        return None
+    os.makedirs(DB_BACKUP_DIR, exist_ok=True)
+    need = 2 * os.path.getsize(DB)
+    st = os.statvfs(DB_BACKUP_DIR)
+    free = st.f_bavail * st.f_frsize
+    if free < need:
+        print(f"[db-backup] SKIPPED: {free >> 20} MiB free, need {need >> 20} MiB", flush=True)
+        return None
+    tmp = dest + ".tmp"
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    t0 = time.time()
+    conn = sqlite3.connect(DB, timeout=60)
+    try:
+        conn.execute("VACUUM INTO ?", (tmp,))
+    finally:
+        conn.close()
+    chk = sqlite3.connect(tmp)
+    try:
+        ok = chk.execute("PRAGMA quick_check").fetchone()[0]
+    finally:
+        chk.close()
+    if ok != "ok":
+        os.remove(tmp)
+        print(f"[db-backup] FAILED quick_check on the snapshot: {ok}", flush=True)
+        return None
+    os.replace(tmp, dest)
+    snaps = sorted(f for f in os.listdir(DB_BACKUP_DIR) if f.startswith("cairn-") and f.endswith(".db"))
+    for old in snaps[:-DB_BACKUP_KEEP]:
+        os.remove(os.path.join(DB_BACKUP_DIR, old))
+    print(f"[db-backup] wrote {dest} ({os.path.getsize(dest) >> 20} MiB, {time.time() - t0:.0f}s), "
+          f"keeping {min(len(snaps), DB_BACKUP_KEEP)}", flush=True)
+    return dest
+
+def _start_db_backup_task():
+    """Launch the nightly database snapshot loop (called from lifespan startup). No-op if disabled."""
+    if DB_BACKUP_HOUR is None:
+        print("[db-backup] CAIRN_DB_BACKUP_HOUR=off - nightly database snapshot disabled", flush=True)
+        return
+    import asyncio
+    async def _loop():
+        loop = asyncio.get_event_loop()
+        while True:
+            try:
+                await loop.run_in_executor(None, _db_backup_once)
+            except Exception as e:
+                print(f"[db-backup] loop error: {e}", flush=True)
+            await asyncio.sleep(300)
+    asyncio.get_event_loop().create_task(_loop())
+    print(f"[db-backup] nightly snapshot at {DB_BACKUP_HOUR:02d}:00 local -> {DB_BACKUP_DIR} "
+          f"(keep {DB_BACKUP_KEEP})", flush=True)
 
 # ---- agent liveness (dead-man's-switch for remote agents e.g. the off-site vault) ----
 AGENT_STALE_FACTOR = int(os.environ.get("CAIRN_AGENT_STALE_FACTOR", "3"))     # missed N cycles -> WARN
