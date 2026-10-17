@@ -167,7 +167,8 @@ execute-capable agents. In order of preference:
 | 1 | (agent, name) identity everywhere + migration (becomes (site, agent, name) in phase 4) | S2, S3 safely | medium |
 | 2 | Token-bound agents | S4 public, any multi-agent setup | small-medium |
 | 3 | Pairing on `dest_agent` + multi-leg cards + `optional` legs | S1, S3 | medium |
-| 4 | Sites: `sites` table + migration, site-bound enrollment, scoped users/tokens, per-site dashboards + switcher + All-sites overview, per-site alert settings | S2, S3, shared servers | large |
+| 4 | Sites: `sites` table + migration, site-bound enrollment, scoped users/tokens + site-admin invites, per-site dashboards + switcher + All-sites overview, per-site alert settings | S2, S3, shared servers | large |
+| 4b | Site export/import CLI | moving a site to its own server | small-medium |
 | 5 | Standalone compose + docs | S4 | small |
 
 Phases 1 and 2 are worth doing even for single-home installs: they remove ways a mistake or a
@@ -188,12 +189,29 @@ leaked token can affect the wrong target.
 - An agent enrolled into site A that reports with site B's agent name is rejected.
 - `dest_agent` naming an agent in another site does not pair and the doctor flags it.
 - Per-site alert settings: a CRIT in site A goes only to site A's recipients.
+- A site admin of A cannot invite into B, create an all-sites user, or widen a scope.
+- Export of site A contains no rows from site B and no token hashes; import into an empty server
+  reproduces A's dashboard (snapshot test), and its agents are listed as needing re-enrollment.
+
+## Decisions (2026-10-17)
+
+- **Site admins can invite users to their own site.** A site admin can create viewer and admin
+  users/tokens scoped to their site only. They cannot grant access to any other site, create
+  all-sites users, or raise a user's scope beyond their own. Invites are a one-time link (same
+  mechanism as QR pairing) that expires; the invitee sets their own credential.
+- **One database, scoped by site.** All sites share `cairn.db`; isolation comes from the scoping
+  helper and the route-table test. Per-site database files were rejected: they make the All-sites
+  overview a fan-out over N files and complicate migrations, and site export (below) already gives
+  the portability they would have bought.
+- **Sites are exportable and importable.** `cairn site export <slug>` writes one archive: the site
+  row and settings, agents, targets, acks, hides, links, manifests, status and SMART history, all
+  rows for that site only. `cairn site import <archive>` loads it into another server under a new
+  or the same slug (refused if the slug exists). Secrets are not carried: token hashes and
+  enrollment tokens stay behind, and every agent re-enrolls against the new server (new URL and
+  token in its env). Site-scoped users are listed in the export by name only and get fresh invites.
+  The source site stays intact until an admin deletes it, so a move can be verified first.
 
 ## Open questions
 
-- Should a site admin be able to invite users to their own site, or do only all-sites admins
-  manage users?
-- One database with site scoping (proposed), or a database file per site for stronger isolation
-  and easy export of one site? Per-file costs cross-site overview queries.
-- Should a site be exportable/movable to another cairn server (e.g. a friend's site that later
-  self-hosts)? Cheap to design for now: site-scoped export of config + history.
+- Should an import be able to merge into an existing site (two sites consolidating), or only
+  create a new one? Proposed: new only, until there's a real case.
