@@ -2384,7 +2384,7 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--acc);outline-offset
 .card .scrubbar>span{display:block;height:100%;background:var(--acc);border-radius:4px;transition:width .6s ease}
 .card .scrublbl{font-family:"Roboto Mono";font-size:11px;color:var(--mut);margin-top:5px}
 button.scrubbtn[disabled]{opacity:.6;cursor:progress}
-.card .hidebtn{margin-top:10px;font-size:10.5px;color:var(--mut);background:none;border:0;padding:2px 0;
+.card .hidebtn{display:block;margin-top:9px;font-size:10.5px;color:var(--mut);background:none;border:0;padding:2px 0;
   cursor:pointer;text-decoration:underline;text-underline-offset:2px;opacity:.7}
 .card .hidebtn:hover{opacity:1;color:var(--ink)}
 .hidpane{margin-top:22px}
