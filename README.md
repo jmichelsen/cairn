@@ -392,6 +392,17 @@ The API sends every alert; agents hold no mail or push credentials. Settings liv
   `CAIRN_AGENT_MISS_FACTOR` and `CAIRN_AGENT_STALE_FLOOR`.
 - **Action results:** a failed action alerts as CRIT; a finished one is an INFO notice.
 
+## Backing up cairn itself
+
+Once a night, at or after `CAIRN_DB_BACKUP_HOUR` (default 2, `off` disables), the API writes a
+consistent copy of its database with `VACUUM INTO` to `CAIRN_DB_BACKUP_DIR` (default `backups/`
+next to `cairn.db`), checks it, and keeps the newest `CAIRN_DB_BACKUP_KEEP` (default 3). Point your
+file-level backup at that folder: copying the live `cairn.db` mid-write can give a torn file. The
+snapshot is skipped, with a log line, when free space is under twice the database size.
+
+Restore: stop cairn, copy a snapshot over `cairn.db`, delete `cairn.db-wal` and `cairn.db-shm` if
+present, start cairn.
+
 ## Updating
 
 - **Agents:** press **Update** on an outdated agent's tile (the dashboard flags agents older than
