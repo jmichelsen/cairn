@@ -542,6 +542,10 @@ blank to keep the route closed.
   (`use_template = ignore`, `process_children_only`, all counts 0). It tracks edits to
   `sanoid.conf`. Setting `fresh_warn_h` or `fresh_crit_h` on a target pins it manually; turn
   derivation off with `CAIRN_SANOID_DERIVE=0`.
+- **A pool root sanoid leaves alone is a pool card only.** If a pool's top-level dataset is
+  `use_template = ignore` or `process_children_only`, its card reports pool health (state, disk
+  errors, data errors, scrub, resilver, capacity) and offers Scrub, but no snapshot or recovery
+  actions and no freshness check. Add the child datasets as their own targets.
 
 ## Layout
 

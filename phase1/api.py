@@ -3757,7 +3757,7 @@ def _acts(r, can_act, viewer=False):
     _d = json.loads(r.get("detail_json") or "{}")
     caps = _d.get("caps") or {}                            # absent (pre-caps agent) => show, as before
     rec = ""
-    if t in ("zfs-repl", "zfs-local") and r.get("source"):
+    if t in ("zfs-repl", "zfs-local") and r.get("source") and not _d.get("pool_only"):
         # Snapshots (list restore points) works on any dataset-backed target; Deleted/Versions browse the
         # live mount, so hide them when the dataset has no usable mountpoint (e.g. an unmounted pool).
         rec = ('<div class="crec">'
@@ -4322,6 +4322,8 @@ def _card(r, can_act, viewer=False, cid=""):
     metas = []   # tier now lives as a header badge (see the return), not in the subtitle
     if r.get("encrypted"): metas.append("enc")
     if r.get("location") == "offsite": metas.append("off-site")
+    d = json.loads(r.get("detail_json") or "{}")
+    if d.get("pool_only"): metas.append("pool health only")
     mr = ""
     if r.get("pool_cap_pct") is not None:
         mr += f'<div><div class="mv">{r["pool_cap_pct"]}%</div><div class="ml">capacity</div></div>'
@@ -4331,7 +4333,6 @@ def _card(r, can_act, viewer=False, cid=""):
         mr += f'<div><div class="mv">{r["archive_count"]}</div><div class="ml">archives</div></div>'
     if r.get("dedup_ratio") is not None:
         mr += f'<div><div class="mv">{r["dedup_ratio"]}×</div><div class="ml">dedup</div></div>'
-    d = json.loads(r.get("detail_json") or "{}")
     why = _esc(", ".join(d.get("reasons", [])) or (r.get("last_error") or ""))
     # event/health cards have no source path - fall back to their summary as the subtitle text.
     src_html = _subtitle(path, metas) if (src or r.get("dest")) else _subtitle(_esc(d.get("summary") or ""))
