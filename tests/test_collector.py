@@ -1068,3 +1068,59 @@ def test_snapshot_refused_on_a_received_copy():
     assert cmd is None and "break the next pull" in err
     cmd, err = collector.build_command("snapshot", {"name": "g", "type": "zfs-local", "source": "tank/g"})
     assert cmd[:2] == ["zfs", "snapshot"] and err is None
+
+
+# ---- pool root that sanoid ignores: pool health only, no dataset checks -------------------------
+def _patch_pool(monkeypatch, snaps):
+    monkeypatch.setattr(collector, "zpool_status_detail",
+                        lambda p: {"resilver": None, "resilver_ts": None, "bad_vdevs": [], "err_vdevs": []})
+    monkeypatch.setattr(collector, "zpool_scrub_ts", lambda p: ("ok", 99000))
+    monkeypatch.setattr(collector, "zpool_scrub_progress", lambda p: {"errors": "1 data errors"})
+    monkeypatch.setattr(collector, "zfs_props", lambda ds, props: {})
+    monkeypatch.setattr(collector, "zfs_snapshots", lambda ds: snaps)
+    monkeypatch.setattr(collector, "_whoami", lambda: ("u", []))
+    monkeypatch.setattr(collector, "zfs_delegated", lambda *a, **k: True)
+    monkeypatch.setattr(collector, "can_sudo", lambda p: True)
+    monkeypatch.setattr(collector, "_mountpoint", lambda ds: ("/mnt/tank", None))
+
+
+def _local(**over):
+    t = {"name": "tank", "type": "zfs-local", "source": "tank"}
+    t.update(over)
+    return t
+
+
+POOLS = {"tank": {"health": "ONLINE", "cap": 50}}
+
+
+def test_ignored_pool_root_reports_pool_health_only(monkeypatch):
+    import json
+    _patch_pool(monkeypatch, snaps=[])
+    t = _local(fresh_suppress=True, fresh_reason="sanoid monitor=no (e.g. use_template=ignore)")
+    st = collector.adapter_zfs_local(t, collector.DEFAULT_THRESHOLDS, {}, 100000, POOLS)[0]
+    d = json.loads(st["detail_json"])
+    assert d["pool_only"] is True
+    assert st["severity"] == "CRIT"                              # pool data errors still alert
+    assert not any("sanoid" in r for r in d["reasons"])          # no policy note on every alert
+    assert d["caps"]["snapshot"] is False and d["caps"]["recoverable"] is False
+    assert d["caps"]["scrub"] is True                            # scrub is a pool action, kept
+
+
+def test_monitored_pool_root_keeps_dataset_checks(monkeypatch):
+    import json
+    _patch_pool(monkeypatch, snaps=[("s", "g", 1)])
+    monkeypatch.setattr(collector, "newest_age", lambda snaps, now: 60 * 3600 if snaps else None)
+    st = collector.adapter_zfs_local(_local(), collector.DEFAULT_THRESHOLDS, {}, 100000, POOLS)[0]
+    d = json.loads(st["detail_json"])
+    assert "pool_only" not in d
+    assert any("newest snap" in r for r in d["reasons"])
+    assert d["caps"]["snapshot"] is True
+
+
+def test_ignored_child_dataset_is_not_pool_only(monkeypatch):
+    import json
+    _patch_pool(monkeypatch, snaps=[])
+    t = _local(source="tank/child", fresh_suppress=True, fresh_reason="sanoid monitor=no")
+    st = collector.adapter_zfs_local(t, collector.DEFAULT_THRESHOLDS, {}, 100000, POOLS)[0]
+    d = json.loads(st["detail_json"])
+    assert "pool_only" not in d and "sanoid monitor=no" in d["reasons"]

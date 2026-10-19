@@ -591,6 +591,10 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
         if scrub_info.get("scrub_errors"):
             st["severity"] = worst(st["severity"], "CRIT")
             reasons.append(f"last scrub found {scrub_info['scrub_errors']} error(s)")
+    # A pool root that sanoid leaves alone (use_template=ignore / process_children_only) is only a
+    # container for its child datasets: report pool health and nothing about the root dataset itself
+    # (no freshness, no snapshot/recovery actions, no "sanoid monitor=no" note on every alert).
+    pool_only = ds == pool and pool in pools and bool(t.get("fresh_suppress"))
     # dataset props + snapshot freshness
     pr = zfs_props(ds, ["usedbysnapshots", "compressratio", "keystatus", "logicalreferenced", "used"])
     st["usedbysnapshots"] = int(pr["usedbysnapshots"]) if pr.get("usedbysnapshots", "").isdigit() else None
@@ -601,10 +605,12 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
     except ValueError:
         pass
     st["key_status"] = pr.get("keystatus")
-    snaps = zfs_snapshots(ds)
+    snaps = [] if pool_only else zfs_snapshots(ds)
     age = newest_age(snaps, now)
     st["snap_age_src_s"] = age
-    if t.get("fresh_suppress"):
+    if pool_only:
+        pass
+    elif t.get("fresh_suppress"):
         # sanoid doesn't monitor this dataset's freshness (use_template=ignore / process_children_only),
         # so a stale/absent snapshot here is expected, not an alarm - note the policy, skip the verdict.
         reasons.append(t.get("fresh_reason", "snapshot freshness not monitored by sanoid policy"))
@@ -622,10 +628,12 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
     user, groups = _whoami()
     wrapper = os.environ.get("CAIRN_ZPOOL_WRAPPER", "/opt/cairn/phase1/zpool-scrub.sh")
     _mp, _mperr = _mountpoint(ds)      # file-level recovery (Deleted/Versions/Restore) needs a real mount
-    caps = {"snapshot": zfs_delegated(ds, "snapshot", user, groups),
+    caps = {"snapshot": (not pool_only) and zfs_delegated(ds, "snapshot", user, groups),
             "scrub": (ds == pool) and can_sudo(wrapper),
-            "recoverable": _mperr is None}   # e.g. an unmounted pool (mountpoint=none) can't be browsed
+            "recoverable": (not pool_only) and _mperr is None}   # e.g. an unmounted pool can't be browsed
     _det = dict(reasons=reasons, snap_count=len(snaps), scrub=scrub_info, caps=caps)
+    if pool_only:
+        _det["pool_only"] = True
     if t.get("fresh_src"):          # transparency: where the freshness thresholds came from (sanoid:<type>)
         _det["fresh_src"] = t["fresh_src"]
     st["detail_json"] = json.dumps(_det)

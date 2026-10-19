@@ -57,6 +57,15 @@ def test_recoverable_dataset_shows_all_recovery():
     assert ">Snapshots<" in h and ">Deleted<" in h and ">Versions<" in h
 
 
+# ---- pool root sanoid ignores: pool health only -------------------------------------------------
+def test_pool_only_root_has_scrub_but_no_dataset_actions():
+    row = _row("mcz", caps={"snapshot": False, "scrub": True, "recoverable": False})
+    d = json.loads(row["detail_json"]); d["pool_only"] = True; row["detail_json"] = json.dumps(d)
+    h = api._acts(row, True, False)
+    assert ">Scrub<" in h and ">Snapshot<" not in h and ">Snapshots<" not in h and ">Deleted<" not in h
+    assert "pool health only" in api._card(row, can_act=True, viewer=False)
+
+
 # ---- read-only viewer gating -----------------------------------------------------------------
 def test_viewer_gets_no_controls():
     assert api._acts(_row("mcz", caps={"snapshot": True, "scrub": True}), False, True) == ""
