@@ -64,7 +64,7 @@ expires (`CAIRN_ACCESS_TTL`, default 24h); the agent refreshes it silently.
 | **List** | `GET /api/v1/backup/tokens` or `cairn-token.py list` | labels, roles, kind, last used (never the secret) |
 
 `cairn-token.py mint --role admin|agent|viewer --label <name>` mints any role (a viewer token never
-expires and can be shared as `/login?token=<token>`). A lockout guard refuses to revoke the last
+expires and can be shared as `/login#token=<token>`). A lockout guard refuses to revoke the last
 active admin. Password accounts are managed with `cairn-user.py`, see the
 [README](README.md#accounts-and-sharing).
 

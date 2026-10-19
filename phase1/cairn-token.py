@@ -49,7 +49,7 @@ def main():
         except sqlite3.IntegrityError:
             sys.exit(f"label '{a.label}' already exists")
         hint = {"enroll": "put it on the agent as CAIRN_ENROLL_SECRET",
-                "ui": "share it, or send a link to /login?token=<this>"}.get(
+                "ui": "share it, or send a link to /login#token=<this>"}.get(
                     kind, "use it as the admin token / CAIRN_API_TOKEN")
         print(f"role={a.role} kind={kind} label={a.label}\nSECRET: {tok}\n"
               f"(save now - only its hash is stored; {hint})")

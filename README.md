@@ -360,7 +360,7 @@ docker compose exec api python3 /app/phase1/cairn-user.py list
 user out everywhere. Sessions last `CAIRN_SESSION_TTL` (7 days). The audit trail records which
 account clicked each action.
 
-**Read-only share link:** mint a viewer token and send `https://<your-cairn>/login?token=<token>`.
+**Read-only share link:** mint a viewer token and send `https://<your-cairn>/login#token=<token>`.
 It signs the browser in read-only for 30 days and works for anyone you send it to, as often as they
 open it, until you revoke it:
 
