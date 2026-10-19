@@ -8,7 +8,7 @@ dashboard, and the token-authed vault endpoints (report + intent poll/result).
 Run:  uvicorn api:app --host 127.0.0.1 --port 8929
 Env:  CAIRN_DB, CAIRN_API_TOKEN (vault/agent bearer token; hash-at-rest is a deploy hardening)
 """
-import gzip, hashlib, hmac, json, os, re, sqlite3, time
+import gzip, hashlib, hmac, json, logging, os, re, sqlite3, time
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -40,6 +40,18 @@ async def _lifespan(app):
     yield
 
 app = FastAPI(title="Cairn", version="1.0", lifespan=_lifespan)
+
+class _RedactTokens(logging.Filter):
+    """Scrub token values from uvicorn's access log: a legacy /login?token=... share link would otherwise be
+    written to the journal in plain text (the token is a working read-only credential)."""
+    _rx = re.compile(r"(token=)[^&\s]+", re.I)
+
+    def filter(self, record):
+        if isinstance(record.args, tuple) and len(record.args) >= 3 and isinstance(record.args[2], str):
+            a = list(record.args); a[2] = self._rx.sub(r"\1[redacted]", a[2]); record.args = tuple(a)
+        return True
+
+logging.getLogger("uvicorn.access").addFilter(_RedactTokens())
 
 SEV_ORDER = {"CRIT": 0, "WARN": 1, "UNKNOWN": 2, "OK": 3}
 SEVCLS = {"CRIT": "crit", "WARN": "warn", "UNKNOWN": "unk", "OK": "ok"}  # severity -> css class
@@ -221,7 +233,19 @@ button{cursor:pointer}</style>
 <input type=password name=password placeholder=password autocomplete=current-password>
 <button>Sign in</button>{err}
 <details><summary>Sign in with a token</summary>
-<input type=password name=token placeholder="access / read-only share token"></details></form>"""
+<input type=password name=token placeholder="access / read-only share token"></details></form>
+<script>
+// Share links carry the token in the fragment (/login#token=...), which browsers never send to the server,
+// so it stays out of every access log. Hand it to the normal POST sign-in and wipe it from the address bar.
+(function () {
+  var m = location.hash.match(/^#token=([^&]+)/);
+  if (!m) return;
+  history.replaceState(null, "", location.pathname);
+  var f = document.querySelector("form");
+  f.username.value = ""; f.password.value = ""; f.token.value = decodeURIComponent(m[1]);
+  f.submit();
+})();
+</script>"""
 
 def _login_page(bad):
     return HTMLResponse(LOGIN_HTML.replace(
@@ -255,7 +279,8 @@ def privacy():
 
 @app.get("/login", response_class=HTMLResponse)
 def login_form(request: Request, bad: int = 0, token: str = ""):
-    # `?token=...` is the shareable read-only link: validate, drop it into the cookie, strip the URL.
+    # Legacy share links (`/login?token=...`), still honoured so links already sent keep working. New links
+    # use `/login#token=...` (see LOGIN_HTML); the query form reaches access logs, which _RedactTokens scrubs.
     if token:
         if _lookup_role(token):
             return _sign_in_cookie(token, 30 * DAY, request.url.scheme)
@@ -2120,7 +2145,7 @@ async def mint_token(request: Request):
         HAS_ADMIN = True
     hint = ("enrollment secret - put on the agent as CAIRN_ENROLL_SECRET; it mints short-lived "
             "access tokens") if kind == "enroll" else (
-            "read-only share token - hand it out, or send a link to /login?token=<this>"
+            "read-only share token - hand it out, or send a link to /login#token=<this>"
             if kind == "ui" else "SAVE NOW - only its hash is stored")
     return {"token": token, "label": label, "role": role, "kind": kind, "note": hint}
 
