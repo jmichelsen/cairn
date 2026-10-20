@@ -296,6 +296,22 @@ def do_execute(cfg):
                      {"ok": dok, "output": (f"folders: {dcount}" if dok else (derr or "dirtree failed"))})
             print(f"  intent {iid} {target} recover-dirtree -> {'ok' if dok else 'FAIL'} ({dcount})")
             continue
+        if action == "pool-accept":
+            # store the pool's CURRENT error state as its accepted baseline (agent-side state file):
+            # known permanent errors stop alerting, anything above them still does. No privilege needed.
+            src = t.get("source") or ""
+            if not src or "/" in src:
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                         {"ok": False, "output": "pool-accept needs a pool-root target"}); continue
+            if DRYRUN or opts.get("dryrun"):
+                cur = C.pool_error_counts(src)
+                api_call("POST", f"/api/v1/backup/intents/{iid}/result",
+                         {"ok": True, "dryrun": True,
+                          "output": f"[DRY-RUN] would accept {src}'s current error state as baseline: {json.dumps(cur)}"})
+                print(f"  intent {iid} {target} pool-accept [dry]"); continue
+            msg = C.accept_pool_baseline(src, time.time())
+            api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": True, "output": msg})
+            print(f"  intent {iid} {target} pool-accept -> ok"); continue
         if action == "recover-walk":
             # explicit UI refresh: walk this dataset now (bypassing the off-peak window) and STORE the
             # manifest, so the scan is kept, not discarded. The intent result is just a small summary.

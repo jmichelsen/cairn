@@ -1124,3 +1124,85 @@ def test_ignored_child_dataset_is_not_pool_only(monkeypatch):
     st = collector.adapter_zfs_local(t, collector.DEFAULT_THRESHOLDS, {}, 100000, POOLS)[0]
     d = json.loads(st["detail_json"])
     assert "pool_only" not in d and "sanoid monitor=no" in d["reasons"]
+
+
+# ---- accepted pool-error baseline ---------------------------------------------------------------
+def _patch_errs(monkeypatch, tmp_path, scrub_errors=0, data="No known data errors", vdevs=()):
+    _patch_pool(monkeypatch, snaps=[("s", "g", 1)])
+    monkeypatch.setenv("CAIRN_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(collector, "newest_age", lambda snaps, now: 60)
+    monkeypatch.setattr(collector, "zpool_status_detail",
+                        lambda p: {"resilver": None, "resilver_ts": None, "bad_vdevs": [],
+                                   "err_vdevs": list(vdevs)})
+    sc = {"state": "finished", "scrub_errors": scrub_errors, "errors": data}
+    monkeypatch.setattr(collector, "zpool_scrub_progress", lambda p: dict(sc))
+
+
+def _eval():
+    import json
+    st = collector.adapter_zfs_local(_local(), collector.DEFAULT_THRESHOLDS, {}, 100000, POOLS)[0]
+    return st, json.loads(st["detail_json"])
+
+
+def test_scrub_error_alerts_and_is_acceptable_without_a_baseline(monkeypatch, tmp_path):
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=1)
+    st, d = _eval()
+    assert st["severity"] == "CRIT" and "last scrub found 1 error(s)" in d["reasons"]
+    assert d["caps"]["accept_errors"] is True
+
+
+def test_accepted_errors_stop_alerting_but_stay_visible(monkeypatch, tmp_path):
+    v = [("disk-a", "0", "0", "6"), ("disk-b", "0", "0", "6")]
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=1, data="3 data errors, use '-v' for a list", vdevs=v)
+    msg = collector.accept_pool_baseline("tank", 50000)
+    assert "1 scrub error(s), 3 data error(s)" in msg
+    st, d = _eval()
+    assert st["severity"] == "OK" and d["reasons"] == []
+    assert d["caps"]["accept_errors"] is False
+    acc = d["scrub"]["accepted"]
+    assert acc["ts"] == 50000 and "1 scrub error(s)" in acc["items"] and "3 data error(s)" in acc["items"]
+
+
+def test_counts_above_the_baseline_alert(monkeypatch, tmp_path):
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=1, vdevs=[("disk-a", "0", "0", "6")])
+    collector.accept_pool_baseline("tank", 50000)
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=2, vdevs=[("disk-a", "0", "0", "7")])
+    st, d = _eval()
+    assert st["severity"] == "CRIT"
+    assert "last scrub found 2 error(s) (accepted baseline 1)" in d["reasons"]
+    assert any(r.startswith("vdev I/O errors: disk-a(r0/w0/c7)") for r in d["reasons"])
+    assert d["caps"]["accept_errors"] is True
+
+
+def test_a_new_disk_with_errors_alerts_even_with_a_baseline(monkeypatch, tmp_path):
+    _patch_errs(monkeypatch, tmp_path, vdevs=[("disk-a", "0", "0", "6")])
+    collector.accept_pool_baseline("tank", 50000)
+    _patch_errs(monkeypatch, tmp_path, vdevs=[("disk-a", "0", "0", "6"), ("disk-b", "1", "0", "0")])
+    st, d = _eval()
+    assert st["severity"] == "CRIT" and any("disk-b" in r and "disk-a" not in r for r in d["reasons"])
+
+
+def test_baseline_ratchets_down_when_counts_drop(monkeypatch, tmp_path):
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=1, vdevs=[("disk-a", "0", "0", "6")])
+    collector.accept_pool_baseline("tank", 50000)
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=0)        # clean scrub + zpool clear
+    st, _ = _eval()
+    assert st["severity"] == "OK"
+    b = collector.pool_baseline("tank")
+    assert b["scrub_errors"] == 0 and b["vdevs"] == {}
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=1, vdevs=[("disk-a", "0", "0", "1")])
+    st, d = _eval()                                           # the same errors coming back alert again
+    assert st["severity"] == "CRIT" and "last scrub found 1 error(s)" in d["reasons"]
+
+
+def test_unparseable_data_error_line_still_alerts(monkeypatch, tmp_path):
+    _patch_errs(monkeypatch, tmp_path, data="something new")
+    collector.accept_pool_baseline("tank", 50000)
+    st, d = _eval()
+    assert st["severity"] == "CRIT" and "data errors: something new" in d["reasons"]
+
+
+def test_zpool_counter_parsing():
+    assert collector._zcount("6") == 6 and collector._zcount("1.2K") == 1200 and collector._zcount("x") is None
+    assert collector._data_error_count("No known data errors") == 0
+    assert collector._data_error_count("12 data errors, use '-v' for a list") == 12

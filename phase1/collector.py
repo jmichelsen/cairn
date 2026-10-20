@@ -313,6 +313,70 @@ def zpool_status_detail(pool):
                     d["err_vdevs"].append((name, r, w, ck))
     return d
 
+# ---- accepted pool-error baseline -------------------------------------------------------------
+# Some pool errors are permanent and known: a block every mirror side lost, still held by snapshots
+# you keep, makes every future scrub report the same error. Accepting the pool's CURRENT error state
+# stores it as a baseline (agent-side, per pool); after that only counts ABOVE the baseline alert.
+# The baseline only ever ratchets DOWN by itself: a count that drops (a clean scrub, `zpool clear`,
+# a reboot resetting vdev counters) lowers it, so a later rise from there alerts again. It only
+# goes up when a human accepts again.
+def _zcount(v):
+    """zpool status counter -> int ('6' -> 6, '1.2K' -> 1200); None when unparseable."""
+    m = re.fullmatch(r"([\d.]+)([KMGTP]?)", str(v).strip())
+    if not m:
+        return None
+    return int(float(m.group(1)) * 1000 ** " KMGTP".index(m.group(2) or " "))
+
+def _data_error_count(errline):
+    """`errors:` line -> number of data errors (0 for 'No known data errors'); None if unparseable."""
+    if not errline or "No known data errors" in errline:
+        return 0
+    m = re.match(r"(\d+)\s+data errors?", errline)
+    return int(m.group(1)) if m else None
+
+def _pool_baseline_path(pool):
+    slug = re.sub(r"[^A-Za-z0-9_.-]", "_", str(pool))
+    return os.path.join(_cairn_state_dir(), f"pool-baseline-{slug}.json")
+
+def pool_baseline(pool):
+    try:
+        with open(_pool_baseline_path(pool)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+def pool_write_baseline(pool, b):
+    try:
+        with open(_pool_baseline_path(pool), "w") as f:
+            json.dump(b, f)
+    except OSError:
+        pass
+
+def pool_error_counts(pool):
+    """The pool's current error state, in the shape a baseline stores."""
+    det, sc = zpool_status_detail(pool), zpool_scrub_progress(pool)
+    return {"scrub_errors": sc.get("scrub_errors") or 0,
+            "data_errors": _data_error_count(sc.get("errors")),
+            "vdevs": {n: [_zcount(r), _zcount(w), _zcount(c)] for n, r, w, c in det["err_vdevs"]}}
+
+def accept_pool_baseline(pool, now):
+    """Store the pool's current error state as its accepted baseline. Returns a human summary."""
+    cur = pool_error_counts(pool)
+    if cur["data_errors"] is None:
+        cur["data_errors"] = 0
+    cur["vdevs"] = {n: [x or 0 for x in v] for n, v in cur["vdevs"].items()}
+    cur["accepted_ts"] = int(now)
+    pool_write_baseline(pool, cur)
+    vd = ", ".join(f"{n}(r{r}/w{w}/c{c})" for n, (r, w, c) in cur["vdevs"].items())
+    return (f"accepted as {pool}'s baseline: {cur['scrub_errors']} scrub error(s), "
+            f"{cur['data_errors']} data error(s)" + (f", vdev counters {vd}" if vd else "")
+            + ". Only counts above these will alert.")
+
+def _vdev_over(cur, base):
+    """True when any of r/w/c is above the accepted value (unparseable counts never pass)."""
+    return any(c is None or c > (b or 0) for c, b in zip(cur, base or [0, 0, 0]))
+
+
 def _live_vdev_index():
     """(pool_health, vdev_bases): the CURRENT pool healths {pool: HEALTH} and the set of
     (pool, base-name) leaf vdevs in the live zpool config, with any trailing -partN stripped (zed
@@ -543,6 +607,7 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
     st = dict(severity="OK", detail_json=None, last_error=None)
     reasons = []
     scrub_info = {}
+    acceptable = False
     # pool health/capacity (only when the target IS a pool root)
     if ds == pool and pool in pools:
         p = pools[pool]
@@ -568,9 +633,22 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
         if det["bad_vdevs"]:
             st["severity"] = worst(st["severity"], "CRIT")
             reasons.append("vdev not ONLINE: " + ", ".join(f"{n}={s}" for n, s in det["bad_vdevs"]))
-        if det["err_vdevs"]:
+        base = pool_baseline(pool); bvd = base.get("vdevs") or {}
+        accepted, rebased = [], False
+        over = []
+        for n, r, w, c in det["err_vdevs"]:
+            cur = [_zcount(r), _zcount(w), _zcount(c)]
+            if n in bvd and not _vdev_over(cur, bvd[n]):
+                accepted.append(f"{n}(r{r}/w{w}/c{c})")
+                if cur != bvd[n]:
+                    bvd[n] = cur; rebased = True
+            else:
+                over.append((n, r, w, c))
+        for n in [n for n in bvd if n not in {e[0] for e in det["err_vdevs"]}]:
+            del bvd[n]; rebased = True            # counters back to 0 (clear/reboot): ratchet down
+        if over:
             st["severity"] = worst(st["severity"], "CRIT")
-            reasons.append("vdev I/O errors: " + ", ".join(f"{n}(r{r}/w{w}/c{c})" for n, r, w, c in det["err_vdevs"]))
+            reasons.append("vdev I/O errors: " + ", ".join(f"{n}(r{r}/w{w}/c{c})" for n, r, w, c in over))
         # scrub age
         cad = scrub_cad.get(pool, {"warn_d": defaults["scrub_warn_d"], "crit_d": defaults["scrub_crit_d"]})
         line, sepoch = zpool_scrub_ts(pool)
@@ -586,11 +664,29 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
         # live scrub progress (%, ETA) + bottom-line data-error state, for the pool card + Scrub button
         scrub_info = zpool_scrub_progress(pool)
         errline = scrub_info.get("errors")
-        if errline and "No known data errors" not in errline:
+        nde = _data_error_count(errline)
+        if nde is None or nde > (base.get("data_errors") or 0):
             st["severity"] = worst(st["severity"], "CRIT"); reasons.append("data errors: " + errline)
-        if scrub_info.get("scrub_errors"):
+        elif nde:
+            accepted.append(f"{nde} data error(s)")
+        if base and nde is not None and nde < (base.get("data_errors") or 0):
+            base["data_errors"] = nde; rebased = True
+        nse = scrub_info.get("scrub_errors") or 0
+        if nse > (base.get("scrub_errors") or 0):
             st["severity"] = worst(st["severity"], "CRIT")
-            reasons.append(f"last scrub found {scrub_info['scrub_errors']} error(s)")
+            reasons.append(f"last scrub found {nse} error(s)"
+                           + (f" (accepted baseline {base['scrub_errors']})" if base.get("scrub_errors") else ""))
+        elif nse:
+            accepted.append(f"{nse} scrub error(s)")
+        if base and nse < (base.get("scrub_errors") or 0):
+            base["scrub_errors"] = nse; rebased = True
+        if base and rebased:
+            base["vdevs"] = bvd; pool_write_baseline(pool, base)
+        if accepted:
+            scrub_info["accepted"] = {"items": accepted, "ts": base.get("accepted_ts")}
+        # something a human could accept as the new baseline (any error count above it)
+        acceptable = bool(over) or (nde is not None and nde > (base.get("data_errors") or 0)) \
+            or nse > (base.get("scrub_errors") or 0)
     # A pool root that sanoid leaves alone (use_template=ignore / process_children_only) is only a
     # container for its child datasets: report pool health and nothing about the root dataset itself
     # (no freshness, no snapshot/recovery actions, no "sanoid monitor=no" note on every alert).
@@ -630,7 +726,8 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
     _mp, _mperr = _mountpoint(ds)      # file-level recovery (Deleted/Versions/Restore) needs a real mount
     caps = {"snapshot": (not pool_only) and zfs_delegated(ds, "snapshot", user, groups),
             "scrub": (ds == pool) and can_sudo(wrapper),
-            "recoverable": (not pool_only) and _mperr is None}   # e.g. an unmounted pool can't be browsed
+            "recoverable": (not pool_only) and _mperr is None,   # e.g. an unmounted pool can't be browsed
+            "accept_errors": ds == pool and pool in pools and acceptable}
     _det = dict(reasons=reasons, snap_count=len(snaps), scrub=scrub_info, caps=caps)
     if pool_only:
         _det["pool_only"] = True

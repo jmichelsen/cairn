@@ -87,7 +87,7 @@ sequenceDiagram
   `snapshot`, `sync` (zfs-repl), `scrub` (zfs-local), `pull` (zfs-local replica), `backup-now`,
   `removable-scan`, `removable-verify`, `removable-relocate` (removable), `recover-points`,
   `recover-search`, `recover-deleted`, `restore`, `recover-versions`, `recover-dirtree`
-  (dataset-backed targets), `recover-walk` (zfs-local), and `aide-accept` (aide). The agent builds
+  (dataset-backed targets), `recover-walk` (zfs-local), `pool-accept` (zfs-local pool root), and `aide-accept` (aide). The agent builds
   the actual command from its own local target config, never from the request.
 - **Routing** - each target is stored with the agent that reported it; intents for that target are
   handed to whichever caller polls with that agent name (see the limitation under Authentication).

@@ -321,7 +321,7 @@ off-site copy, a stale removable drive, or a missing 3rd copy).
   header to filter the whole fleet to it. Cards refresh every 20 seconds.
 - **Actions** (per card, execute-capable agents only): Snapshot, Replicate (or no-snap: send
   existing snapshots only), Replicate now (vault pull), Scrub (pool roots, when the scrub wrapper is
-  installed), Back up now (removable), AIDE Accept. Every click shows the exact command first; the
+  installed), Accept errors (pool roots with error counts), Back up now (removable), AIDE Accept. Every click shows the exact command first; the
   **Dry-run** box in the top bar turns clicks into dry-runs. Results and live progress land in the
   **Activity** pane.
 - **Acknowledge** a WARN/CRIT to take it out of the header count until its reason changes or
@@ -562,6 +562,13 @@ blank to keep the route closed.
   `use_template = ignore` or `process_children_only`, its card reports pool health (state, disk
   errors, data errors, scrub, resilver, capacity) and offers Scrub, but no snapshot or recovery
   actions and no freshness check. Add the child datasets as their own targets.
+- **Known pool errors can be accepted as a baseline.** Some errors can't be fixed: a block every
+  mirror side lost, still held by snapshots you keep, makes every scrub report it again. **Accept
+  errors** on the pool card stores the current scrub error, data error and per-disk READ/WRITE/CKSUM
+  counts (in the agent's state dir, `pool-baseline-<pool>.json`). Those counts stop alerting, the card
+  notes what was accepted and when, and any count above them alerts as before. The baseline lowers
+  itself when a count drops (a clean scrub, `zpool clear`, a reboot), so errors that come back from
+  there alert again; it only rises when you accept again.
 
 ## Layout
 
