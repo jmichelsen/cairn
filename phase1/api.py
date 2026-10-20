@@ -8,7 +8,7 @@ dashboard, and the token-authed vault endpoints (report + intent poll/result).
 Run:  uvicorn api:app --host 127.0.0.1 --port 8929
 Env:  CAIRN_DB, CAIRN_API_TOKEN (vault/agent bearer token; hash-at-rest is a deploy hardening)
 """
-import gzip, hashlib, hmac, json, logging, os, re, sqlite3, time
+import gzip, hashlib, hmac, json, os, re, sqlite3, time
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -28,6 +28,9 @@ import sys as _sys
 _sys.path.insert(0, str(HERE))
 import collector as _cmd   # PURE build_command, for action PREVIEWS only; the API never executes it
 import notify_selftest      # dead-man's-switch: verify the alert DELIVERY path + push to uptime-kuma
+import applog               # the debug log (vendored; activity.py holds cairn's rules)
+import applog.asgi
+import activity
 DAY = 86400
 
 from contextlib import asynccontextmanager
@@ -41,17 +44,6 @@ async def _lifespan(app):
 
 app = FastAPI(title="Cairn", version="1.0", lifespan=_lifespan)
 
-class _RedactTokens(logging.Filter):
-    """Scrub token values from uvicorn's access log: a legacy /login?token=... share link would otherwise be
-    written to the journal in plain text (the token is a working read-only credential)."""
-    _rx = re.compile(r"(token=)[^&\s]+", re.I)
-
-    def filter(self, record):
-        if isinstance(record.args, tuple) and len(record.args) >= 3 and isinstance(record.args[2], str):
-            a = list(record.args); a[2] = self._rx.sub(r"\1[redacted]", a[2]); record.args = tuple(a)
-        return True
-
-logging.getLogger("uvicorn.access").addFilter(_RedactTokens())
 
 SEV_ORDER = {"CRIT": 0, "WARN": 1, "UNKNOWN": 2, "OK": 3}
 SEVCLS = {"CRIT": "crit", "WARN": "warn", "UNKNOWN": "unk", "OK": "ok"}  # severity -> css class
@@ -64,7 +56,9 @@ SEVCLS = {"CRIT": "crit", "WARN": "warn", "UNKNOWN": "unk", "OK": "ok"}  # sever
 import hashlib as _hashlib, secrets as _secrets
 AGENT_PATHS = ("/api/v1/backup/report", "/api/v1/backup/intents",
                "/api/v1/backup/agent/")  # agent-only: report, intents/{id}/result, recovery walk push/due
-ADMIN_ONLY_PATHS = ("/api/v1/backup/tokens", "/api/v1/backup/pair", "/pair")  # sensitive even on GET - never for a viewer
+ADMIN_ONLY_PATHS = ("/api/v1/backup/tokens", "/api/v1/backup/pair", "/pair",
+                    "/api/v1/backup/log", "/log")   # the debug log shows every account's actions
+EVENT_PATHS = ("/api/v1/backup/events",)   # crash reports and failed requests: any signed-in client  # sensitive even on GET - never for a viewer
 # A dedicated, single-purpose secret CI uses to push pipeline status to /api/v1/ci/status. Scoped to
 # ONLY that route (compared in-handler), so it can set a badge but do nothing else - safe to hand to
 # GitLab CI variables. Unset => the push route is closed (badges still render "unknown").
@@ -107,6 +101,7 @@ def _mint_session(role, username):
     """Issue a short-lived session token for a password login (its role copied from the account),
     so the cookie carries a real token and nobody pastes a raw admin secret. Prunes expired sessions."""
     tok = _secrets.token_hex(32); now = int(time.time())
+    applog.secret(tok)
     with db() as c:
         c.execute("DELETE FROM auth_tokens WHERE kind='session' AND expires_ts < ?", (now,))
         # parent = the owning username, so cairn-user can revoke this account's sessions on change.
@@ -171,8 +166,10 @@ def _lookup_role(token):
             return None
         if r["expires_ts"] and r["expires_ts"] < now:
             return None
-        c.execute("UPDATE auth_tokens SET last_used_ts=? WHERE hash=?", (now, h))
-        c.commit()
+    # Bookkeeping, not an action: on an untraced connection, so a dashboard poll stays a read in the debug log
+    # (otherwise every authenticated request would be logged as a change).
+    with sqlite3.connect(DB) as plain:
+        plain.execute("UPDATE auth_tokens SET last_used_ts=? WHERE hash=?", (now, h))
     return r["role"]
 
 def _whoami(request):
@@ -207,7 +204,9 @@ async def auth_gate(request: Request, call_next):
                             status_code=503)
     role = _lookup_role(_extract_token(request))
     request.state.role = role
-    if p.startswith(AGENT_PATHS):
+    if p.startswith(EVENT_PATHS):
+        ok = role in ("admin", "viewer", "agent")
+    elif p.startswith(AGENT_PATHS):
         ok = role in ("admin", "agent")
     elif p.startswith(ADMIN_ONLY_PATHS):
         ok = role == "admin"
@@ -297,6 +296,7 @@ async def login_submit(request: Request):
     if username:  # named account -> mint a session token carrying the account's role
         role = _verify_user(username, password)
         if role:
+            applog.signed_in(username)
             return _sign_in_cookie(_mint_session(role, username), SESSION_TTL, request.url.scheme)
     elif token and _lookup_role(token):  # direct token (admin bootstrap, or a shared RO token)
         return _sign_in_cookie(token, 30 * DAY, request.url.scheme)
@@ -309,7 +309,7 @@ def logout():
     return r
 
 def db():
-    c = sqlite3.connect(DB)
+    c = applog.connect(DB)          # traced: a request's or job's writes land in its log row, masked
     c.row_factory = sqlite3.Row
     return c
 
@@ -459,7 +459,22 @@ def _init_db():
                 url        TEXT,
                 updated_ts INTEGER NOT NULL)""")
 _init_db()
-HAS_ADMIN = _seed_tokens() > 0   # false => middleware returns 503 until CAIRN_ADMIN_TOKEN is set
+activity.setup(lambda: DB)
+
+def _applog_who(scope):
+    """Who a logged request was: the username or token label, and where it came from (agent = device)."""
+    from starlette.requests import Request as _Req
+    req = _Req(scope)
+    name = _whoami(req)
+    if (scope.get("state") or {}).get("role") == "agent":
+        return (name or "agent", "device")
+    if not name:
+        return None
+    return (name, "app" if req.headers.get(applog.app_header().lower()) else "web")
+
+app.add_middleware(applog.asgi.Middleware, who=_applog_who)
+with applog.job("seed-tokens"):  # startup writes get their own row, not "unattributed"
+    HAS_ADMIN = _seed_tokens() > 0   # false => middleware returns 503 until CAIRN_ADMIN_TOKEN is set
 
 ACK_TTL = int(os.environ.get("CAIRN_ACK_TTL", str(14 * DAY)))  # an acknowledgement lapses after this
 
@@ -1030,7 +1045,7 @@ def _start_heartbeat_task():
         loop = asyncio.get_event_loop()
         while True:
             try:
-                await loop.run_in_executor(None, _heartbeat_once)   # blocking I/O off the event loop
+                await loop.run_in_executor(None, applog.in_job("heartbeat")(_heartbeat_once))   # blocking I/O off the event loop
             except Exception as e:
                 print(f"[heartbeat] loop error: {e}", flush=True)
             await asyncio.sleep(KUMA_INTERVAL)
@@ -1089,7 +1104,7 @@ def _start_digest_task():
         loop = asyncio.get_event_loop()
         while True:
             try:
-                await loop.run_in_executor(None, _digest_flush_once)
+                await loop.run_in_executor(None, applog.in_job("digest")(_digest_flush_once))
             except Exception as e:
                 print(f"[digest] loop error: {e}", flush=True)
             await asyncio.sleep(60)
@@ -1168,7 +1183,7 @@ def _start_db_backup_task():
         loop = asyncio.get_event_loop()
         while True:
             try:
-                await loop.run_in_executor(None, _db_backup_once)
+                await loop.run_in_executor(None, applog.in_job("db-backup")(_db_backup_once))
             except Exception as e:
                 print(f"[db-backup] loop error: {e}", flush=True)
             await asyncio.sleep(300)
@@ -1377,6 +1392,7 @@ def agent_doctor(name: str):
 async def report(request: Request):
     """An agent reports its host's status. Upserts targets (ownership = reporting agent) +
     inserts status rows, then dispatches WARN/CRIT alerts centrally. (auth: middleware)"""
+    applog.count_writes()   # one row per report with counts ("INSERT status x18"), not every status row
     payload = await _json(request)
     agent = payload.get("agent", "unknown")
     now = int(payload.get("ts") or time.time())
@@ -2109,6 +2125,7 @@ async def enroll(request: Request):
         if not r:
             raise HTTPException(401, "invalid or revoked enrollment secret")
         access = _secrets.token_hex(32)
+        applog.secret(access)
         # one active access token per agent: drop any prior (also kills a leaked one on refresh).
         # DELETE (not deactivate) so the timestamped label is free to reuse immediately.
         c.execute("DELETE FROM auth_tokens WHERE parent=? AND kind='access'", (r["label"],))
@@ -2133,6 +2150,7 @@ async def mint_token(request: Request):
     if not label:
         raise HTTPException(400, "label required (e.g. the agent/host name)")
     token = _secrets.token_hex(32)
+    applog.secret(token)
     try:
         with db() as c:
             c.execute("INSERT INTO auth_tokens(hash,role,kind,label,created_ts,active) VALUES(?,?,?,?,?,1)",
@@ -2220,6 +2238,7 @@ async def create_pairing(request: Request):
         raise HTTPException(400, "role must be 'viewer' or 'admin'")
     label = "phone-" + time.strftime("%Y%m%d-%H%M%S")
     token = _secrets.token_hex(32)
+    applog.secret(token)
     with db() as c:
         c.execute("INSERT INTO auth_tokens(hash,role,kind,label,created_ts,active) VALUES(?,?,?,?,?,1)",
                   (_hash(token), role, "admin" if role == "admin" else "ui", label, int(time.time())))
@@ -2273,6 +2292,57 @@ async function makePair(){
 @app.get("/pair", response_class=HTMLResponse)
 def pair_page():
     return _shell(PAIR_PAGE)
+
+# ---------------- the debug log (applog; rules in activity.py) ----------------
+@app.post("/api/v1/backup/events")
+async def client_events(request: Request):
+    """What only a client knows: crash reports (sent only after the person agreed), failed requests with the
+    server's request id, script errors. Capped per batch and per client per day by applog. (auth: any role)"""
+    body = await _json(request)
+    version = request.headers.get(applog.app_header().lower())
+    rec = applog.current()
+    n = applog.client_events(body.get("events") if isinstance(body, dict) else None,
+                             source="app" if version else "web", who=_whoami(request),
+                             client=f"app {version}" if version else request.headers.get("user-agent", ""),
+                             request_id=rec["rid"] if rec else None)
+    return {"logged": n}
+
+@app.get("/api/v1/backup/log")
+def activity_log(days: str = "7", q: str = "", kind: str = "", problems: str = "", before: int = None):
+    """The log as JSON: counts, failures, p95 by action and day, and the matching entries. (auth: admin)"""
+    return applog.report(days, q.strip(), kind, problems == "1", before)
+
+_APPLOG_JS = (HERE / "static" / "applog.js").read_text()
+_APPLOG_CSS = (HERE / "static" / "applog.css").read_text()
+LOG_PAGE = """
+  <div class=topbar2><h2 class=applogo>Cairn</h2><a class=signout href=/>&larr; dashboard</a></div>
+  <div class=logwrap>
+    <h3>Log</h3>
+    <p class=lognote>Every change, background job and failure on this Cairn, and problems the app reported.
+      Reads are listed only when slow or failed. Kept on this server only.</p>
+    <div id=log>Loading&hellip;</div>
+  </div>
+  <style>.logwrap{max-width:1100px;margin:0 auto;padding:8px 18px 40px}.lognote{color:var(--mut,#888)}
+  __CSS__</style>
+  <script>__JS__</script>
+  <script>
+  (async function () {
+    const P = new URLSearchParams(location.search);
+    const days = applog.RANGES[P.get("days")] ? P.get("days") : "7";
+    const q = P.get("q") || "", kind = P.get("kind") || "", problems = P.get("problems") === "1";
+    const query = new URLSearchParams({ days, q, kind, problems: problems ? "1" : "" });
+    if (P.get("before")) query.set("before", P.get("before"));
+    const link = over => "/log?" + new URLSearchParams({ days, q, kind, problems: problems ? "1" : "", ...over });
+    const el = document.getElementById("log");
+    const res = await fetch("/api/v1/backup/log?" + query, { credentials: "same-origin" });
+    if (!res.ok) { el.textContent = "Couldn't load the log (" + res.status + ")."; return; }
+    applog.renderLog(el, await res.json(), { days, q, kind, problems, link, onFilter: f => { location.href = link(f); } });
+  })();
+  </script>"""
+
+@app.get("/log", response_class=HTMLResponse)
+def log_page():
+    return _shell(LOG_PAGE.replace("__CSS__", _APPLOG_CSS).replace("__JS__", _APPLOG_JS))
 
 # ---------------- HTML dashboard + on-demand action buttons ----------------
 # The dashboard is the "Panel" design direction: a 14-day fleet heatmap, a capacity gauge +
@@ -4712,7 +4782,7 @@ def index(request: Request):
       <button data-h=steel onclick="setHero('steel')">Summary</button>
       <button data-h=heat onclick="setHero('heat')">14-day fleet</button></div>
     {ro_badge}{dry_html}
-    {'' if viewer else '<a class=signout href=/pair>pair phone</a>'}
+    {'' if viewer else '<a class=signout href=/log>log</a> <a class=signout href=/pair>pair phone</a>'}
     <a class=signout href=# onclick="lo.submit();return false">sign out</a></div>
   {warm_banner}{cfg_banner}{recon_banner}
   <div id=hero-steel class=herox>{steel_hero}</div>

@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir pyyaml "fastapi>=0.110" "uvicorn[standard]>=0.29"
 FROM deps AS ci
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN apt-get update -qq && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir pytest
+RUN pip install --no-cache-dir pytest httpx   # httpx: FastAPI TestClient (tests/test_activity.py)
 WORKDIR /src
 COPY phase0 /src/phase0
 COPY phase1 /src/phase1

@@ -530,13 +530,8 @@ def test_outdated_agent_update_is_a_button_for_admin_and_plain_text_for_viewer()
     assert "admin only" in viewer and "read-only" in viewer
 
 
-def test_share_links_keep_the_token_out_of_urls_and_logs():
-    import logging
+def test_share_links_put_the_token_in_the_fragment():
     # New links put the token in the fragment; the login page posts it (the server never sees the fragment).
+    # That a legacy ?token= link never reaches the log is tests/test_activity.py's job.
     page = api._login_page(0).body.decode()
     assert "#token=" in page and "f.submit()" in page and "history.replaceState" in page
-    # Legacy ?token= links still reach the access log: the filter scrubs the value.
-    rec = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d',
-                            ("1.2.3.4:5", "GET", "/login?token=abc123secret&x=1", "1.1", 302), None)
-    api._RedactTokens().filter(rec)
-    assert "abc123secret" not in rec.getMessage() and "token=[redacted]&x=1" in rec.getMessage()
