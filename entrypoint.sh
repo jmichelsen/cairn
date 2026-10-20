@@ -22,7 +22,7 @@ case "${1:-api}" in
     _require CAIRN_ADMIN_TOKEN "Set the 3 tokens in config/cairn.env (generate: openssl rand -hex 32)."
     _require CAIRN_AGENT_TOKENS "Set CAIRN_AGENT_TOKENS in config/cairn.env."
     # pure control plane - no ZFS/host access; ingests agent reports, serves the dashboard.
-    exec uvicorn api:app --app-dir /app/phase1 --host 0.0.0.0 --port "${CAIRN_PORT:-8929}"
+    exec uvicorn api:app --app-dir /app/phase1 --host 0.0.0.0 --port "${CAIRN_PORT:-8929}" --no-access-log   # applog writes the request log
     ;;
   agent)
     _require CAIRN_API_URL "Set CAIRN_API_URL (e.g. http://api:8929)."

@@ -1,0 +1,31 @@
+/* applog 0.1.7 (5616008) (vendored from applog). The metrics page, themed by the app's variables: --card, --ink,
+   --muted, --line, --bad, --bad-bg, --warn, --warn-bg, --bg, --radius. Fallbacks keep it readable without them. */
+.applog { color: var(--ink, inherit); }
+.applog h2 { font-size: 1.05rem; margin: 18px 0 8px; }
+.applog-muted { color: var(--muted, #667); font-size: .875rem; }
+.applog-row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.applog-grow { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.applog-filter { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.applog-filter input[name=q] { flex: 1 1 200px; min-width: 0; }
+.applog-stats, .applog-days, .applog-entry, .applog-table {
+  background: var(--card, #fff); border: 1px solid var(--line, #ddd); border-radius: var(--radius, 10px); }
+.applog-stats { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; padding: 14px; margin: 0 0 12px; }
+.applog-stats dt { color: var(--muted, #667); }
+.applog-stats dd { margin: 0; text-align: right; }
+.applog-days { padding: 10px 14px; font-size: .875rem; }
+.applog-table { overflow-x: auto; }
+.applog-table table { border-collapse: collapse; width: 100%; }
+.applog-table th, .applog-table td { padding: 6px; text-align: left; border-bottom: 1px solid var(--line, #ddd); }
+.applog-table td:first-child { overflow-wrap: anywhere; }
+.applog-table .num { text-align: right; white-space: nowrap; }
+.applog-entry { padding: 10px 14px; margin-bottom: 8px; }
+.applog-entry.problem { border-color: var(--bad, #b3261e); }
+.applog-entry summary { display: block; cursor: pointer; list-style: none; }
+.applog-entry summary::-webkit-details-marker { display: none; }
+.applog-entry pre { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .82rem;
+  background: var(--bg, #f4f4f4); padding: 8px; border-radius: 6px; margin: 4px 0 8px; }
+.applog-label { color: var(--muted, #667); font-size: .875rem; }
+.applog-pill { font-size: .78rem; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line, #ddd); }
+.applog-pill.warn { background: var(--warn-bg, #fff4dc); color: var(--warn, #8a5a00); border-color: transparent; }
+.applog-pill.bad { background: var(--bad-bg, #fde8e6); color: var(--bad, #b3261e); border-color: transparent; }
+@media (max-width: 520px) { .applog-table .p95 { display: none; } }

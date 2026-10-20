@@ -392,6 +392,22 @@ The API sends every alert; agents hold no mail or push credentials. Settings liv
   `CAIRN_AGENT_MISS_FACTOR` and `CAIRN_AGENT_STALE_FLOOR`.
 - **Action results:** a failed action alerts as CRIT; a finished one is an INFO notice.
 
+## The log
+
+Every change made through cairn (acks, actions, tokens, sign-ins, agent reports), every background job and every
+failure is recorded in cairn's own database, with who did it, what it changed and how long it took. Reads are
+recorded only when they're slow or fail, so polling dashboards and widgets don't flood it. Passwords and tokens
+are never recorded. Nothing is sent anywhere: the log belongs to whoever runs this cairn.
+
+- **Admins:** the **log** link on the dashboard (`/log`): counts, failures and slowest actions by action and day,
+  and a search over every entry (a request id, a user, an action).
+- **Scripts:** `GET /api/v1/backup/log?days=7&q=&kind=&problems=1` with an admin token (JSON).
+- **The container's output:** one JSON line per request (`docker logs cairn`).
+- **Errors** name a request id (`server error (request 1a2b3c4d)`), the key to find it in the log.
+- Kept 400 days; daily totals for good. The Android app sends crash reports here only if you agree when asked.
+
+Built on applog (vendored in `phase1/applog/`; rules for cairn in `phase1/activity.py`). Don't edit the vendored copy.
+
 ## Backing up cairn itself
 
 Once a night, at or after `CAIRN_DB_BACKUP_HOUR` (default 2, `off` disables), the API writes a
