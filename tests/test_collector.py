@@ -1206,3 +1206,20 @@ def test_zpool_counter_parsing():
     assert collector._zcount("6") == 6 and collector._zcount("1.2K") == 1200 and collector._zcount("x") is None
     assert collector._data_error_count("No known data errors") == 0
     assert collector._data_error_count("12 data errors, use '-v' for a list") == 12
+
+
+# ---- removable drive behind an x-systemd.automount ----------------------------------------------
+def _probe_with(monkeypatch, findmnt_out):
+    monkeypatch.setattr(collector.os.path, "exists", lambda p: False)
+    monkeypatch.setattr(collector, "run", lambda cmd, **k: (0, findmnt_out, ""))
+    return collector.removable_probe({"name": "ext", "uuid": "u", "mount": "/mnt/ext"})
+
+
+def test_autofs_placeholder_is_not_a_mounted_drive(monkeypatch):
+    pr = _probe_with(monkeypatch, "autofs rw,relatime,fd=73,direct\n")
+    assert pr["mounted"] is False and pr["attached"] is False
+
+
+def test_real_fs_under_autofs_counts_as_mounted(monkeypatch):
+    pr = _probe_with(monkeypatch, "autofs rw,relatime,fd=73,direct\next4 ro,relatime\n")
+    assert pr["mounted"] is True and pr["ro"] is True
