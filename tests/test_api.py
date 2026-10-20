@@ -535,3 +535,17 @@ def test_share_links_put_the_token_in_the_fragment():
     # That a legacy ?token= link never reaches the log is tests/test_activity.py's job.
     page = api._login_page(0).body.decode()
     assert "#token=" in page and "f.submit()" in page and "history.replaceState" in page
+
+
+# ---- accepted pool-error baseline -----------------------------------------------------------------
+def test_accept_errors_button_only_when_acceptable():
+    h = api._acts(_row("mcz", caps={"scrub": True, "accept_errors": True}), True, False)
+    assert ">Accept errors<" in h and "poolAccept('t')" in h
+    assert ">Accept errors<" not in api._acts(_row("mcz", caps={"scrub": True}), True, False)
+    assert "pool-accept" in api.ALLOWED_ACTIONS
+
+
+def test_card_notes_accepted_errors():
+    row = _row("mcz", caps={"scrub": True},
+               scrub={"state": "finished", "accepted": {"items": ["1 scrub error(s)"], "ts": 1792500000}})
+    assert "accepted: 1 scrub error(s) (2026-" in api._card(row, can_act=True, viewer=False)

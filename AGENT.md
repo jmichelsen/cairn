@@ -196,6 +196,7 @@ click will run.
 | `recover-versions` / `recover-dirtree` / `recover-walk` | Scan here / browse / Refresh | httm scans and folder-tree builds stored on the API | dataset targets |
 | `restore` | Restore | copy a snapshot version into `.cairn-restores/` (see Recovery) | dataset targets |
 | `aide-accept` | Accept / Accept all | `sudo -n <check_cmd> --accept [path]` | `aide` |
+| `pool-accept` | Accept errors | stores the pool's current error counts as its baseline (agent state file, no privilege) | `zfs-local` on a pool root |
 
 Snapshot, sync and backup-now can be wrapped in [pre/post hooks](README.md#prepost-hooks-eg-consistent-vm-snapshots).
 
@@ -222,6 +223,7 @@ A dry-run never runs the mutating command. The result starts with
   "diverged").
 - `scrub`: `zpool status <pool>`.
 - `backup-now`: `rsync -n` per dataset link.
+- `pool-accept`: the error counts it would store.
 - `snapshot`, `pull`, `restore`, `aide-accept`, `removable-relocate`: a note describing what would
   happen.
 - Recovery listings, removable scan and verify are read-only, so they run normally.

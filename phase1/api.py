@@ -979,7 +979,8 @@ ALLOWED_ACTIONS = {"snapshot", "sync", "scrub", "pull", "backup-now", "removable
                    "recover-walk",       # on-demand deleted-files walk that FILLS the stored manifest
                    "recover-versions",   # folder-wide file version history (enumerate + batch httm)
                    "recover-dirtree",    # cheap folder tree (os.scandir dirs) that seeds the browser
-                   "aide-accept"}        # acknowledge AIDE pending integrity change(s)
+                   "aide-accept",        # acknowledge AIDE pending integrity change(s)
+                   "pool-accept"}        # accept a pool's current error counts as its alert baseline
 STATUS_INGEST_COLS = ["snap_age_src_s","snap_age_dst_s","repl_lag_s","pool_health","pool_cap_pct",
     "last_scrub_ts","usedbysnapshots","compressratio","key_status","archive_count","dedup_ratio",
     "logical_size","physical_size","last_check_ts","last_check_result","lock_state","handler_type",
@@ -1607,6 +1608,8 @@ async def create_action(request: Request):
             raise HTTPException(400, f"{action} only valid for removable targets")
         if action == "aide-accept" and r["type"] != "aide":
             raise HTTPException(400, "aide-accept only valid for aide targets")
+        if action == "pool-accept" and (r["type"] != "zfs-local" or "/" in (r["source"] or "/")):
+            raise HTTPException(400, "pool-accept only valid for a pool-root zfs-local target")
         if action == "recover-walk" and r["type"] != "zfs-local":
             raise HTTPException(400, "recover-walk only valid for zfs-local targets")
         if action == "pull" and r["type"] != "zfs-local":
@@ -3000,6 +3003,13 @@ async function aideAccept(target, path){   // acknowledge AIDE change(s): one pa
     +'and expected? It stops being reported until it changes again.', {okText:'Accept'});
   if(ok) post(b);
 }
+async function poolAccept(target){   // accept the pool's current error counts as its new baseline
+  var b={target:target, action:'pool-accept', requested_by:'ui', dryrun:!!window.CAIRN_DRY};
+  var ok = await uiConfirm('Accept pool errors', 'Accept the current scrub, data and disk error counts on '
+    +'<b>'+esc(target)+'</b> as known? They stop alerting; any count above them still alerts. Use this only '
+    +'for errors you have investigated and cannot fix.', {okText:'Accept'});
+  if(ok) post(b);
+}
 async function mirrorRemovable(name){
   // Destructive: rsync --delete makes the drive an EXACT mirror, removing anything not in the source.
   var b={target:name, action:'backup-now', mirror:true, requested_by:'ui', dryrun:!!window.CAIRN_DRY};
@@ -3870,6 +3880,9 @@ def _acts(r, can_act, viewer=False):
                 main += f'<button class=scrubbtn data-scrub disabled>{lbl}</button>'
             else:
                 main += f'<button class=scrubbtn data-scrub onclick="act(\'{n}\',\'scrub\',true)">Scrub</button>'
+        if caps.get("accept_errors"):
+            main += (f"<button onclick=\"poolAccept('{n}')\" title=\"accept the current error counts as "
+                     f"known; only counts above them alert\">Accept errors</button>")
     elif t == "aide":
         tot = _d.get("aide_total") or 0
         main = (f"<button class=pri onclick=\"aideAccept('{n}')\" "
@@ -4394,6 +4407,9 @@ def _card(r, can_act, viewer=False, cid=""):
     if r.get("location") == "offsite": metas.append("off-site")
     d = json.loads(r.get("detail_json") or "{}")
     if d.get("pool_only"): metas.append("pool health only")
+    acc = (d.get("scrub") or {}).get("accepted")
+    if acc: metas.append("accepted: " + _esc(", ".join(acc.get("items") or []))
+                         + (f" ({time.strftime('%Y-%m-%d', time.localtime(acc['ts']))})" if acc.get("ts") else ""))
     mr = ""
     if r.get("pool_cap_pct") is not None:
         mr += f'<div><div class="mv">{r["pool_cap_pct"]}%</div><div class="ml">capacity</div></div>'
