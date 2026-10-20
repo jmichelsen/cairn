@@ -1026,11 +1026,15 @@ def removable_probe(t):
         dev = os.path.realpath(f"/dev/disk/by-id/{byid}")
     mount = t.get("mount"); mounted = False; ro = False
     if mount:
-        rc, out, _ = run(["findmnt", "-nro", "SOURCE,OPTIONS", mount])
-        if rc == 0 and out.strip():
+        # An x-systemd.automount (autofs) placeholder sits on the mountpoint even with the drive
+        # unplugged. It isn't the drive: count only a real filesystem there. Treating autofs as mounted
+        # made the last-backup glob walk into it, which asks systemd to mount the absent device and
+        # blocks ~90s (its device timeout) on every collection cycle.
+        rc, out, _ = run(["findmnt", "-nr", "-o", "FSTYPE,OPTIONS", "-M", mount])
+        real = [ln.split() for ln in out.splitlines() if ln.split() and ln.split()[0] != "autofs"] if rc == 0 else []
+        if real:
             mounted = True
-            parts = out.strip().split()
-            opts = parts[-1] if parts else ""
+            opts = real[-1][-1] if len(real[-1]) > 1 else ""
             ro = "ro" in opts.split(",")
     return dict(attached=dev is not None, mounted=mounted, ro=ro, mount=mount, dev=dev)
 
