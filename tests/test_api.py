@@ -549,3 +549,13 @@ def test_card_notes_accepted_errors():
     row = _row("mcz", caps={"scrub": True},
                scrub={"state": "finished", "accepted": {"items": ["1 scrub error(s)"], "ts": 1792500000}})
     assert "accepted: 1 scrub error(s) (2026-" in api._card(row, can_act=True, viewer=False)
+
+
+def test_card_lists_damaged_files_and_accept_note():
+    ef = {"ts": 1792500000, "current": False, "files": 1, "entries": 3,
+          "items": [{"dataset": "mcz/Pics", "path": "/a <b>.jpg", "live": True, "snaps": 1575}]}
+    row = _row("mcz", caps={"scrub": True},
+               scrub={"state": "finished", "error_files": ef, "accepted": {"items": [], "note": "known"}})
+    h = api._card(row, can_act=True, viewer=False)
+    assert "mcz/Pics: /a &lt;b&gt;.jpg" in h and "live file + 1,575 snapshots" in h
+    assert "last listed 2026-" in h and "Accepted note: known" in h
