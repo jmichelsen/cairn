@@ -569,6 +569,11 @@ blank to keep the route closed.
   notes what was accepted and when, and any count above them alerts as before. The baseline lowers
   itself when a count drops (a clean scrub, `zpool clear`, a reboot), so errors that come back from
   there alert again; it only rises when you accept again.
+- **The pool card lists the damaged files.** When a pool has scrub or data errors, the card shows which
+  files they are in, from `zpool status -v` (via `sudo -n` when allowed, since non-root ZFS lists only
+  object numbers), grouped per file: "live file + 1,575 snapshots" instead of 1,576 lines. `zpool
+  clear` and reboots empty ZFS's list, so the last list is kept (dated) until the error counts are
+  back to zero. Accept errors takes an optional note, shown on the card.
 
 ## Layout
 

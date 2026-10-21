@@ -1082,6 +1082,7 @@ def _patch_pool(monkeypatch, snaps):
     monkeypatch.setattr(collector, "zfs_delegated", lambda *a, **k: True)
     monkeypatch.setattr(collector, "can_sudo", lambda p: True)
     monkeypatch.setattr(collector, "_mountpoint", lambda ds: ("/mnt/tank", None))
+    monkeypatch.setattr(collector, "zpool_error_files", lambda p: [])   # never shell out to sudo/zpool
 
 
 def _local(**over):
@@ -1223,3 +1224,44 @@ def test_autofs_placeholder_is_not_a_mounted_drive(monkeypatch):
 def test_real_fs_under_autofs_counts_as_mounted(monkeypatch):
     pr = _probe_with(monkeypatch, "autofs rw,relatime,fd=73,direct\next4 ro,relatime\n")
     assert pr["mounted"] is True and pr["ro"] is True
+
+
+# ---- which files a pool's errors are in -------------------------------------------------------
+def test_error_files_grouped_per_file():
+    lines = ["/mnt/tank/pics/a.jpg",
+             "tank/pics@s1:/a.jpg", "tank/pics@s2:/a.jpg", "tank/pics@s1:/old.jpg",
+             "tank/other:/b.jpg", "<metadata>:<0x1>"]
+    out = collector.summarize_error_files(lines, mountpoint=lambda ds: "/mnt/tank/pics" if ds == "tank/pics" else None)
+    assert out[0] == {"dataset": "tank/pics", "path": "/a.jpg", "live": True, "snaps": 2}
+    assert {"dataset": "tank/other", "path": "/b.jpg", "live": True, "snaps": 0} in out
+    assert {"dataset": "tank/pics", "path": "/old.jpg", "live": False, "snaps": 1} in out
+    assert out[-1]["path"] == "<metadata>:<0x1>"
+
+
+def test_error_file_list_survives_zpool_clear(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAIRN_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(collector, "_mountpoint", lambda ds: (None, "x"))
+    monkeypatch.setattr(collector, "zpool_error_files", lambda p: ["tank/pics@s1:/a.jpg"])
+    ef = collector.pool_error_files("tank", 1000, active=True)
+    assert ef["current"] is True and ef["items"][0]["path"] == "/a.jpg"
+    monkeypatch.setattr(collector, "zpool_error_files", lambda p: [])       # zpool clear emptied it
+    ef = collector.pool_error_files("tank", 2000, active=True)
+    assert ef["current"] is False and ef["ts"] == 1000 and ef["items"][0]["path"] == "/a.jpg"
+    assert collector.pool_error_files("tank", 3000, active=False) is None   # counts back to 0: forget it
+    assert collector.pool_error_files("tank", 4000, active=True) is None
+
+
+def test_zpool_error_files_parses_the_list(monkeypatch):
+    out = "  pool: tank\nerrors: Permanent errors have been detected in the following files:\n\n        /mnt/a\n        tank@s:/a\n"
+    monkeypatch.setattr(collector, "run", lambda cmd, **k: (0, out, ""))
+    assert collector.zpool_error_files("tank") == ["/mnt/a", "tank@s:/a"]
+    monkeypatch.setattr(collector, "run", lambda cmd, **k: (0, "errors: No known data errors\n", ""))
+    assert collector.zpool_error_files("tank") == []
+
+
+def test_accept_keeps_a_note(monkeypatch, tmp_path):
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=1)
+    monkeypatch.setattr(collector, "zpool_error_files", lambda p: [])
+    collector.accept_pool_baseline("tank", 50000, note="  restored live copy; snapshots keep the bad block ")
+    _, d = _eval()
+    assert d["scrub"]["accepted"]["note"] == "restored live copy; snapshots keep the bad block"

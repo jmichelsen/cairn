@@ -359,13 +359,92 @@ def pool_error_counts(pool):
             "data_errors": _data_error_count(sc.get("errors")),
             "vdevs": {n: [_zcount(r), _zcount(w), _zcount(c)] for n, r, w, c in det["err_vdevs"]}}
 
-def accept_pool_baseline(pool, now):
+def zpool_error_files(pool):
+    """Lines of `zpool status -v`'s permanent-error list, or None when status is unreadable. Tries
+    `sudo -n` first: as non-root, ZFS lists only object numbers instead of file paths."""
+    for cmd in (["sudo", "-n", "zpool", "status", "-v", pool], ["zpool", "status", "-v", pool]):
+        rc, out, _ = run(cmd, timeout=60)
+        if rc == 0:
+            break
+    else:
+        return None
+    _, sep, tail = out.partition("following files:")
+    return [ln.strip() for ln in tail.splitlines() if ln.strip()] if sep else []
+
+def summarize_error_files(lines, mountpoint=None):
+    """Group the per-snapshot error lines by file: a block shared by the live file and N snapshots is
+    listed once per snapshot (and once live), which buries the one file that is actually damaged.
+    Returns [{dataset, path, live, snaps}], live files first, then by snapshot count."""
+    mountpoint = mountpoint or (lambda ds: _mountpoint(ds)[0])
+    groups, live, other = {}, [], []
+    for ln in lines:
+        m = re.match(r"([^@\s:]+)@[^:]+:(/.*)$", ln)            # pool/ds@snap:/rel/path
+        if m:
+            g = groups.setdefault((m.group(1), m.group(2)),
+                                  {"dataset": m.group(1), "path": m.group(2), "live": False, "snaps": 0})
+            g["snaps"] += 1
+        elif re.match(r"([^@\s:/]+(?:/[^@\s:]+)*):(/.*)$", ln) and not ln.startswith("/"):
+            ds, _, rel = ln.partition(":")                       # pool/ds:/rel/path (live, not mounted)
+            groups.setdefault((ds, rel), {"dataset": ds, "path": rel, "live": False, "snaps": 0})["live"] = True
+        elif ln.startswith("/"):
+            live.append(ln)                                      # /mountpoint/rel/path (live, mounted)
+        else:
+            other.append(ln)                                     # <metadata>:<0x..> / <0x..>:<0x..>
+    mps = {}
+    for ln in live:
+        for ds in {k[0] for k in groups}:
+            if ds not in mps:
+                mps[ds] = mountpoint(ds)
+            mp = mps[ds]
+            if mp and ln.startswith(mp.rstrip("/") + "/"):
+                rel = ln[len(mp.rstrip("/")):]
+                groups.setdefault((ds, rel), {"dataset": ds, "path": rel, "live": False, "snaps": 0})["live"] = True
+                break
+        else:
+            groups.setdefault(("", ln), {"dataset": "", "path": ln, "live": False, "snaps": 0})["live"] = True
+    out = sorted(groups.values(), key=lambda g: (not g["live"], -g["snaps"], g["path"]))
+    return out + [{"dataset": "", "path": x, "live": False, "snaps": 0} for x in other]
+
+def _pool_errors_path(pool):
+    slug = re.sub(r"[^A-Za-z0-9_.-]", "_", str(pool))
+    return os.path.join(_cairn_state_dir(), f"pool-errors-{slug}.json")
+
+def pool_error_files(pool, now, active):
+    """The damaged files for the pool card. `zpool clear` (and a reboot) empty ZFS's list while the scrub
+    result still counts the errors, so the last non-empty list is kept in the agent's state and shown
+    with its date until the pool's error counts are back to zero. None when there is nothing to show."""
+    path = _pool_errors_path(pool)
+    if not active:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return None
+    lines = zpool_error_files(pool)
+    if lines:
+        items = summarize_error_files(lines)
+        rec = {"ts": int(now), "entries": len(lines), "files": len(items), "items": items[:20]}
+        try:
+            with open(path, "w") as f:
+                json.dump(rec, f)
+        except OSError:
+            pass
+        return dict(rec, current=True)
+    try:
+        with open(path) as f:
+            return dict(json.load(f), current=False)
+    except (OSError, ValueError):
+        return None
+
+def accept_pool_baseline(pool, now, note=None):
     """Store the pool's current error state as its accepted baseline. Returns a human summary."""
     cur = pool_error_counts(pool)
     if cur["data_errors"] is None:
         cur["data_errors"] = 0
     cur["vdevs"] = {n: [x or 0 for x in v] for n, v in cur["vdevs"].items()}
     cur["accepted_ts"] = int(now)
+    if note and str(note).strip():
+        cur["note"] = str(note).strip()[:300]
     pool_write_baseline(pool, cur)
     vd = ", ".join(f"{n}(r{r}/w{w}/c{c})" for n, (r, w, c) in cur["vdevs"].items())
     return (f"accepted as {pool}'s baseline: {cur['scrub_errors']} scrub error(s), "
@@ -683,7 +762,10 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
         if base and rebased:
             base["vdevs"] = bvd; pool_write_baseline(pool, base)
         if accepted:
-            scrub_info["accepted"] = {"items": accepted, "ts": base.get("accepted_ts")}
+            scrub_info["accepted"] = {"items": accepted, "ts": base.get("accepted_ts"), "note": base.get("note")}
+        ef = pool_error_files(pool, now, bool(nde) or bool(nse))
+        if ef:
+            scrub_info["error_files"] = ef
         # something a human could accept as the new baseline (any error count above it)
         acceptable = bool(over) or (nde is not None and nde > (base.get("data_errors") or 0)) \
             or nse > (base.get("scrub_errors") or 0)

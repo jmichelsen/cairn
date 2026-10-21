@@ -1580,7 +1580,7 @@ async def create_action(request: Request):
         opts["mirror"] = True   # removable backup-now: rsync --delete (mirror). Destructive; opt-in.
     if body.get("prune_excluded"):
         opts["prune_excluded"] = True   # also --delete-excluded: remove excluded folders from the drive
-    for k in ("path", "dest", "version", "dataset", "dest_subpath", "tier"):
+    for k in ("path", "dest", "version", "dataset", "dest_subpath", "tier", "note"):
         if body.get(k) is not None:
             opts[k] = str(body[k])
     agent_sel = body.get("agent")   # disambiguate a name shared by two agents (e.g. a replication pair)
@@ -3005,10 +3005,15 @@ async function aideAccept(target, path){   // acknowledge AIDE change(s): one pa
 }
 async function poolAccept(target){   // accept the pool's current error counts as its new baseline
   var b={target:target, action:'pool-accept', requested_by:'ui', dryrun:!!window.CAIRN_DRY};
-  var ok = await uiConfirm('Accept pool errors', 'Accept the current scrub, data and disk error counts on '
+  var r = await uiModal({title:'Accept pool errors', body:'Accept the current scrub, data and disk error counts on '
     +'<b>'+esc(target)+'</b> as known? They stop alerting; any count above them still alerts. Use this only '
-    +'for errors you have investigated and cannot fix.', {okText:'Accept'});
-  if(ok) post(b);
+    +'for errors you have investigated and cannot fix.',
+    input:{placeholder:'Note (optional): what it is and why it is accepted'},
+    buttons:[{label:'Cancel',value:false,cls:'uim-safe'},{label:'Accept',value:true,cls:'pri'}]});
+  if(r.value!==true) return;
+  var note=((r.data||{})['uim-input']||'').trim();
+  if(note) b.note=note;
+  post(b);
 }
 async function mirrorRemovable(name){
   // Destructive: rsync --delete makes the drive an EXACT mirror, removing anything not in the source.
@@ -4376,6 +4381,29 @@ def _subtitle(path_html, metas=()):
                 + '</div>') if items else ""
     return f'<div class=src>{path_row}{meta_row}</div>' if (path_row or meta_row) else ""
 
+def _pool_errors_html(r):
+    """Pool card body: which files the pool's errors are in (from `zpool status -v`, grouped per file),
+    and the note left when the errors were accepted. Empty when the pool has no errors on record."""
+    sc = (json.loads(r.get("detail_json") or "{}").get("scrub") or {})
+    ef, acc = sc.get("error_files") or {}, sc.get("accepted") or {}
+    out = ""
+    for x in ef.get("items") or []:
+        where = []
+        if x.get("live"): where.append("live file")
+        if x.get("snaps"): where.append(f'{x["snaps"]:,} snapshot{"s" if x["snaps"] != 1 else ""}')
+        p = (f'{x["dataset"]}: ' if x.get("dataset") else "") + (x.get("path") or "")
+        out += (f'<div class=aiderow><span class=ap>{_esc(p)}</span>'
+                f'<span class=am>{_esc(" + ".join(where) or "pool metadata")}</span></div>')
+    if out:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(ef["ts"])) if ef.get("ts") else "?"
+        more = (ef.get("files") or 0) - len(ef.get("items") or [])
+        head = (f'Damaged file(s), from zpool status -v ({when})' if ef.get("current") else
+                f'Damaged file(s), last listed {when} (zpool clear or a reboot empties the list; the next scrub refills it)')
+        out = f'<div class=am>{_esc(head)}</div>' + out + (f'<div class=am>+{more} more</div>' if more > 0 else "")
+    if acc.get("note"):
+        out += f'<div class=aiderow><span class=am>Accepted note: {_esc(acc["note"])}</span></div>'
+    return f'<div class=aidelist>{out}</div>' if out else ""
+
 def _aide_html(r, can_act, viewer):
     """AIDE card body: every unacknowledged change, newest first-seen first. Admins (on an execute-
     capable agent) get a per-row Accept; viewers see the list only."""
@@ -4483,7 +4511,7 @@ def _card(r, can_act, viewer=False, cid=""):
     return (f'<div class="card {card_cls}"{idattr} data-t="{n}"><div class="ch"><span class="cn">{title}{_tier_badge(r.get("tier"))}</span>'
             f'<span class="chr"><span class="cbusy" data-tip="action running"></span>'
             f'<span class="cs">{cs_text}</span></span></div>{src_html}{sched_html}{mr_html}{scrub_html}{why_html}'
-            f'{_aide_html(r, can_act, viewer)}{ack_html}{_acts(r, can_act, viewer)}{_removable_links_html(r, viewer)}'
+            f'{_aide_html(r, can_act, viewer)}{_pool_errors_html(r)}{ack_html}{_acts(r, can_act, viewer)}{_removable_links_html(r, viewer)}'
             f'{hist_html}{log_html}{hide_html}</div>')
 
 def _heatmap(order_names):

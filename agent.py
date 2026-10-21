@@ -309,7 +309,7 @@ def do_execute(cfg):
                          {"ok": True, "dryrun": True,
                           "output": f"[DRY-RUN] would accept {src}'s current error state as baseline: {json.dumps(cur)}"})
                 print(f"  intent {iid} {target} pool-accept [dry]"); continue
-            msg = C.accept_pool_baseline(src, time.time())
+            msg = C.accept_pool_baseline(src, time.time(), opts.get("note"))
             api_call("POST", f"/api/v1/backup/intents/{iid}/result", {"ok": True, "output": msg})
             print(f"  intent {iid} {target} pool-accept -> ok"); continue
         if action == "recover-walk":
