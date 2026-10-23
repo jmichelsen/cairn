@@ -559,3 +559,21 @@ def test_card_lists_damaged_files_and_accept_note():
     h = api._card(row, can_act=True, viewer=False)
     assert "mcz/Pics: /a &lt;b&gt;.jpg" in h and "live file + 1,575 snapshots" in h
     assert "last listed 2026-" in h and "Accepted note: known" in h
+
+
+# ---- pool error explanation ----------------------------------------------------------------
+def test_pool_errors_explains_count_without_files():
+    h = api._pool_errors_html(_row("mcz", scrub={"state": "finished", "scrub_errors": 1,
+                                                  "errors": "No known data errors"}))
+    assert "counted 1 error" in h and "No known data errors" in h and "new scrub" in h
+
+
+def test_pool_errors_lists_files_without_explanation():
+    ef = {"items": [{"dataset": "mcz/Pics", "path": "/a.jpg", "live": True, "snaps": 2}],
+          "files": 1, "ts": 0, "current": True}
+    h = api._pool_errors_html(_row("mcz", scrub={"scrub_errors": 1, "error_files": ef}))
+    assert "/a.jpg" in h and "counted" not in h
+
+
+def test_pool_errors_empty_when_clean():
+    assert api._pool_errors_html(_row("mcz", scrub={"scrub_errors": 0})) == ""

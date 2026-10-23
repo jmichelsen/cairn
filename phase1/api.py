@@ -4400,6 +4400,15 @@ def _pool_errors_html(r):
         head = (f'Damaged file(s), from zpool status -v ({when})' if ef.get("current") else
                 f'Damaged file(s), last listed {when} (zpool clear or a reboot empties the list; the next scrub refills it)')
         out = f'<div class=am>{_esc(head)}</div>' + out + (f'<div class=am>+{more} more</div>' if more > 0 else "")
+    n = sc.get("scrub_errors") or 0
+    if not out and n:
+        # The scrub's error COUNT outlives the file list: once the damaged block is freed or rewritten
+        # (or the list is cleared), zpool status -v has nothing to name, so say that instead of a bare count.
+        zl = sc.get("errors") or "no file list"
+        out = (f'<div class=am>The last scrub counted {n} error{"s" if n != 1 else ""}, but ZFS names no '
+               f'damaged file now (zpool status: {_esc(zl)}). The damaged data was freed, rewritten or '
+               f'cleared since. A new scrub resets the count: clean means the alert clears by itself; '
+               f'if it finds the error again, the file is listed here.</div>')
     if acc.get("note"):
         out += f'<div class=aiderow><span class=am>Accepted note: {_esc(acc["note"])}</span></div>'
     return f'<div class=aidelist>{out}</div>' if out else ""
