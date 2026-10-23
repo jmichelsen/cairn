@@ -191,7 +191,7 @@ async def auth_gate(request: Request, call_next):
     admin only. The resolved role is stashed on request.state.role for the dashboard to render
     read-only. 401 = not signed in (HTML GET redirects to /login); 403 = signed in but read-only."""
     p = request.url.path
-    if p in ("/login", "/logout", "/favicon.ico", "/api/v1/identify", "/privacy",
+    if p in ("/login", "/logout", "/favicon.ico", "/favicon.svg", "/api/v1/identify", "/privacy",
              "/api/v1/backup/enroll", "/api/v1/ci/status") \
             or p.startswith("/badge/"):
         # /enroll and /ci/status self-authenticate on their own shared secret (enrollment secret /
@@ -223,6 +223,7 @@ async def auth_gate(request: Request, call_next):
                         status_code=401 if role is None else 403)
 
 LOGIN_HTML = """<!doctype html><meta charset=utf-8><title>Cairn login</title>
+<link rel=icon href=/favicon.svg type=image/svg+xml><link rel=icon href=/favicon.ico sizes=any>
 <style>body{font:15px system-ui,sans-serif;display:grid;place-items:center;height:90vh;margin:0}
 form{display:grid;gap:.6rem;width:280px} input,button{padding:.5rem;font-size:1rem}
 h2{margin:0 0 .2rem} details{font-size:.9rem;color:#555} details input{margin-top:.5rem;width:100%;box-sizing:border-box}
@@ -256,15 +257,85 @@ def _sign_in_cookie(cookie_tok, max_age, scheme):
                  secure=scheme == "https", max_age=max_age)
     return r
 
-# A blank (1x1 transparent) favicon. Browsers auto-request /favicon.ico; without this the app
-# 404s every page load. Whitelisted in the auth middleware above so it serves pre-login too.
+# The app icon: a small cairn (three stacked stones) on a dark tile, so it reads on light and dark
+# browser tabs. Browsers that honour <link rel=icon> get the SVG; anything that blindly requests
+# /favicon.ico (the login page, bookmarks, older clients) gets the same art rendered at 16/32/48px.
+# Both are whitelisted in the auth middleware above so they serve pre-login too.
 import base64 as _b64
+_FAVICON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#1a2733"/><ellipse cx="16" cy="24.5" rx="11" ry="4.5" fill="#dbe6f2"/><ellipse cx="16" cy="16.2" rx="7.8" ry="3.7" fill="#dbe6f2"/><ellipse cx="16" cy="9.2" rx="4.8" ry="3" fill="#34c98a"/></svg>')
 _FAVICON = _b64.b64decode(
-    "AAABAAEAAQEAAAEAIAAwAAAAFgAAACgAAAABAAAAAgAAAAEAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==")
+    "AAABAAMAEBAAAAAAIADfAgAANgAAACAgAAAAACAAmAYAABUDAAAwMAAAAAAgANAHAACtCQAAiVBORw0KGgoAAAANSUhEUgAA"
+    "ABAAAAAQCAYAAAAf8/9hAAACpklEQVR4nHWTPW9URxSGnzNz735gI0sYKdz17spaCdYgFtlOEAQqI1G7iWSsIBEQruAHAKkM"
+    "FIg6RSgCRWonReAHGCVBiWS54iNBNMnaIQjDxbJn93rvnUOx3g1WxFuNNHOe875zZgRg34GJs8aY6yijdCV8XAryN2Tzq38s"
+    "35WoPvmliPleQFRV+8VGwCv/W4OKiIDg8XMS1Sf/MmIqqt6DGAC84pMUUwxBwLsOJh+AFehyPCJGvV8LBKlsNzY9g4SWoS8a"
+    "FI6WAaG9vMLGj4/RrazvD1VEZDjYkc4IupEweLrO8KUTZGsOVBk8VkVfO9Z/eoLZnd8RZydAQfIha7+/oLOwh8HDJRDB/fIn"
+    "8a/PKeSDXoSepA8QEbIsQ1FOTZzk8/A4I7v2gwirwQt+Gw9ZfPQzZBnWWrqxQUr1T7UHSJKEr69eZXZ2tgvrZN1DOYu1loWF"
+    "H5i/cYMwCPqAvgNVxVpLrVajUIDXa2287wJMZti7Z5BarUbwQfcdDowxtFotcrk8F746x9TUFFEUISL88/IlDxcX+e7ePZxz"
+    "DAwMkGXb8J595xxRFDF7ZobR0VGstYh0Z2atpVKtcmZmhkq5zMbmZn9PygePaqvd5kijwe1bt6hWK6hXkq0tOp0OAGEYksvl"
+    "MEZYWVnlyrVrLC0tUSwW1YgIW0nCkUaDQwcrxPE73sYxzjnSNCVNU5xzxHFMHMfUD5SYGB8nSRJERKRU/2wViIwRP3fxopme"
+    "nmbv8DBhEPz3pRQ6acqbN2+5/+A+39654ztpKgLv5JP6xPnABHd95nGtTR0pjcjY2BiVcpmhoSEA1tfXaTabPH32jOZKU4uF"
+    "XWKDAM3SywIQ7Z+cM4GdNyL7kiShnSTit2+5/8qNoVAoaD6fx3v/Ks2ym/8+X/7mPZU1HlMb6Rb/AAAAAElFTkSuQmCCiVBO"
+    "Rw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAGX0lEQVR4nK2XW2xcVxWGv7X3OWfG47Gd5uLaQ+IG4tSKqyZNYrWl"
+    "JVJJinBSEfGC+tYIIRrRvIAKDxVUAokKRECVIBJS1bfwxlMqEmpCbyJI1AkVEJo4CXFQbo1bEt9mxjPnshcPZ87ETnwrZEn7"
+    "Yfbsvde/1vr/tc8WUhNA1/Vu3xAbvgXsFViP4HMPTFVjEa4oeswz7tdXzv79w8ynAAZwpU0Dz+LcT0TsZxUF1Xvh+7aJIAiq"
+    "7ppq8sOPzv/tdcAIQOnBrc8i9rAIvqomDVBybxGggBMRCwqJ7L924dRr0rlx4HOe6FtYsx7nYsC7x47vxJEgxqL6CSb6svGt"
+    "viBG1uOcW5ZzIU2cLDG38AEWVScia9R53zHOsVcVZTnbRSBRXCVE60maVEDDBFcNIdF0zdJmVFVR9njAAw0yLulcowRp8Wl9"
+    "oofgoS68VQUQIRmvUj/zCbVTV3DTdSSwTXCLniiySkp925ezFI0cdk2B+775GLltJcQacI2tRsA56v8cY/y194mvTSG+XZaS"
+    "zJIrGqbqaPvqQ7Q83gO1GK2E6EyUjkqIzsTkt5Vo/9rmFNAyZbw0AAFUEWvwOotonKSRG5k7nKKhw3a2In4jO8ugw9IAlNRB"
+    "5Ki+N4pEDtuex3gWY0w6rMW25RBg5r1/42YisGY5PFie5kXBtPhU/nSJmekqhcGN+D0rMHkfBFw9Jr46xczxfxENX8PPB2hD"
+    "Wv83ABEhSRJq9RrFYhtrb+Z5YNjSVeuko2cNGGHq6n8Y+0eVy2MBV3I5pqanyOfzeJ7XaC+LnL+YCkSEMAwpFAoMDg7y9K5d"
+    "9Pb20tHWjm8spqFeJ0qsCZPlMpdGL/LOO+9y9NgxpqamCII0G58agIgQRRGdnZ18/6WX2LFjBwBRFBHHMU5nkUzBiGCtxfd9"
+    "RAwnT53kx6+8wuXLl8nlcgtmYlESOufY99xz7Nz5RSqVCuVymSiKUFWMCIbGEEFVieOYarVKuTzNE59/nP3PP48xJgW7gC0I"
+    "QFXxPI91a9cSxwlJkmCtRUSQedptNm+MQVWphxGlUgk/CHBJ8ukBGGOIoogjb7xBtVqlvb29mRVVnVPX7Hf2X7FYxCUJR44c"
+    "YaZaxVq7IIAFVeCcI5fL8dbbb+NU+fq+ffT19ZHL5YjjOOVBo67WWjzPw/M8wjDi/PkLHP7NYd4cGvrfSZhlwTnH5OQk7e3t"
+    "DAwM8Nijj9Lf30+pu5u2tjYAyuUyN27c4OzICMMnTzI8PMzNmzdZsWIF1tpFpThvBkQEp0q5XKZQKLB92zY29PbSs24dXV1d"
+    "5PP5Jg+yuufyee7v7GTL5s2sXLmSixcvcuHCBabLZQotLU1uLJkBI0I9DPGDgJ1PPcWe3Xvo79/EqlWr8H0f5xxRFJEkSTMy"
+    "Y0yzDNZa4jhmfHyckZERfj80xPHjx6nVauSC4C5FzAGQaj9m5cr7+O6LL/Klp3dhrU8Y1onjuBnB7OiB5vzsCH3fJwgCnHOc"
+    "OHGCnx08yLXr1+/ihDfbeapvOPDCAfZ+5RnGx6eAelNi88lvPkAAcRwTRREAu3btJIwifvDyyyRJMqccTRkKaZdbvWY1A9u3"
+    "Ua7MoOowxizoeDHLuAEwPV3mkS1bKHV3E0XRnPOMKhGAU8X3PG7dvMWHZ85QbG0BWPIyWcyyvtDWVuTcuXOMffwxvu/fUQLR"
+    "q2DWgyLGSBiG/OrQIYrFIl948kmcc4RhSDJPN7uTA7PNWNO8Ef/y/jC/ePVVqtXqbA6owqR09209ZMQeUFUHmOwGbG1tZXBw"
+    "N8/s2c3G3l6KxWKTJ0mSzOmGGT+yVq2qVKpVLo2O8ubQEL87epSJiQlyuVy2x4kY49T9Vnp6H+mPjf0jRrpJX0W2+Q1Qq9PR"
+    "0U5fXx+bH36Y3g0b6OruZkVHB/l8C0GQPh2jKGKmVmNycpKxsTEujo5y+vRpRs6eZXxigiAI8Dwvc54gYlCdQtxuAeh+cPs3"
+    "xPB6+na7DUJEiOM4LYFz+J5HobWVYmsr+VyeIAhAIAxD6rUalUqFSrVKGEVYY+Y4vh25GERQl3zv+rkPft58nH6mb+t+xfxI"
+    "xNyfVoM56c1qnTWgjGDZmuz7MCtDtn42P9LA3S3Qn14/98FBZj1jBNDSpoGt6ty3BdkDrIa7X0zzaT6zOx1m040zJhT+QMQv"
+    "Pxr965+zc/8LrnQ3cvW5M9AAAAAASUVORK5CYIKJUE5HDQoaCgAAAA1JSERSAAAAMAAAADAIBgAAAFcC+YcAAAeXSURBVHic"
+    "zZpfTFvXHcc/59xrGwIGHIOJCYQKSOkILFCqNEq2aVNLsqkhmpZJWbo8pNo0advDpCnr9jZpe9mmbX1Y1CUvXadMe2iUVEtb"
+    "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"
+    "owAAAABJRU5ErkJggg==")
 
 @app.get("/favicon.ico")
 def favicon():
     return Response(content=_FAVICON, media_type="image/x-icon",
+                    headers={"Cache-Control": "public, max-age=604800"})
+
+@app.get("/favicon.svg")
+def favicon_svg():
+    return Response(content=_FAVICON_SVG, media_type="image/svg+xml",
                     headers={"Cache-Control": "public, max-age=604800"})
 
 # The policy lives with the studio that publishes the Android app; this route only redirects, so the
@@ -4591,7 +4662,7 @@ def _hero_steel(rows, h, gpct, glabel):
 def _shell(inner):
     return (f"<!doctype html><html lang=en><head><meta charset=utf-8>"
             f"<meta name=viewport content=\"width=device-width,initial-scale=1\">"
-            f"<link rel=icon href=/favicon.ico>"
+            f"<link rel=icon href=/favicon.svg type=image/svg+xml><link rel=icon href=/favicon.ico sizes=any>"
             f"<title>Cairn</title>{FONTS}{PAGE_STYLE}</head><body>"
             f"<div class=panel>{inner}"
             f"<form id=lo method=post action=/logout hidden></form>"
