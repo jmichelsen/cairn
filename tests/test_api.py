@@ -577,3 +577,29 @@ def test_pool_errors_lists_files_without_explanation():
 
 def test_pool_errors_empty_when_clean():
     assert api._pool_errors_html(_row("mcz", scrub={"scrub_errors": 0})) == ""
+
+
+# ---- acknowledged targets stay quiet ----------------------------------------------------------
+def _report(statuses, ts):
+    import asyncio
+    body = json.dumps({"agent": "acktest", "ts": ts, "statuses": statuses}).encode()
+    return asyncio.run(api.report(_req("/api/v1/backup/report", "POST", {}, body)))
+
+
+def test_ack_silences_repeat_alerts_until_the_condition_changes(monkeypatch):
+    import asyncio
+    sent = []
+    monkeypatch.setattr(api, "dispatch_alert", lambda sev, title, *a, **k: sent.append((sev, title)))
+    crit = {"name": "acked-pool", "type": "pool", "severity": "CRIT",
+            "detail_json": json.dumps({"reasons": ["last scrub found 1 error"]})}
+    now = int(time.time())
+    _report([crit], now)
+    assert sent == [("CRIT", "acked-pool: CRIT")]
+    asyncio.run(api.ack_target(_req("/api/v1/backup/acks", "POST", {},
+                                     json.dumps({"target": "acked-pool"}).encode())))
+    sent.clear()
+    _report([crit], now + 60)
+    assert sent == []                                   # same condition: no daily repeat
+    worse = dict(crit, detail_json=json.dumps({"reasons": ["pool DEGRADED"]}))
+    _report([worse], now + 120)
+    assert sent == [("CRIT", "acked-pool: CRIT")]       # a different problem still alerts

@@ -346,9 +346,11 @@ def test_removable_last_backup_uses_freshest_per_link_stamp(tmp_path):
     t = {"name": "seagate", "type": "removable", "mount": str(mount)}
     pr = {"mounted": True, "mount": str(mount)}
     assert collector._removable_last_backup(t, pr) == 1700009999
-    # nothing on the drive -> falls back (no stamps) to host-side state (None here)
+    # nothing on the drive -> falls back (no stamps) to host-side state: the stamp read above
     empty = tmp_path / "empty"; empty.mkdir()
-    assert collector._removable_last_backup(t, {"mounted": True, "mount": str(empty)}) is None
+    assert collector._removable_last_backup(t, {"mounted": True, "mount": str(empty)}) == 1700009999
+    other = {"name": "never-synced", "type": "removable", "mount": str(empty)}
+    assert collector._removable_last_backup(other, {"mounted": True, "mount": str(empty)}) is None
 
 
 def test_rsync_census_lists_all_top_level_source_folders(tmp_path, monkeypatch):
@@ -1265,3 +1267,21 @@ def test_accept_keeps_a_note(monkeypatch, tmp_path):
     collector.accept_pool_baseline("tank", 50000, note="  restored live copy; snapshots keep the bad block ")
     _, d = _eval()
     assert d["scrub"]["accepted"]["note"] == "restored live copy; snapshots keep the bad block"
+
+
+def test_removable_remembers_last_backup_for_when_it_is_unplugged(tmp_path):
+    mount = tmp_path / "drive"
+    d = mount / "cairn" / "mclife" / "mcz_mclife_Pics"; d.mkdir(parents=True)
+    (d / ".cairn-lastbackup").write_text("1700000000")
+    t = {"name": "seagate", "type": "removable", "mount": str(mount)}
+    assert collector._removable_last_backup(t, {"mounted": True, "mount": str(mount)}) == 1700000000
+    # drive detached: nothing to read on it, the host-side memory answers
+    assert collector._removable_last_backup(t, {"mounted": False, "mount": None}) == 1700000000
+
+
+def test_aide_summary_does_not_repeat_the_count(monkeypatch):
+    out = "2026-10-11\tchanged\t/etc/hosts\n2026-10-09\tadded\t/usr/local/bin/x\n"
+    monkeypatch.setattr(collector, "run", _canned(out))
+    st = collector.adapter_aide({"name": "aide", "type": "aide"}, {}, 0)[0]
+    assert st["last_error"] == "2 unacknowledged integrity change(s)"
+    assert json.loads(st["detail_json"])["summary"] == "oldest pending since 2026-10-09"
