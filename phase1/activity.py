@@ -19,7 +19,7 @@ COLUMNS = {
     "reconcile_dismissed": {"pair", "ts"},
     "recovery_manifests": {"target_id", "kind", "entry_count", "raw_bytes", "walked_ts"},
     "removable_links": {"id", "agent", "removable", "dataset", "dest_subpath", "confirmed", "score",
-                        "last_backup_ts", "meta_json", "verify_method", "verify_ts", "excludes", "mirror",
+                        "last_backup_ts", "meta_json", "verify_method", "verify_ts", "excludes", "mirror", "allow_plaintext",
                         "updated_ts"},
     "smart_daily": {"serial", "day", "model", "temp_min", "temp_max", "realloc", "pending", "offline_unc", "crc",
                     "rpt_unc", "cmd_timeout", "spin_retry", "media_errors", "pct_used", "available_spare",

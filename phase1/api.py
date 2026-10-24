@@ -122,7 +122,12 @@ def _seed_tokens():
     admin revoked keeps its revocation while the env value is unchanged."""
     now = int(time.time())
     seeds = []
-    adm = os.environ.get("CAIRN_ADMIN_TOKEN") or os.environ.get("CAIRN_API_TOKEN")
+    # Only CAIRN_ADMIN_TOKEN seeds an admin. CAIRN_API_TOKEN is the agent's token in cairn.env, so
+    # falling back to it made that agent token an admin on an API started without the admin var.
+    adm = os.environ.get("CAIRN_ADMIN_TOKEN")
+    if not adm and os.environ.get("CAIRN_API_TOKEN"):
+        print("[auth] CAIRN_API_TOKEN is no longer used as the admin token; set CAIRN_ADMIN_TOKEN",
+              flush=True)
     if adm:
         seeds.append((_hash(adm), "admin", "bootstrap-admin"))
     for i, t in enumerate(x.strip() for x in os.environ.get("CAIRN_AGENT_TOKENS", "").split(",") if x.strip()):
@@ -461,6 +466,7 @@ def _init_db():
                                   ("agents", "host_conflict", "TEXT"),
                                   ("agents", "host_conflict_ts", "INTEGER"),
                                   ("removable_links", "meta_json", "TEXT"),
+                                  ("removable_links", "allow_plaintext", "INTEGER DEFAULT 0"),
                                   ("removable_links", "verify_method", "TEXT"),
                                   ("removable_links", "verify_ts", "INTEGER"),
                                   ("removable_links", "excludes", "TEXT"),
@@ -500,6 +506,7 @@ def _init_db():
                 verify_ts     INTEGER,
                 excludes      TEXT,
                 mirror        INTEGER DEFAULT 0,
+                allow_plaintext INTEGER DEFAULT 0,
                 updated_ts    INTEGER NOT NULL,
                 UNIQUE(agent, removable, dataset))""")
             # SMART trends: one row per physical drive (by serial, so history survives the card being
@@ -936,7 +943,9 @@ def scorecard():
         # A dataset's replica is OFF-SITE when its dest lives on a DIFFERENT agent (a remote vault).
         # That's exactly a guaranteed pair (home zfs-repl -> vault zfs-local), so reuse that detection
         # instead of relying on a `location` flag nobody sets. Keyed by the home (sending) half.
-        offsite_keys = {(p["r_agent"], p["r_name"]) for p in _pair_rows(conn)}
+        pairs = _pair_rows(conn)
+        offsite_keys = {(p["r_agent"], p["r_name"]) for p in pairs}
+        dest_agent = {(p["r_agent"], p["r_name"]): p["l_agent"] for p in pairs}   # who holds the replica
         # A CONFIRMED removable copy counts as an extra on-site copy + a distinct medium for its dataset -
         # but only while FRESH (a shelved backup is only as good as its last sync). Detached is fine;
         # stale is not. Keep the freshest link per dataset name.
@@ -959,12 +968,18 @@ def scorecard():
     cards = []
     for src, group in bysrc.items():
         rep = next((r for r in group if (r.get("agent") or "", r["name"]) in offsite_keys), group[0])
+        # A pool is a medium on ONE host: key it by (host agent, pool name), so a home `tank` and the
+        # vault's `tank` count as two copies, not one.
         pools = set(); offsite = 0
         for r in group:
-            for p in ((r["source"] or "").split("/")[0], (r["dest"] or "").split("/")[0]):
-                if p:
-                    pools.add(p)
-            if r.get("location") == "offsite" or ((r.get("agent") or "", r["name"]) in offsite_keys):
+            key = (r.get("agent") or "", r["name"])
+            far = r.get("location") == "offsite" or key in offsite_keys
+            sp = (r["source"] or "").split("/")[0]; dp = (r["dest"] or "").split("/")[0]
+            if sp:
+                pools.add((key[0], sp))
+            if dp:
+                pools.add((dest_agent.get(key, "@offsite") if far else key[0], dp))
+            if far:
                 offsite = 1
         copies = media = len(pools)
         rem = None                          # freshest confirmed removable across any name in the group
@@ -1822,12 +1837,15 @@ def _subpath_conflict(conn, agent, removable, dataset, sub):
             return f"folder '{sub}' overlaps '{other}' (dataset {L['dataset']}) - datasets must not nest"
     return None
 
-def _link_confirm(conn, agent, removable, dataset, dest_subpath, now):
+def _link_confirm(conn, agent, removable, dataset, dest_subpath, now, allow_plaintext=False):
+    # allow_plaintext is stored because the agent re-checks it before copying an encrypted dataset;
+    # once granted for a link, a later re-confirm without it doesn't take it away.
     conn.execute(
-        "INSERT INTO removable_links(agent,removable,dataset,dest_subpath,confirmed,updated_ts) "
-        "VALUES(?,?,?,?,1,?) ON CONFLICT(agent,removable,dataset) DO UPDATE SET confirmed=1, "
-        "dest_subpath=excluded.dest_subpath, updated_ts=excluded.updated_ts",
-        (agent, removable, dataset, (dest_subpath or "").strip("/"), now))
+        "INSERT INTO removable_links(agent,removable,dataset,dest_subpath,confirmed,updated_ts,allow_plaintext) "
+        "VALUES(?,?,?,?,1,?,?) ON CONFLICT(agent,removable,dataset) DO UPDATE SET confirmed=1, "
+        "dest_subpath=excluded.dest_subpath, updated_ts=excluded.updated_ts, "
+        "allow_plaintext=MAX(COALESCE(allow_plaintext,0),excluded.allow_plaintext)",
+        (agent, removable, dataset, (dest_subpath or "").strip("/"), now, 1 if allow_plaintext else 0))
     conn.commit()
 
 def _ds_source(conn, dataset):
@@ -1929,7 +1947,9 @@ async def removable_links_confirm(request: Request):
                                (int(body["id"]),)).fetchone()
             if row and _dataset_encrypted(conn, row["dataset"]) and not allow_plaintext:
                 raise HTTPException(409, ENC_REMOVABLE_MSG.format(ds=row["dataset"]))
-            conn.execute("UPDATE removable_links SET confirmed=1, updated_ts=? WHERE id=?", (now, int(body["id"])))
+            conn.execute("UPDATE removable_links SET confirmed=1, updated_ts=?, "
+                         "allow_plaintext=MAX(COALESCE(allow_plaintext,0),?) WHERE id=?",
+                         (now, 1 if allow_plaintext else 0, int(body["id"])))
             if row:
                 _log_link_event(conn, row["removable"], "link-confirmed",
                                 f"{_ds_source(conn, row['dataset'])} → {row['dest_subpath']}")
@@ -1949,7 +1969,7 @@ async def removable_links_confirm(request: Request):
         conflict = _subpath_conflict(conn, agent, removable, dataset, dest)
         if conflict:
             raise HTTPException(409, conflict)
-        _link_confirm(conn, agent, removable, dataset, dest, now)
+        _link_confirm(conn, agent, removable, dataset, dest, now, allow_plaintext)
         _log_link_event(conn, removable, "link-added", f"{_ds_source(conn, dataset)} → {dest.strip('/')}")
         conn.commit()
         return {"ok": True}
