@@ -11,6 +11,7 @@ import collector  # noqa: E402
 
 # ---- build_command ---------------------------------------------------------------------------
 def test_scrub_goes_through_the_sudo_wrapper(monkeypatch):
+    monkeypatch.setattr(collector.os, "geteuid", lambda: 1000)   # CI runs as root
     monkeypatch.delenv("CAIRN_ZPOOL_WRAPPER", raising=False)
     cmd, err = collector.build_command("scrub", {"name": "iwolf", "type": "zfs-local",
                                                  "source": "iwolf"}, {})
@@ -19,10 +20,17 @@ def test_scrub_goes_through_the_sudo_wrapper(monkeypatch):
 
 
 def test_scrub_honours_wrapper_env(monkeypatch):
+    monkeypatch.setattr(collector.os, "geteuid", lambda: 1000)
     monkeypatch.setenv("CAIRN_ZPOOL_WRAPPER", "/custom/wrap.sh")
     cmd, err = collector.build_command("scrub", {"name": "p", "type": "zfs-local",
                                                  "source": "p/child"}, {})
     assert err is None and cmd == ["sudo", "-n", "/custom/wrap.sh", "p"]  # pool root taken from source
+
+
+def test_root_agent_scrubs_without_sudo(monkeypatch):
+    monkeypatch.setattr(collector.os, "geteuid", lambda: 0)
+    cmd, err = collector.build_command("scrub", {"name": "p", "type": "zfs-local", "source": "p"}, {})
+    assert err is None and cmd == ["zpool", "scrub", "p"]
 
 
 def test_scrub_rejected_on_non_local():
