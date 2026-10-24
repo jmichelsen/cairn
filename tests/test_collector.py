@@ -11,6 +11,7 @@ import collector  # noqa: E402
 
 # ---- build_command ---------------------------------------------------------------------------
 def test_scrub_goes_through_the_sudo_wrapper(monkeypatch):
+    monkeypatch.setattr(collector.os, "geteuid", lambda: 1000)   # CI runs as root
     monkeypatch.delenv("CAIRN_ZPOOL_WRAPPER", raising=False)
     cmd, err = collector.build_command("scrub", {"name": "iwolf", "type": "zfs-local",
                                                  "source": "iwolf"}, {})
@@ -19,10 +20,17 @@ def test_scrub_goes_through_the_sudo_wrapper(monkeypatch):
 
 
 def test_scrub_honours_wrapper_env(monkeypatch):
+    monkeypatch.setattr(collector.os, "geteuid", lambda: 1000)
     monkeypatch.setenv("CAIRN_ZPOOL_WRAPPER", "/custom/wrap.sh")
     cmd, err = collector.build_command("scrub", {"name": "p", "type": "zfs-local",
                                                  "source": "p/child"}, {})
     assert err is None and cmd == ["sudo", "-n", "/custom/wrap.sh", "p"]  # pool root taken from source
+
+
+def test_root_agent_scrubs_without_sudo(monkeypatch):
+    monkeypatch.setattr(collector.os, "geteuid", lambda: 0)
+    cmd, err = collector.build_command("scrub", {"name": "p", "type": "zfs-local", "source": "p"}, {})
+    assert err is None and cmd == ["zpool", "scrub", "p"]
 
 
 def test_scrub_rejected_on_non_local():
@@ -824,7 +832,7 @@ def test_schedules_disabled_timer_reports_ok_not_warn(monkeypatch):
             return {"UnitFileState": "disabled", "ActiveState": "inactive", "Result": "success"}
         return {"Result": "success", "ExecMainStatus": "2"}   # a FAILED last run - must be ignored when off
     monkeypatch.setattr(collector, "_sd_show", fake_show)
-    monkeypatch.setattr(collector, "_syncoid_pairs", lambda: [("mcz/x", "iwolf/x")])
+    monkeypatch.setattr(collector, "_syncoid_pairs", lambda *a: [("mcz/x", "iwolf/x")])
     monkeypatch.setattr(collector, "_timer_oncalendar", lambda u: "*-*-* 00:00:00")
     monkeypatch.setattr(collector, "_pretty_cal", lambda s: s)
     monkeypatch.setattr(collector, "_last_run_journal", lambda s: ["CRITICAL ERROR: boom"])
@@ -1285,3 +1293,37 @@ def test_aide_summary_does_not_repeat_the_count(monkeypatch):
     st = collector.adapter_aide({"name": "aide", "type": "aide"}, {}, 0)[0]
     assert st["last_error"] == "2 unacknowledged integrity change(s)"
     assert json.loads(st["detail_json"])["summary"] == "oldest pending since 2026-10-09"
+
+
+def test_reachability_without_ssh_is_unknown_not_crit(monkeypatch):
+    monkeypatch.setattr(collector, "_have", lambda c: False)
+    monkeypatch.setattr(collector, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("ran ssh")))
+    st = collector.adapter_reachability({"name": "vault", "type": "reachability", "host": "vault"}, {}, 0)[0]
+    assert st["severity"] == "UNKNOWN" and "ssh" in st["last_error"]
+
+
+def test_kernel_log_fallback_honours_window(monkeypatch, tmp_path):
+    import datetime as _dt
+    now = int(_dt.datetime(2026, 10, 24, 12, 0, 0).timestamp())
+    log = tmp_path / "kern.log"
+    log.write_text("Oct 20 09:00:00 host kernel: sd 1:0:0:0: [sdb] I/O error, dev sdb\n"
+                   "2026-10-24T11:00:00.000000-06:00 host kernel: ata7: hard resetting link\n"
+                   "Oct 24 11:30:00 host kernel: blk_update_request: I/O error, dev sdc\n")
+    monkeypatch.setattr(collector, "run", lambda *a, **k: (1, "", "no journal"))
+    st = collector.adapter_kernel_errors({"name": "k", "type": "kernel-errors", "log_file": str(log),
+                                          "window_h": 24}, {}, now)[0]
+    assert json.loads(st["detail_json"])["errors"] == 2       # the Oct 20 line is outside 24h
+
+
+def test_schedules_custom_units_label_and_do_not_collide(monkeypatch):
+    monkeypatch.setattr(collector, "_sd_show", lambda u, p: {"UnitFileState": "enabled", "ActiveState": "active",
+                                                            "Result": "success", "ExecMainStatus": "0"})
+    monkeypatch.setattr(collector, "_timer_oncalendar", lambda u: "daily")
+    monkeypatch.setattr(collector, "_pretty_cal", lambda s: s)
+    monkeypatch.setattr(collector, "_last_run_journal", lambda s: [])
+    monkeypatch.setattr(collector, "_sd_epoch", lambda v: None)
+    units = [{"kind": "borg", "timer": "borg-home.timer", "service": "borg-home.service", "label": "borg home"},
+             {"kind": "borg", "timer": "borg-etc.timer", "service": "borg-etc.service", "label": "borg etc"}]
+    out = collector.adapter_schedules({"units": units}, collector.DEFAULT_THRESHOLDS, 1000)
+    assert [s["name_suffix"] for s in out] == ["borg-home", "borg-etc"]
+    assert [json.loads(s["detail_json"])["backs_up"] for s in out] == ["borg home", "borg etc"]

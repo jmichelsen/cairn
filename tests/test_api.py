@@ -603,3 +603,29 @@ def test_ack_silences_repeat_alerts_until_the_condition_changes(monkeypatch):
     worse = dict(crit, detail_json=json.dumps({"reasons": ["pool DEGRADED"]}))
     _report([worse], now + 120)
     assert sent == [("CRIT", "acked-pool: CRIT")]       # a different problem still alerts
+
+
+def test_scorecard_counts_same_named_pools_on_two_hosts_as_two_copies():
+    # home tank -> vault tank (a guaranteed pair): two machines, so 2 copies, not 1
+    _seed_repl("tankT", "tank/tankT", "tank/tankT", location=None, agent="local")
+    _seed_local("tankT", "tank/tankT", agent="vault")
+    card = {c["name"]: c for c in api.scorecard()["cards"]}["tankT"]
+    assert card["copies"] == 2 and card["offsite"] == 1 and card["onsite"] == 1
+
+
+def test_link_confirm_stores_allow_plaintext_and_keeps_it():
+    with api.db() as conn:
+        api._link_confirm(conn, "local", "extP", "PicsP", "cairn/PicsP", 1, allow_plaintext=True)
+        api._link_confirm(conn, "local", "extP", "PicsP", "cairn/PicsP", 2)   # re-confirm without it
+        row = conn.execute("SELECT allow_plaintext FROM removable_links WHERE removable='extP'").fetchone()
+    assert row["allow_plaintext"] == 1
+
+
+def test_api_token_is_not_seeded_as_admin(monkeypatch):
+    monkeypatch.delenv("CAIRN_ADMIN_TOKEN", raising=False)
+    monkeypatch.setenv("CAIRN_API_TOKEN", "agent-secret-not-admin")
+    api._seed_tokens()
+    with api.db() as conn:
+        row = conn.execute("SELECT role FROM auth_tokens WHERE hash=?",
+                           (api._hash("agent-secret-not-admin"),)).fetchone()
+    assert row is None

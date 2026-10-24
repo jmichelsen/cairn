@@ -11,7 +11,7 @@ Usage:
   collector.py [--once] [--db PATH] [--targets PATH] [--alert]
 Env (or /etc/cairn/cairn.env): CAIRN_DB, CAIRN_TARGETS, BORG_PASSPHRASE_*
 """
-import argparse, json, os, re, shlex, shutil, signal, sqlite3, subprocess, sys, time
+import argparse, datetime, json, os, re, shlex, shutil, signal, sqlite3, subprocess, sys, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -729,7 +729,9 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
             st["severity"] = worst(st["severity"], "CRIT")
             reasons.append("vdev I/O errors: " + ", ".join(f"{n}(r{r}/w{w}/c{c})" for n, r, w, c in over))
         # scrub age
-        cad = scrub_cad.get(pool, {"warn_d": defaults["scrub_warn_d"], "crit_d": defaults["scrub_crit_d"]})
+        # a per-pool entry may set only one of the two; the other keeps its default
+        cad = {"warn_d": defaults["scrub_warn_d"], "crit_d": defaults["scrub_crit_d"],
+               **(scrub_cad.get(pool) or {})}
         line, sepoch = zpool_scrub_ts(pool)
         st["last_scrub_ts"] = sepoch
         if line == "never":
@@ -806,8 +808,9 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
     user, groups = _whoami()
     wrapper = os.environ.get("CAIRN_ZPOOL_WRAPPER", "/opt/cairn/phase1/zpool-scrub.sh")
     _mp, _mperr = _mountpoint(ds)      # file-level recovery (Deleted/Versions/Restore) needs a real mount
-    caps = {"snapshot": (not pool_only) and zfs_delegated(ds, "snapshot", user, groups),
-            "scrub": (ds == pool) and can_sudo(wrapper),
+    root = os.geteuid() == 0           # root needs neither `zfs allow` nor sudo (zfs allow never lists it)
+    caps = {"snapshot": (not pool_only) and (root or zfs_delegated(ds, "snapshot", user, groups)),
+            "scrub": (ds == pool) and (root or can_sudo(wrapper)),
             "recoverable": (not pool_only) and _mperr is None,   # e.g. an unmounted pool can't be browsed
             "accept_errors": ds == pool and pool in pools and acceptable}
     _det = dict(reasons=reasons, snap_count=len(snaps), scrub=scrub_info, caps=caps)
@@ -855,7 +858,8 @@ def adapter_zfs_repl(t, defaults, now, pools):
                 # to send to: only Snapshot applies, and only with `zfs allow snapshot` on the source.
                 user, groups = _whoami()
                 _pd = dict(reasons=rs, paired=da, dst_on_agent=da, src_n=len(ssnaps),
-                           caps={"snapshot": zfs_delegated(src, "snapshot", user, groups), "sync": False})
+                           caps={"snapshot": os.geteuid() == 0 or zfs_delegated(src, "snapshot", user, groups),
+                                 "sync": False})
                 if t.get("fresh_src"):
                     _pd["fresh_src"] = t["fresh_src"]
                 st["detail_json"] = json.dumps(_pd)
@@ -1575,6 +1579,35 @@ def adapter_snapper(t, defaults, now):
     st["detail_json"] = json.dumps(dict(reasons=reasons, tool="snapper", config=cfg))
     return [st]
 
+def _log_ts(line, now):
+    """Epoch of a text log line's leading stamp: RFC 3339 (rsyslog's modern default) or classic
+    'Mon DD HH:MM:SS' (no year: assume this year, last year if that lands in the future). None if
+    the line has no stamp."""
+    head = line.split(" ", 1)[0]
+    try:
+        return int(datetime.datetime.fromisoformat(head).timestamp())
+    except ValueError:
+        pass
+    try:
+        year = datetime.datetime.fromtimestamp(now).year
+        d = datetime.datetime.strptime(f"{year} {line[:15]}", "%Y %b %d %H:%M:%S")
+        if d.timestamp() > now + DAY:
+            d = d.replace(year=year - 1)
+        return int(d.timestamp())
+    except ValueError:
+        return None
+
+def _since(lines, cutoff, now):
+    """Lines stamped at or after cutoff. An unstamped line (a continuation) follows the line before it."""
+    out, keep = [], True
+    for ln in lines:
+        ts = _log_ts(ln, now)
+        if ts is not None:
+            keep = ts >= cutoff
+        if keep:
+            out.append(ln)
+    return out
+
 def adapter_kernel_errors(t, defaults, now):
     """Scan the recent kernel log for disk I/O / link-reset / HBA-storm errors. This is the ONLY
     durable evidence when ZFS self-heals a transient (0B resilver, counters cleared) - e.g. a brief
@@ -1592,8 +1625,9 @@ def adapter_kernel_errors(t, defaults, now):
         for f in cands:
             if f and os.path.isfile(f):
                 try:
-                    lines = Path(f).read_text(errors="replace").splitlines()[-20000:]
-                    source = f"{f} (current file)"
+                    lines = _since(Path(f).read_text(errors="replace").splitlines()[-20000:],
+                                   now - win * 3600, now)
+                    source = f"{f} (last {win}h)"
                     break
                 except OSError:
                     continue
@@ -1635,6 +1669,8 @@ def adapter_reachability(t, defaults, now):
         return [dict(severity="UNKNOWN", last_error="reachability target needs 'host' (user@host)")]
     tries = int(t.get("tries", 3)); wait = int(t.get("retry_wait_s", 5))
     ctimeout = int(t.get("connect_timeout_s", 10)); probe = str(t.get("probe", "true"))
+    if not _have("ssh"):   # can't test, so not known down: no retries, no false CRIT
+        return [dict(severity="UNKNOWN", last_error="ssh client not installed")]
     cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={ctimeout}",
            "-p", str(t.get("port", 22))]
     if t.get("key"):
@@ -1900,8 +1936,8 @@ def _timer_oncalendar(timer):
             return m.group(1).strip()
     return None
 
-def _syncoid_pairs():
-    rc, o, _ = run(["systemctl", "cat", "syncoid.service"])
+def _syncoid_pairs(service="syncoid.service"):
+    rc, o, _ = run(["systemctl", "cat", service])
     pairs = []
     for ln in o.splitlines():
         m = re.search(r"ExecStart=-?\S*syncoid\s+(\S+)\s+(\S+)", ln)
@@ -1941,19 +1977,32 @@ def adapter_schedules(t, defaults, now):
         {"kind": "sanoid",  "timer": "sanoid.timer",  "service": "sanoid.service",  "label": "ZFS snapshots (sanoid)"},
     ]
     out = []
+    kinds = [sp["kind"] for sp in specs]
     for sp in specs:
+        # card suffix: the kind (keeps the default syncoid/sanoid card names), unless two units share a
+        # kind - then the timer name tells them apart, or an explicit `id` wins.
+        suffix = sp.get("id") or (sp["kind"] if kinds.count(sp["kind"]) == 1
+                                  else sp["timer"].removesuffix(".timer"))
         tp = _sd_show(sp["timer"], ["ActiveState", "UnitFileState", "NextElapseUSecRealtime",
                                     "LastTriggerUSec", "Result"])
         if not tp.get("UnitFileState") and not tp.get("ActiveState"):
             continue                                   # timer not installed on this host
-        st = dict(severity="OK", name_suffix=sp["kind"], last_error=None)
+        st = dict(severity="OK", name_suffix=suffix, last_error=None)
         detail = {"label": sp["label"],
                   "schedule": _pretty_cal(_timer_oncalendar(sp["timer"])) or "(schedule unknown)",
                   "next_ts": _sd_epoch(tp.get("NextElapseUSecRealtime")),
                   "last_ts": _sd_epoch(tp.get("LastTriggerUSec"))}
         st["last_run_ts"] = detail["last_ts"]
-        detail["backs_up"] = (", ".join(f"{s} → {d}" for s, d in _syncoid_pairs()) or "(no syncoid jobs configured)") \
-            if sp["kind"] == "syncoid" else "ZFS snapshots per sanoid.conf"
+        if sp.get("backs_up"):
+            detail["backs_up"] = sp["backs_up"]
+        elif sp["kind"] == "syncoid":
+            detail["backs_up"] = (", ".join(f"{s} → {d}" for s, d in _syncoid_pairs(sp.get("service") or
+                                                                                   "syncoid.service"))
+                                  or "(no syncoid jobs configured)")
+        elif sp["kind"] == "sanoid":
+            detail["backs_up"] = "ZFS snapshots per sanoid.conf"
+        else:
+            detail["backs_up"] = sp.get("label") or sp["kind"]
         # A DISABLED/masked timer is intentionally off - not a failure. Report OK with a note and do NOT
         # surface its last (possibly-failed) run or old journal errors: disabling a job you retired must
         # not keep nagging as a WARN.
@@ -2789,6 +2838,8 @@ def build_command(action, t, opts=None):
         # agent. Go through a root-owned, sudoers-pinned wrapper (same pattern as the SMART probe) that
         # hard-constrains to `zpool scrub <existing-pool>`. Provisioned by grant-access.sh --scrub.
         wrapper = os.environ.get("CAIRN_ZPOOL_WRAPPER", "/opt/cairn/phase1/zpool-scrub.sh")
+        if os.geteuid() == 0:            # a root agent scrubs directly; the wrapper may not be installed
+            return (["zpool", "scrub", pool], None)
         return (["sudo", "-n", wrapper, pool], None)
     if action == "pull":
         # Vault-side on-demand replication: pull THIS replica's set from home via the restricted key.

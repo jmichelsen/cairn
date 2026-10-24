@@ -137,7 +137,8 @@ targets:
 
   # --- scheduled jobs from systemd timers (default: syncoid replication + sanoid snapshots):
   #     what each backs up, its schedule, and next/last run. Read via systemctl, no root.
-  #     Override with `units:` (kind, timer, label required; service optional). ---
+  #     Override with `units:` (kind, timer, label required; service, backs_up, id optional). Two
+  #     units of one kind get their timer name as the card suffix unless `id` is set. ---
   - { name: schedules, type: schedules }
   # - { name: schedules, type: schedules,
   #     units: [ { kind: syncoid, timer: syncoid.timer, service: syncoid.service, label: "ZFS replication" } ] }
