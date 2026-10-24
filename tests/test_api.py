@@ -629,3 +629,26 @@ def test_api_token_is_not_seeded_as_admin(monkeypatch):
         row = conn.execute("SELECT role FROM auth_tokens WHERE hash=?",
                            (api._hash("agent-secret-not-admin"),)).fetchone()
     assert row is None
+
+
+def test_bound_agent_token_cannot_act_as_another_agent():
+    import asyncio
+    from fastapi import HTTPException
+    with api.db() as conn:
+        conn.execute("INSERT INTO auth_tokens(hash,role,kind,label,parent,created_ts,active) "
+                     "VALUES(?,'agent','access','vault-access-x','vault',1,1)", (api._hash("vault-tok"),))
+        conn.commit()
+    assert api._agent_binding("vault-tok") == "vault"
+    assert api._agent_binding("test-admin-token") is None
+    req = _req("/api/v1/backup/report", "POST", {},
+               json.dumps({"agent": "mclife", "ts": int(time.time()), "statuses": []}).encode())
+    req.state.agent_bound = "vault"
+    try:
+        asyncio.run(api.report(req))
+        raise AssertionError("a vault token reported as mclife")
+    except HTTPException as e:
+        assert e.status_code == 403
+    ok = _req("/api/v1/backup/report", "POST", {},
+              json.dumps({"agent": "vault", "ts": int(time.time()), "statuses": []}).encode())
+    ok.state.agent_bound = "vault"
+    assert asyncio.run(api.report(ok))["ok"] is True

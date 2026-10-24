@@ -124,10 +124,11 @@ Per-agent tokens are individual rows, so any one token can be revoked without to
 A dedicated, single-purpose **CI token** may push pipeline status to one route and nothing else, so
 it is safe to hand to CI.
 
-**Current limitation: agent tokens are not bound to an agent name.** The API trusts the `agent`
-field an agent declares in its report, and `GET /api/v1/backup/intents?agent=NAME` hands out the
-pending intents of whatever name is asked for. So any valid agent token can report as, or claim the
-intents of, any other agent. Treat every agent token as trusted for the whole deployment.
+**Enrolled agent tokens are bound to their agent name.** An access token traded for an enrollment
+secret carries that agent's name, and the API answers 403 when it reports as, polls or claims intents
+for, or finishes an intent of any other agent. Static `CAIRN_AGENT_TOKENS` and minted tokens carry no
+name and still act for any agent: give each agent its own enrollment secret where that matters. The
+recovery-manifest push is keyed by target name only and is not checked yet.
 
 <img src="img/viewer-readonly.png" width="640" alt="The dashboard in read-only viewer mode: a READ-ONLY badge and no action controls">
 

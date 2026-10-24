@@ -177,6 +177,22 @@ def _lookup_role(token):
         plain.execute("UPDATE auth_tokens SET last_used_ts=? WHERE hash=?", (now, h))
     return r["role"]
 
+def _agent_binding(token):
+    """The agent name an enrolled agent token is bound to (its enroll label, kept in `parent`), or None
+    for an unbound token: the static CAIRN_AGENT_TOKENS ones, admin, viewer."""
+    if not token:
+        return None
+    with db() as c:
+        r = c.execute("SELECT role,kind,parent FROM auth_tokens WHERE hash=? AND active=1",
+                      (_hash(token),)).fetchone()
+    return r["parent"] if r and r["role"] == "agent" and r["kind"] == "access" and r["parent"] else None
+
+def _own(request, name):
+    """403 unless the request's token may act as agent `name` (a bound token only as its own agent)."""
+    bound = getattr(request.state, "agent_bound", None)
+    if bound and name != bound:
+        raise HTTPException(403, f"this token belongs to agent '{bound}'")
+
 def _whoami(request):
     """The signed-in identity for audit trails: the username for a password session (stored in the
     session token's `parent`), else the token's label (e.g. 'bootstrap-admin'). None if unknown."""
@@ -213,6 +229,11 @@ async def auth_gate(request: Request, call_next):
         ok = role in ("admin", "viewer", "agent")
     elif p.startswith(AGENT_PATHS):
         ok = role in ("admin", "agent")
+        bound = _agent_binding(_extract_token(request)) if role == "agent" else None
+        request.state.agent_bound = bound
+        claimed = request.query_params.get("agent") or request.query_params.get("name")
+        if ok and bound and claimed and claimed != bound:
+            return JSONResponse({"detail": f"this token belongs to agent '{bound}'"}, status_code=403)
     elif p.startswith(ADMIN_ONLY_PATHS):
         ok = role == "admin"
     elif request.method in ("GET", "HEAD"):
@@ -1476,6 +1497,7 @@ async def report(request: Request):
     applog.count_writes()   # one row per report with counts ("INSERT status x18"), not every status row
     payload = await _json(request)
     agent = payload.get("agent", "unknown")
+    _own(request, agent)
     now = int(payload.get("ts") or time.time())
     can_exec = 1 if payload.get("can_execute") else 0
     interval = int(payload.get("interval") or 0) or None   # agent's own poll cadence (for staleness)
@@ -1601,6 +1623,12 @@ RECOVER_CACHE_TTL = int(os.environ.get("CAIRN_RECOVER_CACHE_TTL", "600"))
 # for due datasets each loop but only walks those older than this, so a nightly cadence is the default.
 RECOVER_WALK_INTERVAL = int(os.environ.get("CAIRN_RECOVER_WALK_INTERVAL", "86400"))
 
+def _own_intent(conn, request, iid):
+    """A bound agent token may only finish or update intents its own agent claimed."""
+    if getattr(request.state, "agent_bound", None):
+        r = conn.execute("SELECT claimed_by FROM intents WHERE id=?", (iid,)).fetchone()
+        _own(request, r["claimed_by"] if r else None)
+
 @app.post("/api/v1/backup/intents/{iid}/result")
 async def intent_result(iid: int, request: Request):
     """An agent reports an action's outcome. The API fires the action-outcome notification.
@@ -1609,6 +1637,7 @@ async def intent_result(iid: int, request: Request):
     ok = bool(body.get("ok"))
     state = "done" if ok else "failed"
     with db() as conn:
+        _own_intent(conn, request, iid)
         r = conn.execute("SELECT i.action, t.name AS target FROM intents i "
                          "LEFT JOIN targets t ON t.id=i.target_id WHERE i.id=?", (iid,)).fetchone()
         # Recovery listings can be large (many snapshots / a deleted scan / folder-wide versions); store
@@ -1636,6 +1665,7 @@ async def intent_progress(iid: int, request: Request):
     late progress post can't resurrect a finished intent. (auth: middleware - agent role)"""
     body = await _json(request)
     with db() as conn:
+        _own_intent(conn, request, iid)
         conn.execute("UPDATE intents SET progress=?,progress_ts=? WHERE id=? AND state='claimed'",
                      (json.dumps(body)[:1000], int(time.time()), iid))
         conn.commit()
@@ -1890,6 +1920,7 @@ async def agent_removable_links_push(request: Request):
     (auth: agent)"""
     body = await _json(request)
     agent = (body.get("agent") or "").strip(); removable = (body.get("removable") or "").strip()
+    _own(request, agent)
     if not agent or not removable:
         return JSONResponse({"detail": "agent + removable required"}, status_code=400)
     now = int(time.time()); op = body.get("op"); ds = (body.get("dataset") or "").strip()
