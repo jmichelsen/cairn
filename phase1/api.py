@@ -1470,6 +1470,7 @@ async def report(request: Request):
     alerts = []
     with db() as conn:
         _note_host_conflict(conn, agent, hostname, now)
+        acks = {a["target"]: a for a in conn.execute("SELECT target,sig,ts FROM acks").fetchall()}
         conn.execute("""INSERT INTO agents(name,can_execute,last_report_ts,report_interval,agent_version,hostname)
             VALUES(?,?,?,?,?,?)
             ON CONFLICT(name) DO UPDATE SET can_execute=excluded.can_execute,
@@ -1510,6 +1511,9 @@ async def report(request: Request):
                 _record_smart_day(conn, now, d)
             if sev in ("WARN", "CRIT"):
                 why = ", ".join(d.get("reasons", [])) or (s.get("last_error") or "")
+                a = acks.get(name)
+                if a and (now - a["ts"]) < ACK_TTL and _sig(sev, why) == a["sig"]:
+                    continue   # acknowledged: same condition stays quiet until it changes or the ack lapses
                 hint = d.get("notify_hint") or {}
                 kw = {}
                 if hint.get("force_gotify"):

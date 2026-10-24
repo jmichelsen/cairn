@@ -324,9 +324,9 @@ off-site copy, a stale removable drive, or a missing 3rd copy).
   installed), Accept errors (pool roots with error counts), Back up now (removable), AIDE Accept. Every click shows the exact command first; the
   **Dry-run** box in the top bar turns clicks into dry-runs. Results and live progress land in the
   **Activity** pane.
-- **Acknowledge** a WARN/CRIT to take it out of the header count until its reason changes or
-  `CAIRN_ACK_TTL` (14 days) passes. It does not stop the alert emails; those repeat per the
-  cooldowns in [Alerts](#alerts).
+- **Acknowledge** a WARN/CRIT to silence it until its reason changes or `CAIRN_ACK_TTL` (14 days)
+  passes: it leaves the header count and its alert emails and pushes stop repeating. A different
+  reason or a worse severity alerts again.
 - **Hide** a card you don't want (it stays hidden even while the agent reports it; unhide it
   from the Hidden pane). A target you remove from an agent's `targets.yaml` disappears on its own
   at the agent's next report. If two agents report the same dataset under the same name, a

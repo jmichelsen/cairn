@@ -1141,7 +1141,10 @@ def _removable_last_backup(t, pr):
             except (OSError, ValueError):
                 pass
         if stamps:
-            return max(stamps)
+            last = max(stamps)
+            if removable_state(t).get("last_backup_ts") != last:
+                removable_write_state(t, last_backup_ts=last)   # remembered for when the drive is unplugged
+            return last
     return removable_state(t).get("last_backup_ts")
 
 def spawn_detached(script, out_path, done_path):
@@ -1777,7 +1780,7 @@ def adapter_aide(t, defaults, now):
         st["severity"] = str(t.get("severity", "WARN")).upper()
         st["last_error"] = f"{n} unacknowledged integrity change(s)"
     st["detail_json"] = json.dumps({"label": t.get("label") or "File integrity (AIDE)",
-                                    "summary": (f"{n} change(s) awaiting review" if n
+                                    "summary": (f"oldest pending since {min(r['first'] for r in rows)}" if n
                                                 else "no unacknowledged changes"),
                                     "aide_pending": rows[:300], "aide_total": n})
     return [st]
