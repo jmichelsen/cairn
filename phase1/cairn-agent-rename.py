@@ -22,8 +22,9 @@ Run it ON THE API HOST, inside the API container, with the agent STOPPED:
 Refuses when the new name is already in use, or when the old agent reported recently (it would
 re-create the old name on its next report). A just-stopped agent looks the same, so after stopping it
 re-run with --force. Start the agent under the new name only after the rename succeeded: starting it
-first creates the new name as a separate, empty agent, and the rename then refuses. Tokens keep working: they
-aren't bound to the name, but the enrollment token's label is renamed too when it matches.
+first creates the new name as a separate, empty agent, and the rename then refuses. Tokens keep working: an
+enrolled agent's access tokens are bound to its name through `parent`, which is renamed with it, and the
+enrollment token's label is renamed too when it matches.
 
 Env: CAIRN_DB (default /data/cairn.db, the container's path)
 """
