@@ -1147,6 +1147,7 @@ def _patch_errs(monkeypatch, tmp_path, scrub_errors=0, data="No known data error
                                    "err_vdevs": list(vdevs)})
     sc = {"state": "finished", "scrub_errors": scrub_errors, "errors": data}
     monkeypatch.setattr(collector, "zpool_scrub_progress", lambda p: dict(sc))
+    monkeypatch.setattr(collector, "zed_error_events", lambda p, since: [])
 
 
 def _eval():
@@ -1275,6 +1276,78 @@ def test_accept_keeps_a_note(monkeypatch, tmp_path):
     collector.accept_pool_baseline("tank", 50000, note="  restored live copy; snapshots keep the bad block ")
     _, d = _eval()
     assert d["scrub"]["accepted"]["note"] == "restored live copy; snapshots keep the bad block"
+
+
+# ---- known bad blocks (ZED events) --------------------------------------------------------------
+def test_zed_events_parsed_per_pool(monkeypatch):
+    out = ("1000.5 h zed[1]: eid=1 class=checksum pool='tank' vdev=d1 size=131072 offset=4096 err=52 bookmark=9:77:0:12\n"
+           "1000.6 h zed[1]: eid=2 class=data pool='tank' priority=4 err=52 bookmark=8:77:0:12\n"
+           "1000.7 h zed[1]: eid=3 class=checksum pool='other' vdev=d9 offset=1 bookmark=1:1:0:1\n"
+           "1000.8 h zed[1]: eid=4 class=scrub_finish pool='tank'\n")
+    monkeypatch.setattr(collector, "_have", lambda c: True)
+    monkeypatch.setattr(collector, "run", lambda cmd, **k: (0, out, ""))
+    assert collector.zed_error_events("tank", 0) == [(1000.5, "off:4096"), (1000.6, "blk:77:0:12")]
+    monkeypatch.setattr(collector, "run", lambda cmd, **k: (0, "", "No journal files were opened due to insufficient permissions."))
+    assert collector.zed_error_events("tank", 0) is None
+
+
+def _known_block_pool(monkeypatch, tmp_path):
+    """tank with one bad block (offset 4096) accepted at ts 50000, c=2 on both disks."""
+    v = [("disk-a", "0", "0", "2"), ("disk-b", "0", "0", "2")]
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=1, vdevs=v)
+    monkeypatch.setattr(collector, "zed_error_events", lambda p, since: [(40000.0, "off:4096"), (40000.0, "blk:77:0:12")])
+    msg = collector.accept_pool_baseline("tank", 50000)
+    assert "1 known bad block(s)" in msg
+
+
+def test_known_bad_block_reread_does_not_alert(monkeypatch, tmp_path):
+    _known_block_pool(monkeypatch, tmp_path)
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=1, vdevs=[("disk-a", "0", "0", "3"), ("disk-b", "0", "0", "3")])
+    monkeypatch.setattr(collector, "zed_error_events", lambda p, since: [(90000.0, "off:4096")])
+    st, d = _eval()
+    assert st["severity"] == "OK" and d["reasons"] == []
+    assert "1 known bad block(s), re-read again" in d["scrub"]["accepted"]["items"]
+    assert collector.pool_baseline("tank")["vdevs"]["disk-a"] == [0, 0, 3]
+    # the next scrub re-reads it again: still quiet
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=1, vdevs=[("disk-a", "0", "0", "4"), ("disk-b", "0", "0", "4")])
+    monkeypatch.setattr(collector, "zed_error_events", lambda p, since: [(100090.0, "off:4096")])
+    import json
+    st = collector.adapter_zfs_local(_local(), collector.DEFAULT_THRESHOLDS, {}, 100100, POOLS)[0]
+    assert st["severity"] == "OK", json.loads(st["detail_json"])["reasons"]
+
+
+def test_a_different_bad_block_alerts_until_accepted(monkeypatch, tmp_path):
+    _known_block_pool(monkeypatch, tmp_path)
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=2, vdevs=[("disk-a", "0", "0", "4"), ("disk-b", "0", "0", "4")])
+    monkeypatch.setattr(collector, "zed_error_events", lambda p, since: [(90000.0, "off:4096"), (90001.0, "off:8192")])
+    st, d = _eval()
+    assert st["severity"] == "CRIT"
+    assert "errors in 1 block(s) besides the accepted bad block(s)" in d["reasons"]
+    assert d["caps"]["accept_errors"] is True
+    # it stays loud even once the journal no longer shows it
+    monkeypatch.setattr(collector, "zed_error_events", lambda p, since: [])
+    st, _ = _eval()
+    assert st["severity"] == "CRIT"
+    monkeypatch.setattr(collector, "zed_error_events", lambda p, since: [(90001.0, "off:8192")])
+    collector.accept_pool_baseline("tank", 100050)
+    assert collector.pool_baseline("tank")["known"] == ["blk:77:0:12", "off:4096", "off:8192"]
+
+
+def test_a_rise_without_a_known_block_event_still_alerts(monkeypatch, tmp_path):
+    _known_block_pool(monkeypatch, tmp_path)
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=1, vdevs=[("disk-a", "0", "0", "3"), ("disk-b", "0", "0", "2")])
+    monkeypatch.setattr(collector, "zed_error_events", lambda p, since: None)     # journal unreadable
+    st, d = _eval()
+    assert st["severity"] == "CRIT" and any(r.startswith("vdev I/O errors: disk-a") for r in d["reasons"])
+
+
+def test_read_errors_are_never_explained_by_a_known_block(monkeypatch, tmp_path):
+    _known_block_pool(monkeypatch, tmp_path)
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=1, vdevs=[("disk-a", "1", "0", "3"), ("disk-b", "0", "0", "3")])
+    monkeypatch.setattr(collector, "zed_error_events", lambda p, since: [(90000.0, "off:4096")])
+    st, d = _eval()
+    assert st["severity"] == "CRIT" and any("disk-a(r1/w0/c3)" in r for r in d["reasons"])
+    assert not any("disk-b" in r for r in d["reasons"])
 
 
 def test_removable_remembers_last_backup_for_when_it_is_unplugged(tmp_path):
