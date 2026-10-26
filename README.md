@@ -569,6 +569,14 @@ blank to keep the route closed.
   notes what was accepted and when, and any count above them alerts as before. The baseline lowers
   itself when a count drops (a clean scrub, `zpool clear`, a reboot), so errors that come back from
   there alert again; it only rises when you accept again.
+- **Accepted bad blocks stay quiet, new ones don't.** Every scrub re-reads a known bad block, so the
+  CKSUM counters keep climbing past any baseline. Accept therefore also records which blocks are bad,
+  from ZED's checksum and data events in the journal over the last 35 days (a block is identified by its
+  disk offset, the same on every mirror side and in every snapshot). After that, a rise in CKSUM, scrub
+  or data errors is rebased quietly when the only blocks failing are the accepted ones. A checksum or
+  data error in any other block alerts and keeps alerting until you accept it, even after the journal
+  rotates. READ and WRITE errors are never explained this way. With no readable journal (no
+  `journalctl`, or the agent's user can't see system logs) every rise alerts, as before.
 - **The pool card lists the damaged files.** When a pool has scrub or data errors, the card shows which
   files they are in, from `zpool status -v` (via `sudo -n` when allowed, since non-root ZFS lists only
   object numbers), grouped per file: "live file + 1,575 snapshots" instead of 1,576 lines. `zpool

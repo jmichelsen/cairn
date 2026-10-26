@@ -436,6 +436,65 @@ def pool_error_files(pool, now, active):
     except (OSError, ValueError):
         return None
 
+# ---- known bad blocks -------------------------------------------------------------------------
+# A permanently bad block held by kept snapshots is re-read by every scrub, so the vdev checksum
+# counters keep climbing past any accepted baseline. Accept therefore also records WHICH blocks are
+# bad, from ZED's checksum/data events in the journal: a checksum event names the block by its vdev
+# offset (the same on every mirror side and in every snapshot), a data event by object:level:blkid.
+# A later rise is "explained" (rebased quietly) only when every new event is one of those blocks.
+# Any other block failing is remembered as unexplained and keeps alerting until accepted.
+KNOWN_BLOCK_WINDOW_D = 35      # accept looks back this far for the blocks currently failing
+
+def zed_error_events(pool, since_ts):
+    """[(ts, key)] for the pool's ZED checksum/data events since `since_ts`, oldest first; None when
+    the journal can't be read (no journalctl, no permission). key = 'off:<offset>' for a checksum
+    event, 'blk:<object>:<level>:<blkid>' for a data event (the objset varies per snapshot)."""
+    if not _have("journalctl"):
+        return None
+    rc, out, err = run(["journalctl", "-t", "zed", "-o", "short-unix", "--no-pager",
+                        "--since", f"@{int(since_ts)}"], timeout=60)
+    if rc != 0 or "insufficient permissions" in (err or "") or "not seeing messages" in (err or ""):
+        return None
+    ev = []
+    for ln in out.splitlines():
+        kv = dict(re.findall(r"(\w+)=('[^']*'|\S+)", ln))
+        if kv.get("class") not in ("checksum", "data") or kv.get("pool", "").strip("'") != pool:
+            continue
+        try:
+            ts = float(ln.split(None, 1)[0])
+        except ValueError:
+            continue
+        if kv["class"] == "checksum" and kv.get("offset", "").isdigit():
+            ev.append((ts, f"off:{kv['offset']}"))
+        elif kv["class"] == "data" and kv.get("bookmark", "").count(":") == 3:
+            ev.append((ts, "blk:" + kv["bookmark"].split(":", 1)[1]))
+    return ev
+
+def _scan_known_blocks(pool, base, now):
+    """Fold new ZED events into the baseline's known-block state. Returns True when it changed."""
+    if not base.get("known"):
+        return False
+    ev = zed_error_events(pool, base.get("ev_ts") or base.get("accepted_ts") or now)
+    if ev is None:
+        return False
+    known, unexp = set(base["known"]), set(base.get("unexplained") or [])
+    hit = base.get("known_hit_ts") or 0
+    for ts, key in ev:
+        if key in known:
+            hit = max(hit, ts)
+        else:
+            unexp.add(key)
+    new = {"unexplained": sorted(unexp), "known_hit_ts": hit, "ev_ts": int(now) - 300}
+    changed = any(base.get(k) != v for k, v in new.items() if k != "ev_ts")
+    base.update(new)                    # 5 min overlap: a late-logged event is still seen next time
+    return changed
+
+def _rise_explained(base):
+    """True when error counts above the baseline are all re-reads of accepted bad blocks: a known
+    block failed again since the counts were last rebased, and no other block has failed."""
+    return bool(base.get("known")) and not base.get("unexplained") \
+        and (base.get("known_hit_ts") or 0) > (base.get("counts_ts") or base.get("accepted_ts") or 0)
+
 def accept_pool_baseline(pool, now, note=None):
     """Store the pool's current error state as its accepted baseline. Returns a human summary."""
     cur = pool_error_counts(pool)
@@ -445,11 +504,17 @@ def accept_pool_baseline(pool, now, note=None):
     cur["accepted_ts"] = int(now)
     if note and str(note).strip():
         cur["note"] = str(note).strip()[:300]
+    ev = zed_error_events(pool, now - KNOWN_BLOCK_WINDOW_D * DAY) or []
+    known = sorted(set(pool_baseline(pool).get("known") or []) | {k for _, k in ev})
+    if known:
+        cur.update(known=known, unexplained=[], ev_ts=int(now), known_hit_ts=0)
     pool_write_baseline(pool, cur)
     vd = ", ".join(f"{n}(r{r}/w{w}/c{c})" for n, (r, w, c) in cur["vdevs"].items())
+    nb = len([k for k in known if k.startswith("off:")])
     return (f"accepted as {pool}'s baseline: {cur['scrub_errors']} scrub error(s), "
             f"{cur['data_errors']} data error(s)" + (f", vdev counters {vd}" if vd else "")
-            + ". Only counts above these will alert.")
+            + (f", {nb} known bad block(s) that may fail again" if nb else "")
+            + ". Only counts above these, or errors in any other block, will alert.")
 
 def _vdev_over(cur, base):
     """True when any of r/w/c is above the accepted value (unparseable counts never pass)."""
@@ -713,11 +778,17 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
             st["severity"] = worst(st["severity"], "CRIT")
             reasons.append("vdev not ONLINE: " + ", ".join(f"{n}={s}" for n, s in det["bad_vdevs"]))
         base = pool_baseline(pool); bvd = base.get("vdevs") or {}
-        accepted, rebased = [], False
+        rebased = _scan_known_blocks(pool, base, now)
+        explained = _rise_explained(base)
+        accepted, reread = [], False
         over = []
         for n, r, w, c in det["err_vdevs"]:
             cur = [_zcount(r), _zcount(w), _zcount(c)]
-            if n in bvd and not _vdev_over(cur, bvd[n]):
+            ok = n in bvd and not _vdev_over(cur, bvd[n])
+            if not ok and explained and n in bvd and None not in cur and cur[0] <= bvd[n][0] \
+                    and cur[1] <= bvd[n][1]:
+                ok = reread = True            # only checksums rose, from a known block: no alert
+            if ok:
                 accepted.append(f"{n}(r{r}/w{w}/c{c})")
                 if cur != bvd[n]:
                     bvd[n] = cur; rebased = True
@@ -746,6 +817,8 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
         scrub_info = zpool_scrub_progress(pool)
         errline = scrub_info.get("errors")
         nde = _data_error_count(errline)
+        if explained and nde is not None and nde > (base.get("data_errors") or 0):
+            base["data_errors"] = nde; rebased = reread = True
         if nde is None or nde > (base.get("data_errors") or 0):
             st["severity"] = worst(st["severity"], "CRIT"); reasons.append("data errors: " + errline)
         elif nde:
@@ -753,6 +826,8 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
         if base and nde is not None and nde < (base.get("data_errors") or 0):
             base["data_errors"] = nde; rebased = True
         nse = scrub_info.get("scrub_errors") or 0
+        if explained and nse > (base.get("scrub_errors") or 0):
+            base["scrub_errors"] = nse; rebased = reread = True
         if nse > (base.get("scrub_errors") or 0):
             st["severity"] = worst(st["severity"], "CRIT")
             reasons.append(f"last scrub found {nse} error(s)"
@@ -761,6 +836,16 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
             accepted.append(f"{nse} scrub error(s)")
         if base and nse < (base.get("scrub_errors") or 0):
             base["scrub_errors"] = nse; rebased = True
+        if base.get("unexplained"):
+            st["severity"] = worst(st["severity"], "CRIT")
+            reasons.append(f"errors in {len(base['unexplained'])} block(s) besides the accepted bad block(s)")
+        elif base.get("known"):
+            nb = len([k for k in base["known"] if k.startswith("off:")])
+            accepted.append(f"{nb} known bad block(s)" + (", re-read again" if reread else ""))
+        if not det["err_vdevs"] and not nse and not nde and base.get("unexplained"):
+            base["unexplained"] = []; rebased = True       # counts cleared: start the watch over
+        if reread:
+            base["counts_ts"] = int(now)
         if base and rebased:
             base["vdevs"] = bvd; pool_write_baseline(pool, base)
         if accepted:
@@ -770,7 +855,7 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
             scrub_info["error_files"] = ef
         # something a human could accept as the new baseline (any error count above it)
         acceptable = bool(over) or (nde is not None and nde > (base.get("data_errors") or 0)) \
-            or nse > (base.get("scrub_errors") or 0)
+            or nse > (base.get("scrub_errors") or 0) or bool(base.get("unexplained"))
     # A pool root that sanoid leaves alone (use_template=ignore / process_children_only) is only a
     # container for its child datasets: report pool health and nothing about the root dataset itself
     # (no freshness, no snapshot/recovery actions, no "sanoid monitor=no" note on every alert).
