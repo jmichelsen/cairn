@@ -780,17 +780,20 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
         base = pool_baseline(pool); bvd = base.get("vdevs") or {}
         rebased = _scan_known_blocks(pool, base, now)
         explained = _rise_explained(base)
+        # live scrub progress (%, ETA) + bottom-line data-error state, for the pool card + Scrub button
+        scrub_info = zpool_scrub_progress(pool)
+        scrubbing = scrub_info.get("state") == "in_progress"
         accepted, reread = [], False
         over = []
         for n, r, w, c in det["err_vdevs"]:
             cur = [_zcount(r), _zcount(w), _zcount(c)]
             ok = n in bvd and not _vdev_over(cur, bvd[n])
-            if not ok and explained and n in bvd and None not in cur and cur[0] <= bvd[n][0] \
-                    and cur[1] <= bvd[n][1]:
+            bv = bvd.get(n) or [0, 0, 0]      # a disk missing from the baseline had zero counts
+            if not ok and explained and None not in cur and cur[0] <= bv[0] and cur[1] <= bv[1]:
                 ok = reread = True            # only checksums rose, from a known block: no alert
             if ok:
                 accepted.append(f"{n}(r{r}/w{w}/c{c})")
-                if cur != bvd[n]:
+                if cur != bvd.get(n):
                     bvd[n] = cur; rebased = True
             else:
                 over.append((n, r, w, c))
@@ -813,8 +816,6 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
                 st["severity"] = worst(st["severity"], "CRIT"); reasons.append(f"scrub {age_d}d>={cad['crit_d']}")
             elif age_d >= cad["warn_d"]:
                 st["severity"] = worst(st["severity"], "WARN"); reasons.append(f"scrub {age_d}d>={cad['warn_d']}")
-        # live scrub progress (%, ETA) + bottom-line data-error state, for the pool card + Scrub button
-        scrub_info = zpool_scrub_progress(pool)
         errline = scrub_info.get("errors")
         nde = _data_error_count(errline)
         if explained and nde is not None and nde > (base.get("data_errors") or 0):
@@ -834,8 +835,8 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
                            + (f" (accepted baseline {base['scrub_errors']})" if base.get("scrub_errors") else ""))
         elif nse:
             accepted.append(f"{nse} scrub error(s)")
-        if base and nse < (base.get("scrub_errors") or 0):
-            base["scrub_errors"] = nse; rebased = True
+        if base and nse < (base.get("scrub_errors") or 0) and not scrubbing:
+            base["scrub_errors"] = nse; rebased = True     # mid-scrub the count isn't shown, not 0
         if base.get("unexplained"):
             st["severity"] = worst(st["severity"], "CRIT")
             reasons.append(f"errors in {len(base['unexplained'])} block(s) besides the accepted bad block(s)")
@@ -844,8 +845,9 @@ def adapter_zfs_local(t, defaults, scrub_cad, now, pools):
             accepted.append(f"{nb} known bad block(s)" + (", re-read again" if reread else ""))
         if not det["err_vdevs"] and not nse and not nde and base.get("unexplained"):
             base["unexplained"] = []; rebased = True       # counts cleared: start the watch over
-        if reread:
-            base["counts_ts"] = int(now)
+        if (reread or explained) and not scrubbing:
+            # the hit is used up once counts settle; a running scrub's hit still covers its finish
+            base["counts_ts"] = int(now); rebased = True
         if base and rebased:
             base["vdevs"] = bvd; pool_write_baseline(pool, base)
         if accepted:

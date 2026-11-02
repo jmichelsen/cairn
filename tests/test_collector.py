@@ -1350,6 +1350,32 @@ def test_read_errors_are_never_explained_by_a_known_block(monkeypatch, tmp_path)
     assert not any("disk-b" in r for r in d["reasons"])
 
 
+def test_known_block_hit_mid_scrub_covers_the_scrub_finish(monkeypatch, tmp_path):
+    # mcz 2026-11-02: accepted with counters cleared (no vdevs) and 1 scrub error; the next scrub
+    # re-read the known block mid-way, then finished with the same 1 error hours later
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=1)
+    monkeypatch.setattr(collector, "zed_error_events", lambda p, since: [(40000.0, "off:4096")])
+    collector.accept_pool_baseline("tank", 50000)
+    v = [("disk-a", "0", "0", "2"), ("disk-b", "0", "0", "2")]
+    _patch_errs(monkeypatch, tmp_path, vdevs=v)
+    monkeypatch.setattr(collector, "zpool_scrub_progress",
+                        lambda p: {"state": "in_progress", "pct": 40.0, "errors": "No known data errors"})
+    monkeypatch.setattr(collector, "zed_error_events", lambda p, since: [(90000.0, "off:4096")])
+    import json
+    for now in (90010, 95000):
+        st = collector.adapter_zfs_local(_local(), collector.DEFAULT_THRESHOLDS, {}, now, POOLS)[0]
+        assert st["severity"] == "OK", json.loads(st["detail_json"])["reasons"]
+    assert collector.pool_baseline("tank")["scrub_errors"] == 1      # not lowered mid-scrub
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=1, vdevs=v)
+    monkeypatch.setattr(collector, "zed_error_events", lambda p, since: [(90000.0, "off:4096")])
+    st = collector.adapter_zfs_local(_local(), collector.DEFAULT_THRESHOLDS, {}, 100000, POOLS)[0]
+    assert st["severity"] == "OK", json.loads(st["detail_json"])["reasons"]
+    # the hit is used up once the scrub is done: a later rise with no new event alerts
+    _patch_errs(monkeypatch, tmp_path, scrub_errors=1, vdevs=[("disk-a", "0", "0", "3"), ("disk-b", "0", "0", "2")])
+    st = collector.adapter_zfs_local(_local(), collector.DEFAULT_THRESHOLDS, {}, 110000, POOLS)[0]
+    assert st["severity"] == "CRIT"
+
+
 def test_removable_remembers_last_backup_for_when_it_is_unplugged(tmp_path):
     mount = tmp_path / "drive"
     d = mount / "cairn" / "mclife" / "mcz_mclife_Pics"; d.mkdir(parents=True)
