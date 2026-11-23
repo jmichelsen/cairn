@@ -51,6 +51,7 @@ and replication **pair cards** that merge a source and its off-site copy into on
 | [docs/getting-started.md](docs/getting-started.md) | **New to ZFS / sanoid / cairn? Start here:** the pieces, then a step-by-step setup with checks |
 | This README | Install, concepts, the dashboard, accounts, alerts, updating |
 | [docs/targets.md](docs/targets.md) | **Every target type and key** you can put in `targets.yaml` |
+| [docs/remote-access.md](docs/remote-access.md) | Reaching cairn from away: HTTPS with Let's Encrypt behind a reverse proxy (what the Android app needs) |
 | [AGENT.md](AGENT.md) | The agent: tokens, settings, actions, dry-run, recovery, troubleshooting |
 | [docs/architecture.md](docs/architecture.md) | How the pieces fit: control plane, intents, auth, pairing, the off-site pull |
 | [replication/README.md](replication/README.md) | The vault's nightly pull and how its SSH key is locked down |
@@ -526,6 +527,9 @@ it like any other token). The code lists every address the phone should try, mos
 CAIRN_LAN_URL=http://192.0.2.10:8929       # optional: added first, so the phone prefers the LAN
 CAIRN_PUBLIC_URL=https://cairn.example.com # optional: added last; the page's own address is always included
 ```
+
+The public address needs HTTPS with a publicly trusted certificate: the app refuses self-signed ones.
+[docs/remote-access.md](docs/remote-access.md) sets one up with Let's Encrypt.
 
 **LAN discovery:** the app finds cairn on the local network through `GET /api/v1/identify` (public,
 no secrets) and a subnet scan. For a faster mDNS (`_cairn._tcp`) advert, set `CAIRN_MDNS=1` on the

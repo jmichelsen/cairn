@@ -60,7 +60,8 @@ It installs what's missing (docker or podman, python3-yaml, sanoid, ...), starts
   (`source_agent`); change it later with `./install.sh --rename-agent NEW`, never by hand.
 - **the URL a vault uses to reach this home**: blank means this box's LAN address
   (`http://<LAN ip>:8929`), fine when the vault shares the LAN; an off-site vault needs a URL it
-  can reach (a proxy hostname or VPN address).
+  can reach (a proxy hostname or VPN address). To set up that proxy with HTTPS, see
+  [remote-access.md](remote-access.md).
 
 It may ask to add a vault right away; you can say no and do step 5 later.
 
