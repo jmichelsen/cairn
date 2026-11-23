@@ -2704,12 +2704,12 @@ button.scrubbtn[disabled]{opacity:.6;cursor:progress}
 .card .src{font-family:"Roboto Mono";font-size:11.5px;color:var(--mut);margin-top:3px;line-height:1.5}
 .card .src .spath{overflow-wrap:break-word;word-break:break-word}
 .card .src .smetarow{margin-top:1px}
-.card .src .smeta{white-space:nowrap}
+.card .src .smeta{display:inline-block;max-width:100%;overflow-wrap:anywhere}  /* short metas stay whole; a long one (an accepted vdev list) wraps inside the card */
 .card .src .psz{color:var(--ink);font-weight:700;white-space:nowrap}
 .card .row{display:flex;gap:16px;margin-top:12px;flex-wrap:wrap}
 .card .mv{font-family:"Roboto Mono";font-weight:500;font-size:16px}
 .card .ml{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}
-.card .why{color:var(--mut);font-size:12px;margin-top:11px;line-height:1.4}
+.card .why{color:var(--mut);font-size:12px;margin-top:11px;line-height:1.4;overflow-wrap:anywhere}
 .cact{display:flex;gap:6px;margin-top:13px;flex-wrap:wrap}
 .cact button{appearance:none;font:600 11.5px/1 "Red Hat Text";border:1px solid var(--line);
   background:var(--surf);color:var(--acc2);border-radius:7px;padding:7px 10px;cursor:pointer}
